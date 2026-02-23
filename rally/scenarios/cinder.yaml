@@ -1,0 +1,86 @@
+---
+# ==============================================================================
+# Cinder (Block Storage Service) - Rally Test Scenarios
+# ==============================================================================
+
+CinderVolumes.create_and_delete_volume:
+  -
+    args:
+      size: 1
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+CinderVolumes.create_and_list_volume:
+  -
+    args:
+      size: 1
+      detailed: true
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+CinderVolumes.create_volume_and_clone:
+  -
+    args:
+      size: 1
+    runner:
+      type: constant
+      times: 2
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+CinderVolumes.create_and_delete_snapshot:
+  -
+    args:
+      force: false
+    runner:
+      type: constant
+      times: 2
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      volumes:
+        size: 1
+        volumes_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+CinderQos.create_and_list_qos:
+  -
+    args:
+      consumer: "front-end"
+      write_iops_sec: "10"
+      read_iops_sec: "1000"
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    sla:
+      failure_rate:
+        max: 0

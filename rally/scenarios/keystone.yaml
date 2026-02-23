@@ -1,0 +1,120 @@
+---
+# ==============================================================================
+# Keystone (Identity Service) - Rally Test Scenarios
+# ==============================================================================
+
+KeystoneBasic.create_and_list_users:
+  -
+    runner:
+      type: constant
+      times: 5
+      concurrency: 2
+    sla:
+      failure_rate:
+        max: 0
+
+KeystoneBasic.create_delete_user:
+  -
+    runner:
+      type: constant
+      times: 5
+      concurrency: 2
+    sla:
+      failure_rate:
+        max: 0
+
+KeystoneBasic.create_and_list_tenants:
+  -
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    sla:
+      failure_rate:
+        max: 0
+
+KeystoneBasic.create_user_set_enabled_and_delete:
+  -
+    args:
+      enabled: true
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    sla:
+      failure_rate:
+        max: 0
+
+KeystoneBasic.create_and_list_services:
+  -
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    sla:
+      failure_rate:
+        max: 0
+
+Authenticate.validate_glance:
+  -
+    args:
+      repetitions: 2
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+Authenticate.validate_nova:
+  -
+    args:
+      repetitions: 2
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+Authenticate.validate_cinder:
+  -
+    args:
+      repetitions: 2
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0
+
+Authenticate.validate_neutron:
+  -
+    args:
+      repetitions: 2
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+    sla:
+      failure_rate:
+        max: 0

@@ -1,0 +1,81 @@
+---
+# ==============================================================================
+# Swift (Object Storage Service) - Rally Test Scenarios
+# ==============================================================================
+
+SwiftObjects.create_container_and_object_then_delete_all:
+  -
+    args:
+      objects_per_container: 2
+      object_size: 1024
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      roles:
+        - admin
+    sla:
+      failure_rate:
+        max: 0
+
+SwiftObjects.create_container_and_object_then_list_objects:
+  -
+    args:
+      objects_per_container: 3
+      object_size: 1024
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      roles:
+        - admin
+    sla:
+      failure_rate:
+        max: 0
+
+SwiftObjects.list_objects_in_containers:
+  -
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      roles:
+        - admin
+      swift_objects:
+        containers_per_tenant: 1
+        objects_per_container: 2
+        object_size: 1024
+    sla:
+      failure_rate:
+        max: 0
+
+SwiftObjects.create_container_and_object_then_download_object:
+  -
+    args:
+      objects_per_container: 1
+      object_size: 2048
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      roles:
+        - admin
+    sla:
+      failure_rate:
+        max: 0

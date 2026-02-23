@@ -1,0 +1,124 @@
+# ==============================================================================
+# Prometheus Alert Rules for Rally OpenStack Monitor
+# ==============================================================================
+# Add this file to your existing Prometheus alerting rules configuration.
+# In prometheus.yml, add under rule_files:
+#   - "rally_alerts.yml"
+
+groups:
+  - name: rally_cleanup
+    rules:
+      # -----------------------------------------------------------------------
+      # CLEANUP FAILURES - Critical: orphaned resources detected
+      # -----------------------------------------------------------------------
+      - alert: RallyCleanupFailure
+        expr: rally_cleanup_failure == 1
+        for: 5m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "Rally cleanup failed for {{ $labels.service }}"
+          description: |
+            Rally cleanup has failed for the {{ $labels.service }} service.
+            Orphaned resources have been detected that were not properly
+            cleaned up after a test run. Immediate action required to
+            prevent resource leaks.
+          runbook: "Check orphaned resources with: openstack server list --all-projects | grep s_rally"
+
+      # -----------------------------------------------------------------------
+      # ORPHANED RESOURCE COUNT - Warning when resources accumulate
+      # -----------------------------------------------------------------------
+      - alert: RallyOrphanedResourcesHigh
+        expr: rally_orphaned_resources > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "High orphaned resource count: {{ $labels.service }}/{{ $labels.resource_type }}"
+          description: |
+            {{ $value }} orphaned Rally resources detected for
+            {{ $labels.service }} ({{ $labels.resource_type }}).
+            These resources may need manual cleanup.
+
+  - name: rally_tests
+    rules:
+      # -----------------------------------------------------------------------
+      # TEST FAILURES - Warning: a Rally scenario failed
+      # -----------------------------------------------------------------------
+      - alert: RallyTestFailure
+        expr: rally_task_success == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally test failed: {{ $labels.service }}/{{ $labels.scenario }}"
+          description: |
+            The Rally scenario {{ $labels.scenario }} for service
+            {{ $labels.service }} has failed. This may indicate an issue
+            with the OpenStack cloud.
+
+      # -----------------------------------------------------------------------
+      # SERVICE DOWN - Critical: entire service is failing
+      # -----------------------------------------------------------------------
+      - alert: RallyServiceDown
+        expr: rally_service_status == 0
+        for: 10m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "OpenStack service failing Rally tests: {{ $labels.service }}"
+          description: |
+            All Rally tests for the {{ $labels.service }} service are failing.
+            This likely indicates a service outage or major degradation.
+
+      # -----------------------------------------------------------------------
+      # SLA BREACH - Warning: SLA criteria not met
+      # -----------------------------------------------------------------------
+      - alert: RallySLABreach
+        expr: rally_task_sla_passed == 0
+        for: 5m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally SLA breach: {{ $labels.service }}/{{ $labels.scenario }}"
+          description: |
+            The SLA criteria for {{ $labels.scenario }} ({{ $labels.service }})
+            have not been met. Check for performance degradation.
+
+  - name: rally_staleness
+    rules:
+      # -----------------------------------------------------------------------
+      # STALE RESULTS - Warning: tests haven't run recently
+      # -----------------------------------------------------------------------
+      - alert: RallyStaleResults
+        expr: (time() - rally_last_run_timestamp) > 7200
+        for: 5m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally test results are stale"
+          description: |
+            No Rally test results have been produced in over 2 hours.
+            The test runner may be stuck or the container may have issues.
+            Last run: {{ $value | humanizeDuration }} ago.
+
+      # -----------------------------------------------------------------------
+      # OVERALL HEALTH - Critical: everything is failing
+      # -----------------------------------------------------------------------
+      - alert: RallyOverallFailure
+        expr: rally_overall_success == 0
+        for: 15m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "Rally overall health check failing"
+          description: |
+            One or more OpenStack services are failing Rally tests.
+            Investigate immediately to determine the scope of the issue.

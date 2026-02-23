@@ -1,0 +1,3 @@
+---
+test:
+  - name: "{{ env.RALLY_NOVA_FLAVOR }}"

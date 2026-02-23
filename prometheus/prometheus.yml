@@ -1,0 +1,27 @@
+# ==============================================================================
+# Prometheus Scrape Configuration (Example)
+# ==============================================================================
+# Merge this into your existing prometheus.yml configuration.
+# This file is provided as a reference.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+rule_files:
+  - "rally_alerts.yml"
+
+scrape_configs:
+  # Rally OpenStack monitor exporter
+  - job_name: "rally-openstack-monitor"
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["rally-monitor:9101"]
+        labels:
+          environment: "production"
+          component: "rally-testing"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]

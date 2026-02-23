@@ -1,0 +1,28 @@
+# ==============================================================================
+# Antigravity Ignore File
+# ==============================================================================
+# Prevents the AI assistant from reading sensitive or unnecessary files.
+
+# Environment and Credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.json.key
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Results and Data
+# Results might contain sensitive error traces or be too large
+/results/
+/tmp/rally-results/
+*.sqlite
+*.db
+
+# Logs
+*.log
+/var/log/rally-tests.log

@@ -1,0 +1,100 @@
+---
+# ==============================================================================
+# Nova (Compute Service) - Rally Test Scenarios
+# ==============================================================================
+
+NovaServers.boot_and_delete_server:
+  -
+    args:
+      flavor:
+        name: "{{env.RALLY_NOVA_FLAVOR | default('m1.tiny')}}"
+      image:
+        name: "{{env.RALLY_NOVA_IMAGE | default('cirros-0.6.2-x86_64-disk')}}"
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      network:
+        start_cidr: "10.99.0.0/24"
+      quotas:
+        neutron:
+          network: -1
+          port: -1
+    sla:
+      failure_rate:
+        max: 0
+
+NovaServers.boot_and_list_server:
+  -
+    args:
+      flavor:
+        name: "{{env.RALLY_NOVA_FLAVOR | default('m1.tiny')}}"
+      image:
+        name: "{{env.RALLY_NOVA_IMAGE | default('cirros-0.6.2-x86_64-disk')}}"
+      detailed: true
+    runner:
+      type: constant
+      times: 3
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      network:
+        start_cidr: "10.99.3.0/24"
+      quotas:
+        neutron:
+          network: -1
+          port: -1
+    sla:
+      failure_rate:
+        max: 0
+
+NovaFlavors.list_flavors:
+  -
+    args:
+      detailed: true
+    runner:
+      type: constant
+      times: 5
+      concurrency: 2
+    sla:
+      failure_rate:
+        max: 0
+
+NovaHypervisors.list_hypervisors:
+  -
+    args:
+      detailed: true
+    runner:
+      type: constant
+      times: 5
+      concurrency: 2
+    sla:
+      failure_rate:
+        max: 0
+
+NovaServers.boot_server_associate_and_dissociate_floating_ip:
+  -
+    args:
+      flavor:
+        name: "{{env.RALLY_NOVA_FLAVOR | default('m1.tiny')}}"
+      image:
+        name: "{{env.RALLY_NOVA_IMAGE | default('cirros-0.6.2-x86_64-disk')}}"
+    runner:
+      type: constant
+      times: 2
+      concurrency: 1
+    context:
+      users:
+        tenants: 1
+        users_per_tenant: 1
+      network:
+        start_cidr: "10.99.1.0/24"
+    sla:
+      failure_rate:
+        max: 0

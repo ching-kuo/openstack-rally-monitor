@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  rally-monitor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: rally-monitor
+    env_file:
+      - ../.env
+    volumes:
+      - rally-data:/rally/data
+      - rally-results:/results
+    ports:
+      - "${EXPORTER_PORT:-9101}:9101"
+      - "${DASHBOARD_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9101/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  rally-data:
+    driver: local
+  rally-results:
+    driver: local

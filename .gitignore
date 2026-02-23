@@ -1,0 +1,32 @@
+# Credentials - never commit
+.env
+.env.*
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.json.key
+
+# Python virtualenv
+venv/
+.venv/
+env/
+
+# Test results and runtime data
+/results/
+/tmp/rally-results/
+
+# Databases
+*.sqlite
+*.db
+
+# Logs
+*.log
+/var/log/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo

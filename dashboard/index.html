@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rally OpenStack Monitor</title>
+    <meta name="description"
+        content="Read-only dashboard for OpenStack Rally test results with 7-day historical timeline">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css?v=20260222b">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+    <!-- ================================================================== -->
+    <!-- Header -->
+    <!-- ================================================================== -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <circle cx="16" cy="16" r="14" stroke="url(#grad)" stroke-width="2.5" fill="none" />
+                    <circle cx="16" cy="16" r="6" fill="url(#grad)" />
+                    <path d="M16 2 L16 6 M16 26 L16 30 M2 16 L6 16 M26 16 L30 16" stroke="url(#grad)" stroke-width="2"
+                        stroke-linecap="round" />
+                    <defs>
+                        <linearGradient id="grad" x1="0" y1="0" x2="32" y2="32">
+                            <stop offset="0%" stop-color="#6366f1" />
+                            <stop offset="100%" stop-color="#06b6d4" />
+                        </linearGradient>
+                    </defs>
+                </svg>
+            </div>
+            <div>
+                <h1>Rally OpenStack Monitor</h1>
+                <p class="subtitle">Cloud Infrastructure Testing Dashboard</p>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="health-badge" id="healthBadge">
+                <span class="health-dot"></span>
+                <span class="health-text">Loading...</span>
+            </div>
+            <div class="last-run" id="lastRun">—</div>
+        </div>
+    </header>
+
+    <!-- ================================================================== -->
+    <!-- 7-Day Status Timeline -->
+    <!-- ================================================================== -->
+    <section class="timeline-section">
+        <div class="section-header">
+            <h2>7-Day Status Timeline</h2>
+            <span class="section-badge" id="timelineCount">0 runs</span>
+        </div>
+        <div class="timeline-container" id="timeline">
+            <div class="timeline-loading">Loading history...</div>
+        </div>
+        <div class="timeline-legend">
+            <span class="legend-item"><span class="legend-dot legend-passed"></span>All Passed</span>
+            <span class="legend-item"><span class="legend-dot legend-failed"></span>Failure</span>
+            <span class="legend-item"><span class="legend-dot legend-pending"></span>Pending</span>
+        </div>
+    </section>
+
+    <!-- Historical run banner (hidden by default, shown when a past run is selected) -->
+    <div id="historicalBanner" class="historical-banner" style="display:none;">
+        <div class="historical-banner-inner">
+            <span class="historical-banner-icon">🕓</span>
+            <span id="historicalBannerText">Viewing historical run</span>
+            <button id="backToLatestBtn" class="back-to-latest-btn">← Back to Latest</button>
+        </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- Service Cards Grid -->
+    <!-- ================================================================== -->
+    <section class="services-section">
+        <div class="section-header">
+            <h2 id="servicesSectionTitle">Core Services</h2>
+        </div>
+        <div class="services-grid" id="servicesGrid">
+            <!-- Cards injected by JS -->
+        </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Trend Charts -->
+    <!-- ================================================================== -->
+    <section class="charts-section">
+        <div class="section-header">
+            <h2>Trends</h2>
+        </div>
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>Duration Over Time</h3>
+                <canvas id="durationChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Iteration Success Rate</h3>
+                <canvas id="successChart"></canvas>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Cleanup Status -->
+    <!-- ================================================================== -->
+    <section class="cleanup-section">
+        <div class="section-header">
+            <h2>Cleanup Status</h2>
+            <span class="section-badge" id="cleanupBadge">OK</span>
+        </div>
+        <div class="cleanup-grid" id="cleanupGrid">
+            <!-- Injected by JS -->
+        </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Detail Modal -->
+    <!-- ================================================================== -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <div class="modal-header">
+                <h2 id="modalTitle">Service Details</h2>
+                <button class="modal-close" id="modalClose">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Injected by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- Footer -->
+    <!-- ================================================================== -->
+    <footer class="footer">
+        <p>Rally OpenStack Monitor &middot; Auto-refresh every 60s &middot; Read-only dashboard</p>
+    </footer>
+
+    <script src="app.js?v=20260222b"></script>
+</body>
+
+</html>
