@@ -31,8 +31,7 @@ if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
         "neutron": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
         "glance": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
         "cinder": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "swift": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "placement": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []}
+        "swift": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []}
     }
 }
 EOF

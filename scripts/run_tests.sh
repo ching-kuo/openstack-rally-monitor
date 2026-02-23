@@ -14,7 +14,7 @@ RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
 RUN_LOG="${RUN_DIR}/run.log"
 
-SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift" "placement")
+SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift")
 
 log() {
     local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
