@@ -11,7 +11,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="style.css?v=20260222b">
+    <link rel="stylesheet" href="style.css?v=20260224a">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
 
@@ -64,6 +64,23 @@
             <span class="legend-item"><span class="legend-dot legend-passed"></span>All Passed</span>
             <span class="legend-item"><span class="legend-dot legend-failed"></span>Failure</span>
             <span class="legend-item"><span class="legend-dot legend-pending"></span>Pending</span>
+        </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- API Health Check Timeline -->
+    <!-- ================================================================== -->
+    <section class="timeline-section">
+        <div class="section-header">
+            <h2>API Health Checks</h2>
+            <span class="section-badge" id="healthTimelineCount">0 checks</span>
+        </div>
+        <div class="timeline-container htl-container" id="healthTimeline">
+            <div class="timeline-loading">Loading health data...</div>
+        </div>
+        <div class="timeline-legend">
+            <span class="legend-item"><span class="legend-dot legend-passed"></span>All Up</span>
+            <span class="legend-item"><span class="legend-dot legend-failed"></span>Service Down</span>
         </div>
     </section>
 
@@ -142,7 +159,7 @@
         <p>Rally OpenStack Monitor &middot; Auto-refresh every 60s &middot; Read-only dashboard</p>
     </footer>
 
-    <script src="app.js?v=20260222b"></script>
+    <script src="app.js?v=20260224a"></script>
 </body>
 
 </html>

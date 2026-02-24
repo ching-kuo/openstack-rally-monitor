@@ -272,9 +272,7 @@ section {
 }
 
 .timeline-cell {
-    flex: 1;
-    min-width: 12px;
-    max-width: 32px;
+    flex: 1 0 6px;
     height: 36px;
     border-radius: 4px;
     cursor: pointer;
@@ -516,6 +514,50 @@ section {
 
 .card-timeline-cell.pending {
     background: rgba(100, 116, 139, 0.3);
+}
+
+/* --- Live API Health Indicator (per service card) --- */
+.live-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+}
+
+.live-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.live-indicator.up .live-dot {
+    background: var(--success);
+    box-shadow: 0 0 5px rgba(16, 185, 129, 0.7);
+    animation: livepulse 2s ease-in-out infinite;
+}
+
+.live-indicator.up {
+    color: var(--success);
+}
+
+.live-indicator.down .live-dot {
+    background: var(--failure);
+    box-shadow: 0 0 5px rgba(239, 68, 68, 0.7);
+}
+
+.live-indicator.down {
+    color: var(--failure);
+}
+
+.live-indicator.unknown .live-dot {
+    background: var(--pending);
+}
+
+@keyframes livepulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.8); }
 }
 
 /* --- Charts --- */
@@ -871,4 +913,42 @@ section {
 
 .service-card:nth-child(7) {
     animation-delay: 0.35s;
+}
+
+/* --- Health Check Timeline cells --- */
+.htl-container {
+    gap: 2px;
+}
+
+.htl-cell {
+    flex: 1 0 4px;
+    height: 28px;
+    border-radius: 3px;
+    cursor: default;
+    transition: var(--transition);
+    position: relative;
+}
+
+.htl-cell:hover {
+    transform: scaleY(1.3);
+    z-index: 2;
+}
+
+.htl-cell:hover .timeline-tooltip {
+    opacity: 1;
+}
+
+.htl-cell.up {
+    background: var(--gradient-success);
+    box-shadow: 0 0 4px rgba(16, 185, 129, 0.2);
+}
+
+.htl-cell.down {
+    background: var(--gradient-failure);
+    box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+
+.htl-cell.unknown {
+    background: rgba(100, 116, 139, 0.3);
+    border: 1px dashed rgba(100, 116, 139, 0.4);
 }

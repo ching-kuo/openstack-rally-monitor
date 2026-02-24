@@ -18,7 +18,6 @@ const SERVICE_ICONS = {
     glance: '🖼️',
     cinder: '💾',
     swift: '📦',
-    placement: '📊',
 };
 
 const SERVICE_DESCRIPTIONS = {
@@ -28,7 +27,6 @@ const SERVICE_DESCRIPTIONS = {
     glance: 'Image Service',
     cinder: 'Block Storage',
     swift: 'Object Storage',
-    placement: 'Resource Tracking',
 };
 
 let durationChart = null;
@@ -38,6 +36,7 @@ let successChart = null;
 let selectedRunIndex = null;
 let cachedHistory = { runs: [] };
 let cachedResults = null;
+let cachedHealth = null;
 
 // ---------------------------------------------------------------------------
 // Data Fetching
@@ -64,17 +63,43 @@ async function fetchHistory() {
     }
 }
 
+async function fetchHealth() {
+    try {
+        const res = await fetch('/health.json');
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (err) {
+        console.error('Failed to fetch health:', err);
+        return null;
+    }
+}
+
+async function fetchHealthHistory() {
+    try {
+        const res = await fetch('/health_history.json');
+        if (!res.ok) return { checks: [] };
+        return await res.json();
+    } catch (err) {
+        console.error('Failed to fetch health history:', err);
+        return { checks: [] };
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 function formatTimestamp(ts) {
     if (!ts || ts === 'waiting_for_first_run' || ts === 'none') return 'Waiting for first run...';
-    // ts format: 20260220T143021Z
-    const match = ts.match(/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/);
-    if (!match) return ts;
-    const [, y, mo, d, h, mi, s] = match;
-    const date = new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s));
-    return date.toLocaleString();
+    // Compact format: 20260220T143021Z
+    const compact = ts.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+    if (compact) {
+        const [, y, mo, d, h, mi, s] = compact;
+        return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)).toLocaleString();
+    }
+    // ISO format: 2026-02-24T10:00:00Z
+    const isoDate = new Date(ts);
+    if (!isNaN(isoDate)) return isoDate.toLocaleString();
+    return ts;
 }
 
 function formatDuration(seconds) {
@@ -94,16 +119,23 @@ function getRunStatus(runData) {
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
-function updateHeader(summary) {
+function updateHeader(summary, health) {
     const badge = document.getElementById('healthBadge');
-    const dot = badge.querySelector('.health-dot');
     const text = badge.querySelector('.health-text');
     const lastRun = document.getElementById('lastRun');
 
-    const status = getRunStatus(summary);
+    const rallyStatus = getRunStatus(summary);
+    const apiDown = health && health.overall === 'down';
+
+    // API health failure takes precedence over Rally run result
+    const status = apiDown ? 'failed' : rallyStatus;
 
     badge.className = `health-badge ${status === 'passed' ? 'healthy' : status === 'failed' ? 'unhealthy' : ''}`;
-    text.textContent = status === 'passed' ? 'All Healthy' : status === 'failed' ? 'Issues Detected' : 'Pending';
+    text.textContent = apiDown
+        ? 'API Issues Detected'
+        : status === 'passed' ? 'All Healthy'
+        : status === 'failed' ? 'Issues Detected'
+        : 'Pending';
 
     lastRun.textContent = `Last run: ${formatTimestamp(summary.timestamp)}`;
 }
@@ -152,6 +184,9 @@ function renderTimeline(history) {
 
         container.appendChild(cell);
     });
+
+    // Auto-scroll to latest (rightmost) run
+    container.scrollLeft = container.scrollWidth;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +206,8 @@ function selectHistoricalRun(run, index) {
     bannerText.textContent = `Viewing run: ${formatTimestamp(run.timestamp)}`;
     banner.style.display = '';
 
-    // Re-render service cards with historical data
-    renderServiceCards(run, cachedHistory);
+    // Re-render service cards with historical data (keep live health indicators)
+    renderServiceCards(run, cachedHistory, cachedHealth);
 
     // Update section title
     document.getElementById('servicesSectionTitle').textContent = 'Core Services (Historical)';
@@ -194,7 +229,7 @@ function backToLatest() {
 
     // Re-render with live data
     if (cachedResults) {
-        renderServiceCards(cachedResults.summary, cachedHistory);
+        renderServiceCards(cachedResults.summary, cachedHistory, cachedHealth);
     }
 }
 
@@ -202,9 +237,50 @@ function backToLatest() {
 document.getElementById('backToLatestBtn').addEventListener('click', backToLatest);
 
 // ---------------------------------------------------------------------------
+// Health Check Timeline
+// ---------------------------------------------------------------------------
+function renderHealthTimeline(healthHistory) {
+    const container = document.getElementById('healthTimeline');
+    const countBadge = document.getElementById('healthTimelineCount');
+
+    const checks = (healthHistory && healthHistory.checks) || [];
+    countBadge.textContent = `${checks.length} check${checks.length !== 1 ? 's' : ''}`;
+
+    if (checks.length === 0) {
+        container.innerHTML = '<div class="timeline-loading">No health check data yet</div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    checks.forEach(check => {
+        const status = check.overall || 'unknown';
+        const cell = document.createElement('div');
+        cell.className = `htl-cell ${status}`;
+
+        const downSvcs = Object.entries(check.services || {})
+            .filter(([, v]) => v.status === 'down')
+            .map(([k]) => k);
+        const detail = status === 'down'
+            ? `Down: ${downSvcs.join(', ')}`
+            : 'All services up';
+
+        cell.innerHTML = `
+            <div class="timeline-tooltip">
+                <strong>${formatTimestamp(check.timestamp)}</strong><br>
+                ${detail}
+            </div>
+        `;
+        container.appendChild(cell);
+    });
+
+    // Auto-scroll to latest (rightmost)
+    container.scrollLeft = container.scrollWidth;
+}
+
+// ---------------------------------------------------------------------------
 // Service Cards
 // ---------------------------------------------------------------------------
-function renderServiceCards(summary, history) {
+function renderServiceCards(summary, history, health) {
     const grid = document.getElementById('servicesGrid');
     const services = summary.services || {};
 
@@ -220,6 +296,14 @@ function renderServiceCards(summary, history) {
             return svc ? svc.status : 'pending';
         });
 
+        // Live API health indicator
+        const svcHealth = health && health.services && health.services[name];
+        const liveStatus = svcHealth ? svcHealth.status : 'unknown';
+        const liveLatency = svcHealth ? `${svcHealth.latency_ms}ms` : '';
+        const liveLabel = liveStatus === 'up'
+            ? `API live${liveLatency ? ' · ' + liveLatency : ''}`
+            : liveStatus === 'down' ? 'API down' : 'API …';
+
         card.innerHTML = `
             <div class="card-header">
                 <div>
@@ -228,7 +312,13 @@ function renderServiceCards(summary, history) {
                         ${SERVICE_DESCRIPTIONS[name] || ''}
                     </div>
                 </div>
-                <span class="status-chip ${data.status}">${data.status}</span>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.35rem;">
+                    <span class="status-chip ${data.status}">${data.status}</span>
+                    <div class="live-indicator ${liveStatus}">
+                        <span class="live-dot"></span>
+                        <span>${liveLabel}</span>
+                    </div>
+                </div>
             </div>
             <div class="card-metrics">
                 <div class="metric">
@@ -467,14 +557,17 @@ function renderCleanup(cleanup) {
 // Main Refresh Loop
 // ---------------------------------------------------------------------------
 async function refresh() {
-    const [resultsData, historyData] = await Promise.all([
+    const [resultsData, historyData, healthData, healthHistoryData] = await Promise.all([
         fetchResults(),
         fetchHistory(),
+        fetchHealth(),
+        fetchHealthHistory(),
     ]);
 
-    // Cache for use by historical selection
+    // Cache for use by historical selection and card re-renders
     if (historyData) cachedHistory = historyData;
     if (resultsData) cachedResults = resultsData;
+    if (healthData)  cachedHealth  = healthData;
 
     // Always update timeline and charts
     if (historyData) {
@@ -482,13 +575,25 @@ async function refresh() {
         renderCharts(historyData);
     }
 
-    // Only update header + service cards if NOT pinned to a historical run
+    // Always update health check timeline
+    renderHealthTimeline(healthHistoryData);
+
+    // Always update service card live indicators (even when pinned to a historical run)
+    if (selectedRunIndex !== null && cachedResults) {
+        const pinnedRun = cachedHistory.runs[selectedRunIndex];
+        if (pinnedRun) renderServiceCards(pinnedRun, cachedHistory, cachedHealth);
+    }
+
+    // Update header + service cards + cleanup if NOT pinned to a historical run
     if (selectedRunIndex === null) {
         if (resultsData) {
-            updateHeader(resultsData.summary);
-            renderServiceCards(resultsData.summary, historyData || cachedHistory);
+            updateHeader(resultsData.summary, cachedHealth);
+            renderServiceCards(resultsData.summary, historyData || cachedHistory, cachedHealth);
             renderCleanup(resultsData.cleanup);
         }
+    } else {
+        // Still update header badge with latest health even when pinned
+        if (cachedResults) updateHeader(cachedResults.summary, cachedHealth);
     }
 }
 
