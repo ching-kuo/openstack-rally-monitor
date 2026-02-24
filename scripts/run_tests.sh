@@ -260,23 +260,25 @@ build_summary() {
 # --------------------------------------------------------------------------
 publish_dashboard_files() {
     log "Publishing dashboard static files..."
-    local dashboard_dir="${DASHBOARD_DIR:-/dashboard}"
     local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
+
+    # Write into the persistent results volume so files survive container restarts.
+    # /dashboard/results.json and /dashboard/history.json are symlinks pointing here.
 
     # results.json: combined summary + cleanup for the current-run card view
     jq -n \
         --slurpfile summary "${SUMMARY_FILE}" \
         --slurpfile cleanup "${cleanup_file}" \
         '{summary: $summary[0], cleanup: $cleanup[0]}' \
-        > "${dashboard_dir}/results.json"
+        > "${RESULTS_DIR}/results.json"
 
     # history.json: all retained per-run summary files for the timeline
     find "${RESULTS_DIR}" -maxdepth 2 -name "summary.json" \
         -path "*/20*T*Z/*" | sort | \
         xargs jq -s '{runs: .}' \
-        > "${dashboard_dir}/history.json"
+        > "${RESULTS_DIR}/history.json"
 
-    log "Dashboard files published to ${dashboard_dir}"
+    log "Dashboard files published to ${RESULTS_DIR}"
 }
 
 # --------------------------------------------------------------------------
