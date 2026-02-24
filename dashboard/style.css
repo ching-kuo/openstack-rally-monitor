@@ -257,7 +257,7 @@ section {
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-glass);
     backdrop-filter: blur(10px);
-    overflow-x: auto;
+    overflow: hidden;
     min-height: 56px;
     align-items: stretch;
 }
@@ -272,7 +272,8 @@ section {
 }
 
 .timeline-cell {
-    flex: 1 0 6px;
+    flex: 1 1 0;
+    min-width: 2px;
     height: 36px;
     border-radius: 4px;
     cursor: pointer;
@@ -921,7 +922,8 @@ section {
 }
 
 .htl-cell {
-    flex: 1 0 4px;
+    flex: 1 1 0;
+    min-width: 2px;
     height: 28px;
     border-radius: 3px;
     cursor: default;
