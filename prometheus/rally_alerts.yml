@@ -9,7 +9,9 @@ groups:
   - name: rally_cleanup
     rules:
       # -----------------------------------------------------------------------
-      # CLEANUP FAILURES - Critical: orphaned resources detected
+      # SCENARIO CLEANUP FAILURE - Critical: s_rally_* resources left behind
+      # Scenario cleanup runs during the test itself; orphans here mean
+      # something went wrong mid-scenario, not just in teardown.
       # -----------------------------------------------------------------------
       - alert: RallyCleanupFailure
         expr: rally_cleanup_failure == 1
@@ -18,16 +20,16 @@ groups:
           severity: critical
           team: infra
         annotations:
-          summary: "Rally cleanup failed for {{ $labels.service }}"
+          summary: "Rally scenario cleanup failed for {{ $labels.service }}"
           description: |
-            Rally cleanup has failed for the {{ $labels.service }} service.
-            Orphaned resources have been detected that were not properly
-            cleaned up after a test run. Immediate action required to
-            prevent resource leaks.
-          runbook: "Check orphaned resources with: openstack server list --all-projects | grep s_rally"
+            Scenario-created (s_rally_*) orphaned resources detected for
+            {{ $labels.service }}. These are left by scenario plugins that
+            failed to clean up mid-test — not just context teardown.
+            Immediate action required to prevent resource leaks.
+          runbook: "docker exec rally-monitor /scripts/purge_orphans.sh --confirm"
 
       # -----------------------------------------------------------------------
-      # ORPHANED RESOURCE COUNT - Warning when resources accumulate
+      # ORPHANED RESOURCE COUNT - Warning when s_rally_* resources accumulate
       # -----------------------------------------------------------------------
       - alert: RallyOrphanedResourcesHigh
         expr: rally_orphaned_resources > 5
@@ -36,11 +38,33 @@ groups:
           severity: warning
           team: infra
         annotations:
-          summary: "High orphaned resource count: {{ $labels.service }}/{{ $labels.resource_type }}"
+          summary: "High scenario orphan count: {{ $labels.service }}/{{ $labels.resource_type }}"
           description: |
-            {{ $value }} orphaned Rally resources detected for
-            {{ $labels.service }} ({{ $labels.resource_type }}).
+            {{ $value }} scenario-created (s_rally_*) orphaned resources
+            detected for {{ $labels.service }} ({{ $labels.resource_type }}).
             These resources may need manual cleanup.
+          runbook: "docker exec rally-monitor /scripts/purge_orphans.sh --confirm"
+
+      # -----------------------------------------------------------------------
+      # CONTEXT CLEANUP WARNING - Info: c_rally_* resources left behind
+      # Context cleanup runs after the task completes and its failure does not
+      # mark the task as failed. Orphaned c_rally_* resources on an otherwise
+      # successful run are a low-severity housekeeping concern.
+      # -----------------------------------------------------------------------
+      - alert: RallyContextCleanupWarning
+        expr: rally_context_cleanup_warning == 1
+        for: 15m
+        labels:
+          severity: info
+          team: infra
+        annotations:
+          summary: "Rally context teardown left resources for {{ $labels.service }}"
+          description: |
+            Context-created (c_rally_*) orphaned resources detected for
+            {{ $labels.service }}. The test run itself succeeded; Rally's
+            context teardown (projects, users, networks) did not complete
+            cleanly. Monitor for accumulation across runs.
+          runbook: "docker exec rally-monitor /scripts/purge_orphans.sh"
 
   - name: rally_tests
     rules:

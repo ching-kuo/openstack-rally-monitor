@@ -76,14 +76,28 @@ rally_service_status = Gauge(
 
 rally_cleanup_failure = Gauge(
     "rally_cleanup_failure",
-    "Whether cleanup failed (1) or succeeded (0)",
+    "Whether scenario-created (s_rally_*) cleanup failed (1) or succeeded (0)",
     ["service"],
     registry=registry,
 )
 
 rally_orphaned_resources = Gauge(
     "rally_orphaned_resources",
-    "Number of orphaned resources detected",
+    "Number of scenario-created (s_rally_*) orphaned resources",
+    ["service", "resource_type"],
+    registry=registry,
+)
+
+rally_context_cleanup_warning = Gauge(
+    "rally_context_cleanup_warning",
+    "Whether context-created (c_rally_*) resources were left behind (1) or not (0)",
+    ["service"],
+    registry=registry,
+)
+
+rally_context_orphaned_resources = Gauge(
+    "rally_context_orphaned_resources",
+    "Number of context-created (c_rally_*) orphaned resources",
     ["service", "resource_type"],
     registry=registry,
 )
@@ -194,8 +208,18 @@ def update_metrics():
 
     rally_overall_success.set(1 if all_passed else 0)
 
-    # Cleanup metrics
-    cleanup_failed = cleanup.get("cleanup_failed", 0)
+    svc_map = {
+        "servers": "nova",
+        "networks": "neutron",
+        "routers": "neutron",
+        "security_groups": "neutron",
+        "volumes": "cinder",
+        "images": "glance",
+        "users": "keystone",
+        "projects": "keystone",
+    }
+
+    # Scenario-created (s_rally_*) orphan metrics — warning/critical severity
     orphaned = cleanup.get("orphaned_resources", {})
     for service, count in orphaned.items():
         rally_cleanup_failure.labels(service=service).set(
@@ -205,21 +229,25 @@ def update_metrics():
             service=service, resource_type="total"
         ).set(count)
 
-    details = cleanup.get("details", {})
-    for resource_type, count in details.items():
-        # Map resource types to services
-        svc_map = {
-            "servers": "nova",
-            "networks": "neutron",
-            "routers": "neutron",
-            "security_groups": "neutron",
-            "volumes": "cinder",
-            "images": "glance",
-            "users": "keystone",
-            "projects": "keystone",
-        }
+    for resource_type, count in cleanup.get("details", {}).items():
         svc = svc_map.get(resource_type, "unknown")
         rally_orphaned_resources.labels(
+            service=svc, resource_type=resource_type
+        ).set(count)
+
+    # Context-created (c_rally_*) orphan metrics — info severity
+    context_orphaned = cleanup.get("context_orphaned_resources", {})
+    for service, count in context_orphaned.items():
+        rally_context_cleanup_warning.labels(service=service).set(
+            1 if count > 0 else 0
+        )
+        rally_context_orphaned_resources.labels(
+            service=service, resource_type="total"
+        ).set(count)
+
+    for resource_type, count in cleanup.get("context_details", {}).items():
+        svc = svc_map.get(resource_type, "unknown")
+        rally_context_orphaned_resources.labels(
             service=svc, resource_type=resource_type
         ).set(count)
 
