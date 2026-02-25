@@ -7,7 +7,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **6 Core Services Tested** — Keystone, Nova, Neutron, Glance, Cinder, Swift
 - **Lightweight Health Checks** — Read-only API probes every 15 minutes between heavy test runs
 - **Prometheus Metrics** — Full metrics exposure for test results, SLA compliance, and orphaned resources
-- **Orphan Detection** — Detects resources left behind by failed Rally cleanups and alerts admins
+- **Orphan Detection & Cleanup** — Detects resources left behind by failed Rally cleanups (both `s_rally_*` and `c_rally_*` prefixes) and provides a manual purge tool
 - **7-Day History** — Results retained with automatic pruning
 - **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
 
@@ -158,14 +158,22 @@ docker exec rally-monitor /scripts/run_tests.sh
 # Run a lightweight health check (read-only, non-destructive)
 docker exec rally-monitor /scripts/health_check.sh
 
-# Run orphan detection manually
+# Run orphan detection manually (read-only, updates Prometheus metrics)
 docker exec rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
+
+# Dry-run purge: list all orphaned resources without deleting anything
+docker exec rally-monitor /scripts/purge_orphans.sh
+
+# Purge orphaned resources (permanently deletes s_rally_* and c_rally_* resources)
+docker exec rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs
 docker logs -f rally-monitor
 docker exec rally-monitor tail -f /var/log/rally-tests.log
 docker exec rally-monitor tail -f /var/log/health-check.log
 ```
+
+> **Orphan prefixes:** Rally creates resources with two naming conventions — `s_rally_*` for scenario-created resources and `c_rally_*` for context-created resources (projects, users, networks). Both are detected and purged.
 
 ## Project Structure
 
@@ -188,6 +196,7 @@ openstack-rally-monitor/
 │   ├── run_tests.sh
 │   ├── health_check.sh
 │   ├── cleanup_monitor.sh
+│   ├── purge_orphans.sh
 │   └── patch_rally.py
 ├── exporter/
 │   ├── rally_exporter.py

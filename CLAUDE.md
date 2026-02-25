@@ -23,6 +23,12 @@ docker exec rally-monitor /scripts/health_check.sh
 # Run cleanup orphan detection manually
 docker exec rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
 
+# Purge orphaned Rally resources (dry-run — shows what would be deleted)
+docker exec rally-monitor /scripts/purge_orphans.sh
+
+# Purge orphaned Rally resources (actually deletes them)
+docker exec rally-monitor /scripts/purge_orphans.sh --confirm
+
 # View live logs
 docker logs -f rally-monitor
 docker exec rally-monitor tail -f /var/log/rally-tests.log
@@ -89,7 +95,7 @@ rally_exporter.py
 
 ### Orphan Detection
 
-`scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (Rally's naming convention) and writes counts to `cleanup_metrics.json`. The exporter exposes these as `rally_cleanup_failure` and `rally_orphaned_resources` Prometheus metrics.
+`scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. The exporter exposes these as `rally_cleanup_failure` and `rally_orphaned_resources` Prometheus metrics.
 
 ### Rally Scenarios
 

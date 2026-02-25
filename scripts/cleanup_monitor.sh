@@ -10,8 +10,10 @@ RESULTS_DIR="${RESULTS_DIR:-/results}"
 CLEANUP_METRICS_FILE="${RESULTS_DIR}/cleanup_metrics.json"
 SUMMARY_FILE="${1:-${RESULTS_DIR}/latest_summary.json}"
 
-# Rally resource naming prefix
-RALLY_PREFIX="s_rally"
+# Rally resource naming prefixes:
+#   s_rally_ — resources created by scenario plugins
+#   c_rally_ — resources created by context plugins (projects, users, networks, etc.)
+RALLY_PREFIX_FILTER="test(\"^[sc]_rally\")"
 
 log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [cleanup-monitor] $*"
@@ -23,56 +25,56 @@ log() {
 check_orphaned_servers() {
     local count=0
     count=$(openstack server list --all-projects -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_networks() {
     local count=0
     count=$(openstack network list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_volumes() {
     local count=0
     count=$(openstack volume list --all-projects -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_images() {
     local count=0
     count=$(openstack image list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_users() {
     local count=0
     count=$(openstack user list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_projects() {
     local count=0
     count=$(openstack project list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_routers() {
     local count=0
     count=$(openstack router list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
 check_orphaned_security_groups() {
     local count=0
     count=$(openstack security group list -f json 2>/dev/null \
-        | jq "[.[] | select(.Name | startswith(\"${RALLY_PREFIX}\"))] | length" 2>/dev/null) || count=0
+        | jq "[.[] | select(.Name | ${RALLY_PREFIX_FILTER})] | length" 2>/dev/null) || count=0
     echo "${count}"
 }
 
