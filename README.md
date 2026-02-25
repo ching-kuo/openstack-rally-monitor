@@ -141,13 +141,23 @@ Defined in `prometheus/rally_alerts.yml`.
 
 | Alert | Severity | Condition |
 |-------|----------|-----------|
-| `RallyCleanupFailure` | critical | Orphaned resources detected |
-| `RallyOrphanedResourcesHigh` | warning | >5 orphaned resources |
+| `RallyCleanupFailure` | critical | `s_rally_*` scenario orphans detected — cleanup failed mid-test |
+| `RallyOrphanedResourcesHigh` | warning | `s_rally_*` orphan count >5 |
+| `RallyContextCleanupWarning` | info | `c_rally_*` context orphans detected — teardown failed on passing run |
 | `RallyTestFailure` | warning | A scenario failed |
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
 | `RallyStaleResults` | warning | No new results in >2 hours |
 | `RallyOverallFailure` | critical | One or more services failing |
+
+### Orphan severity rationale
+
+Rally records a task as **passed** based on scenario iteration success rate. Context teardown runs after that result is recorded, so its failures are invisible to the task status. This means two distinct failure modes:
+
+| Prefix | Created by | Orphan cause | Severity |
+|--------|-----------|--------------|----------|
+| `s_rally_*` | Scenario plugins | Cleanup failed **during** the test | critical/warning |
+| `c_rally_*` | Context plugins (users, projects, networks) | Teardown failed **after** a passing run | info |
 
 ## Useful Commands
 
@@ -173,7 +183,7 @@ docker exec rally-monitor tail -f /var/log/rally-tests.log
 docker exec rally-monitor tail -f /var/log/health-check.log
 ```
 
-> **Orphan prefixes:** Rally creates resources with two naming conventions — `s_rally_*` for scenario-created resources and `c_rally_*` for context-created resources (projects, users, networks). Both are detected and purged.
+> **Orphan prefixes:** `s_rally_*` resources are created by scenario plugins and cleaned up during the test. `c_rally_*` resources are created by context plugins (projects, users, networks) and cleaned up after the task completes. Both are detected by `cleanup_monitor.sh` and removable via `purge_orphans.sh`, but reported at different severities — see the alert table above.
 
 ## Project Structure
 
