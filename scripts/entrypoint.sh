@@ -16,8 +16,24 @@ HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-15}"
 # Intervals >= 60 that are exact multiples of 60 use the hours field.
 make_cron_schedule() {
     local mins="$1"
-    if (( mins >= 60 && mins % 60 == 0 )); then
-        echo "0 */$((mins / 60)) * * *"
+    if (( mins < 1 )); then
+        log "ERROR: Schedule interval must be >= 1 minute, got ${mins}"
+        exit 1
+    fi
+    if (( mins > 1440 )); then
+        log "ERROR: Schedule interval must be <= 1440 minutes (24h), got ${mins}"
+        exit 1
+    fi
+    if (( mins >= 60 )); then
+        local hrs
+        if (( mins % 60 == 0 )); then
+            hrs=$(( mins / 60 ))
+        else
+            local rounded=$(( ((mins + 59) / 60) * 60 ))
+            log "WARNING: Interval ${mins}m is not a multiple of 60. Rounding up to ${rounded}m for cron."
+            hrs=$(( rounded / 60 ))
+        fi
+        echo "0 */${hrs} * * *"
     else
         echo "*/${mins} * * * *"
     fi
@@ -31,10 +47,13 @@ log() {
 # Initialize
 # --------------------------------------------------------------------------
 mkdir -p "${RESULTS_DIR}"
+mkdir -p /rally/logs
+# Note: /results ownership is set in the Dockerfile image layer (for new volumes)
+# and via one-time migration for existing volumes. See CHANGELOG.md for instructions.
 
 # Create a seed summary if none exists (so dashboard works on first boot)
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
-    cat > "${RESULTS_DIR}/latest_summary.json" <<'EOF'
+    cat > "${RESULTS_DIR}/latest_summary.json" <<'EOF_SUMMARY'
 {
     "timestamp": "waiting_for_first_run",
     "services": {
@@ -46,7 +65,7 @@ if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
         "swift": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []}
     }
 }
-EOF
+EOF_SUMMARY
     log "Created seed summary"
 fi
 
@@ -87,7 +106,7 @@ log "Dashboard symlinks updated"
 # Start Prometheus Exporter (background)
 # --------------------------------------------------------------------------
 log "Starting Prometheus exporter on port ${EXPORTER_PORT}..."
-cd /exporter && python rally_exporter.py &
+su -s /bin/bash rally -c "cd /exporter && gunicorn -w 1 -b 0.0.0.0:${EXPORTER_PORT} --timeout 30 rally_exporter:app" &
 EXPORTER_PID=$!
 log "Exporter started (PID: ${EXPORTER_PID})"
 
@@ -95,7 +114,7 @@ log "Exporter started (PID: ${EXPORTER_PID})"
 # Start Dashboard Server (background)
 # --------------------------------------------------------------------------
 log "Starting dashboard on port ${DASHBOARD_PORT}..."
-cd /dashboard && python -m http.server "${DASHBOARD_PORT}" --bind 0.0.0.0 &
+su -s /bin/bash rally -c "cd /dashboard && python serve.py ${DASHBOARD_PORT}" &
 DASHBOARD_PID=$!
 log "Dashboard started (PID: ${DASHBOARD_PID})"
 
@@ -109,22 +128,26 @@ HEALTH_CRON=$(make_cron_schedule "${HEALTH_CHECK_INTERVAL}")
 # Export all environment variables to a file for cron
 # Use `set -a` format so every var is auto-exported when sourced
 env | grep -E '^(OS_|RALLY_|RESULTS_|EXPORTER_|DASHBOARD_|HEALTH_)' \
-    | sed 's/^/export /' > /etc/rally_env 2>/dev/null || true
-# Restrict permissions: file contains OS_PASSWORD
-chmod 0600 /etc/rally_env
+    | sed 's/^/export /' > /rally/rally_env.tmp && mv /rally/rally_env.tmp /rally/rally_env
+# Restrict permissions: file contains OS_PASSWORD.
+# Owned by root:root, group-readable so the rally user (GID 0) can source it in cron.
+# CAP_CHOWN is dropped; use group permissions instead of chown.
+chmod 0640 /rally/rally_env
 
 # Create cron jobs
-cat > /etc/cron.d/rally-tests <<EOF
+cat > /etc/cron.d/rally-tests <<EOF_CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-${CRON_SCHEDULE} root set -a; . /etc/rally_env; set +a; /scripts/run_tests.sh >> /var/log/rally-tests.log 2>&1
-${HEALTH_CRON} root set -a; . /etc/rally_env; set +a; /scripts/health_check.sh >> /var/log/health-check.log 2>&1
-EOF
+${CRON_SCHEDULE} rally set -a; . /rally/rally_env; set +a; /scripts/run_tests.sh >> /rally/logs/rally-tests.log 2>&1
+${HEALTH_CRON} rally set -a; . /rally/rally_env; set +a; /scripts/health_check.sh >> /rally/logs/health-check.log 2>&1
+0 0 * * * root logrotate /etc/logrotate.d/rally-monitor > /dev/null 2>&1
+EOF_CRON
 chmod 0644 /etc/cron.d/rally-tests
 
-# Create log files with restricted permissions before cron writes to them
-touch /var/log/rally-tests.log  && chmod 0600 /var/log/rally-tests.log
-touch /var/log/health-check.log && chmod 0600 /var/log/health-check.log
+# Create log files before cron writes to them.
+# Owned by root:root, group-writable so the rally user (GID 0) can append via cron redirection.
+touch /rally/logs/rally-tests.log  && chmod 0660 /rally/logs/rally-tests.log
+touch /rally/logs/health-check.log && chmod 0660 /rally/logs/health-check.log
 
 # Start cron daemon
 cron
@@ -137,7 +160,7 @@ log "Health checks scheduled: ${HEALTH_CRON} (every ${HEALTH_CHECK_INTERVAL} min
 # --------------------------------------------------------------------------
 if [[ "$(cat ${RESULTS_DIR}/latest_summary.json | jq -r '.timestamp')" == "waiting_for_first_run" ]]; then
     log "Running initial test suite..."
-    /scripts/run_tests.sh >> /var/log/rally-tests.log 2>&1 &
+    su -s /bin/bash rally -c "/scripts/run_tests.sh >> /rally/logs/rally-tests.log 2>&1" &
     log "Initial test started in background"
 fi
 

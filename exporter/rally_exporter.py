@@ -9,10 +9,12 @@ Reads JSON results from the /results directory and serves metrics on :9101.
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, Response, jsonify
 from prometheus_client import (
+    Counter,
     CollectorRegistry,
     Gauge,
     generate_latest,
@@ -24,6 +26,7 @@ from prometheus_client import (
 # ---------------------------------------------------------------------------
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "/results")
 EXPORTER_PORT = int(os.environ.get("EXPORTER_PORT", 9101))
+READY_MAX_AGE_MINUTES = int(os.environ.get("READY_MAX_AGE_MINUTES", 480))
 
 app = Flask(__name__)
 
@@ -114,6 +117,19 @@ rally_overall_success = Gauge(
     registry=registry,
 )
 
+rally_run_duration_seconds = Gauge(
+    "rally_run_duration_seconds",
+    "Total duration of the last full Rally test suite run in seconds",
+    registry=registry,
+)
+
+rally_exporter_errors_total = Counter(
+    "rally_exporter_errors_total",
+    "Total number of errors reading or parsing result files",
+    ["file"],
+    registry=registry,
+)
+
 
 # ---------------------------------------------------------------------------
 # Data Loading
@@ -125,6 +141,7 @@ def load_latest_summary() -> dict:
         with open(summary_file, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
+        rally_exporter_errors_total.labels(file="latest_summary.json").inc()
         return {"timestamp": "none", "services": {}}
 
 
@@ -135,6 +152,7 @@ def load_cleanup_metrics() -> dict:
         with open(metrics_file, "r") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
+        rally_exporter_errors_total.labels(file="cleanup_metrics.json").inc()
         return {"cleanup_failed": 0, "orphaned_resources": {}, "details": {}}
 
 
@@ -142,8 +160,7 @@ def load_cleanup_metrics() -> dict:
 def parse_timestamp(ts: str) -> float:
     """Convert Rally timestamp string to epoch."""
     try:
-        from datetime import datetime
-        dt = datetime.strptime(ts, "%Y%m%dT%H%M%SZ")
+        dt = datetime.strptime(ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except (ValueError, TypeError):
         return 0.0
@@ -154,6 +171,20 @@ def parse_timestamp(ts: str) -> float:
 # ---------------------------------------------------------------------------
 def update_metrics():
     """Read latest results and update all Prometheus metrics."""
+    for metric in [
+        rally_task_success,
+        rally_task_duration_seconds,
+        rally_task_iterations_total,
+        rally_task_failures_total,
+        rally_task_sla_passed,
+        rally_service_status,
+        rally_cleanup_failure,
+        rally_orphaned_resources,
+        rally_context_cleanup_warning,
+        rally_context_orphaned_resources,
+    ]:
+        metric.clear()
+
     summary = load_latest_summary()
     cleanup = load_cleanup_metrics()
 
@@ -207,6 +238,9 @@ def update_metrics():
             ).set(sla)
 
     rally_overall_success.set(1 if all_passed else 0)
+    run_duration = summary.get("run_duration_seconds", 0)
+    if run_duration > 0:
+        rally_run_duration_seconds.set(run_duration)
 
     svc_map = {
         "servers": "nova",
@@ -269,6 +303,47 @@ def metrics():
 def health():
     """Health check endpoint."""
     return jsonify({"status": "ok", "timestamp": time.time()})
+
+
+@app.route("/ready")
+def ready():
+    """Readiness check endpoint."""
+    summary = load_latest_summary()
+    reasons = []
+
+    timestamp = summary.get("timestamp", "")
+    if timestamp in ("waiting_for_first_run", "none", ""):
+        reasons.append("timestamp_missing")
+        age_minutes = None
+    else:
+        try:
+            parsed = datetime.strptime(timestamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            age = datetime.now(timezone.utc) - parsed
+            age_minutes = age.total_seconds() / 60.0
+            if age >= timedelta(minutes=READY_MAX_AGE_MINUTES):
+                reasons.append("timestamp_too_old")
+        except (ValueError, TypeError):
+            age_minutes = None
+            reasons.append("timestamp_invalid")
+
+    services = summary.get("services", {})
+    if not any(
+        data.get("status", "pending") != "pending"
+        for data in services.values()
+        if isinstance(data, dict)
+    ):
+        reasons.append("all_services_pending")
+
+    if reasons:
+        return jsonify({"ready": False, "reasons": reasons}), 503
+
+    return jsonify(
+        {
+            "ready": True,
+            "timestamp": timestamp,
+            "age_minutes": round(age_minutes, 2),
+        }
+    ), 200
 
 
 # ---------------------------------------------------------------------------

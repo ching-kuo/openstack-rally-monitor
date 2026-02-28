@@ -1,0 +1,20 @@
+# Credentials
+.env
+.env.*
+
+# Vendored frontend assets (downloaded at build time via curl — never copy local copies)
+dashboard/vendor/
+
+# Runtime data and results
+results/
+tmp/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Logs
+*.log

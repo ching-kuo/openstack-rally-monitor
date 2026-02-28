@@ -30,3 +30,6 @@ env/
 __pycache__/
 *.pyc
 *.pyo
+
+# Vendored frontend assets (downloaded at Docker build time, never committed)
+dashboard/vendor/

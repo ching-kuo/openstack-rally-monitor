@@ -1,11 +1,16 @@
-version: "3.8"
-
 services:
   rally-monitor:
     build:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: rally-monitor
+    mem_limit: 2g
+    cpus: 2.0
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
     env_file:
       - ../.env
     volumes:

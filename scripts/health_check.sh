@@ -27,6 +27,9 @@ check() {
 }
 
 log "Starting health checks..."
+LOCKFILE="/tmp/rally-health.lock"
+exec 200>"${LOCKFILE}"
+flock -n 200 || { log "Another health check is already in progress, exiting."; exit 0; }
 
 keystone_r=$(check keystone openstack token issue -f value -c id)
 nova_r=$(    check nova     openstack server list     --limit 1)
@@ -57,7 +60,7 @@ jq -n \
             cinder:   $cinder,
             swift:    $swift
         }
-    }' > "${HEALTH_FILE}"
+    }' > "${HEALTH_FILE}.tmp" && mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
 
 OVERALL=$(jq -r '.overall' "${HEALTH_FILE}")
 log "Health check complete. Overall: ${OVERALL}"

@@ -248,10 +248,10 @@ build_summary() {
             }')
     done
 
-    echo "${summary}" | jq '.' > "${RUN_DIR}/summary.json"
+    echo "${summary}" | jq '.' > "${RUN_DIR}/summary.json.tmp" && mv "${RUN_DIR}/summary.json.tmp" "${RUN_DIR}/summary.json"
 
     # Update latest summary symlink
-    cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}"
+    cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
     log "Summary written to ${RUN_DIR}/summary.json"
 }
 
@@ -270,13 +270,13 @@ publish_dashboard_files() {
         --slurpfile summary "${SUMMARY_FILE}" \
         --slurpfile cleanup "${cleanup_file}" \
         '{summary: $summary[0], cleanup: $cleanup[0]}' \
-        > "${RESULTS_DIR}/results.json"
+        > "${RESULTS_DIR}/results.json.tmp" && mv "${RESULTS_DIR}/results.json.tmp" "${RESULTS_DIR}/results.json"
 
     # history.json: all retained per-run summary files for the timeline
     find "${RESULTS_DIR}" -maxdepth 2 -name "summary.json" \
         -path "*/20*T*Z/*" | sort | \
         xargs jq -s '{runs: .}' \
-        > "${RESULTS_DIR}/history.json"
+        > "${RESULTS_DIR}/history.json.tmp" && mv "${RESULTS_DIR}/history.json.tmp" "${RESULTS_DIR}/history.json"
 
     log "Dashboard files published to ${RESULTS_DIR}"
 }
@@ -307,6 +307,10 @@ main() {
     log "=========================================="
     log "Rally Test Run: ${TIMESTAMP}"
     log "=========================================="
+    LOCKFILE="/tmp/rally-run.lock"
+    exec 200>"${LOCKFILE}"
+    flock -n 200 || { log "Another run is already in progress, exiting."; exit 0; }
+    RUN_START_EPOCH=$(date +%s)
 
     mkdir -p "${RUN_DIR}"
 
@@ -331,8 +335,8 @@ main() {
             --arg err "deployment_setup_failed" \
             --arg detail "${error_detail}" \
             '{timestamp: $ts, error: $err, error_detail: $detail, services: {}}' \
-            > "${RUN_DIR}/summary.json"
-        cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}"
+            > "${RUN_DIR}/summary.json.tmp" && mv "${RUN_DIR}/summary.json.tmp" "${RUN_DIR}/summary.json"
+        cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
         exit 1
     }
 
@@ -352,6 +356,13 @@ main() {
 
     # Prune old results
     prune_old_results
+
+    RUN_END_EPOCH=$(date +%s)
+    RUN_DURATION=$(( RUN_END_EPOCH - RUN_START_EPOCH ))
+    # Inject run_duration_seconds into the latest_summary.json
+    jq --argjson dur "${RUN_DURATION}" '. + {run_duration_seconds: $dur}' \
+        "${SUMMARY_FILE}" > "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
+    log "Total run duration: ${RUN_DURATION}s"
 
     log "=========================================="
     log "Rally Test Run Complete"

@@ -90,6 +90,9 @@ check_security_groups() {
 # --------------------------------------------------------------------------
 main() {
     log "Starting orphaned resource check..."
+    LOCKFILE="/tmp/rally-cleanup.lock"
+    exec 200>"${LOCKFILE}"
+    flock -n 200 || { log "Another cleanup check is already in progress, exiting."; exit 0; }
 
     local s_servers c_servers
     local s_networks c_networks
@@ -136,7 +139,8 @@ main() {
         log "No context-created (c_rally_*) orphaned resources"
     fi
 
-    cat > "${CLEANUP_METRICS_FILE}" <<EOF
+    CLEANUP_METRICS_TMP="${CLEANUP_METRICS_FILE}.tmp"
+    cat > "${CLEANUP_METRICS_TMP}" <<EOF
 {
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "cleanup_failed": ${cleanup_failed},
@@ -177,6 +181,7 @@ main() {
     }
 }
 EOF
+    mv "${CLEANUP_METRICS_TMP}" "${CLEANUP_METRICS_FILE}"
 
     log "Cleanup metrics written to ${CLEANUP_METRICS_FILE}"
 

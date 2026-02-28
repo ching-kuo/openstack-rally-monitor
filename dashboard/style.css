@@ -3,6 +3,15 @@
    Modern dark glassmorphism design
    ============================================================================== */
 
+/* Inter variable font — self-hosted, SIL Open Font License 1.1 */
+@font-face {
+    font-family: 'Inter';
+    src: url('vendor/inter-variable.woff2') format('woff2');
+    font-weight: 100 900;
+    font-style: normal;
+    font-display: swap;
+}
+
 /* --- Reset & Base --- */
 *,
 *::before,
