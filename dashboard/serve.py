@@ -12,6 +12,17 @@ from urllib.parse import unquote
 
 SERVE_ROOT = Path(os.getcwd()).resolve()
 
+# Deny-by-default allowlists. Update ALLOWED_STATIC when adding new dashboard assets.
+ALLOWED_STATIC = {
+    "index.html",
+    "app.js",
+    "style.css",
+    "vendor/chart.umd.min.js",
+    "vendor/inter-variable.woff2",
+}
+ALLOWED_JSON_SYMLINKS = {"results.json", "history.json", "health.json", "health_history.json"}
+RESULTS_ROOT = Path(os.environ.get("RESULTS_DIR", "/results")).resolve()
+
 SECURITY_HEADERS = [
     ("X-Frame-Options", "DENY"),
     ("X-Content-Type-Options", "nosniff"),
@@ -58,6 +69,17 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
 
         if not target.exists() or not target.is_file():
             self._send_error(404)
+            return
+
+        # Enforce path containment: deny everything not in the explicit allowlists.
+        # This prevents serving arbitrary files via symlink or future directory additions.
+        rel_str = str(unresolved.relative_to(SERVE_ROOT))
+        if rel_str in ALLOWED_STATIC and target.is_relative_to(SERVE_ROOT):
+            pass  # known static asset within dashboard dir
+        elif rel_str in ALLOWED_JSON_SYMLINKS and target.is_relative_to(RESULTS_ROOT):
+            pass  # known JSON symlink resolving into /results/
+        else:
+            self._send_error(403)
             return
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"

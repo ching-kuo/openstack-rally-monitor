@@ -83,12 +83,21 @@ docker-compose up -d --build
 
 Add to your `prometheus.yml`:
 
+By default, ports are bound to `127.0.0.1` only. If Prometheus runs on the same host, use:
+
 ```yaml
 scrape_configs:
   - job_name: "rally-openstack-monitor"
     scrape_interval: 60s
     static_configs:
-      - targets: ["<rally-monitor-host>:9101"]
+      - targets: ["127.0.0.1:9101"]
+```
+
+If Prometheus runs on a **different host**, expose the port via a reverse proxy (nginx, Caddy) with authentication, or override the binding in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "0.0.0.0:${EXPORTER_PORT:-9101}:9101"
 ```
 
 Copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and include it under `rule_files:`.

@@ -17,8 +17,8 @@ services:
       - rally-data:/rally/data
       - rally-results:/results
     ports:
-      - "${EXPORTER_PORT:-9101}:9101"
-      - "${DASHBOARD_PORT:-8080}:8080"
+      - "127.0.0.1:${EXPORTER_PORT:-9101}:9101"
+      - "127.0.0.1:${DASHBOARD_PORT:-8080}:8080"
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:9101/health" ]

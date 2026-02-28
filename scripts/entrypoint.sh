@@ -125,13 +125,27 @@ log "Setting up schedules..."
 CRON_SCHEDULE=$(make_cron_schedule "${SCHEDULE_INTERVAL}")
 HEALTH_CRON=$(make_cron_schedule "${HEALTH_CHECK_INTERVAL}")
 
-# Export all environment variables to a file for cron
-# Use `set -a` format so every var is auto-exported when sourced
-env | grep -E '^(OS_|RALLY_|RESULTS_|EXPORTER_|DASHBOARD_|HEALTH_)' \
-    | sed 's/^/export /' > /rally/rally_env.tmp && mv /rally/rally_env.tmp /rally/rally_env
-# Restrict permissions: file contains OS_PASSWORD.
-# Owned by root:root, group-readable so the rally user (GID 0) can source it in cron.
-# CAP_CHOWN is dropped; use group permissions instead of chown.
+# Export environment variables to a file for cron.
+# Use an explicit whitelist loop with printf %q to safely quote all values,
+# preventing shell injection if a variable value contains special characters.
+# File contains OS_PASSWORD -- permissions kept 0640 (root:root, group-readable).
+# CAP_CHOWN is dropped; use group permissions so the rally user (GID 0) can source it.
+RALLY_ENV_VARS=(
+    OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME
+    OS_PROJECT_DOMAIN_NAME OS_USER_DOMAIN_NAME
+    OS_IDENTITY_API_VERSION OS_REGION_NAME
+    OS_CACERT OS_CERT OS_KEY OS_INSECURE
+    OS_AUTH_TYPE OS_ENDPOINT_TYPE OS_INTERFACE
+    RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS
+    RALLY_NOVA_FLAVOR RALLY_NOVA_IMAGE RALLY_NEUTRON_NETWORK_CIDR RALLY_DEBUG
+    RALLY_CONFIG_DIR
+    RESULTS_DIR EXPORTER_PORT DASHBOARD_PORT HEALTH_CHECK_INTERVAL
+)
+{
+    for k in "${RALLY_ENV_VARS[@]}"; do
+        [[ -v "$k" ]] && printf 'export %s=%q\n' "$k" "${!k}"
+    done
+} > /rally/rally_env.tmp && mv /rally/rally_env.tmp /rally/rally_env
 chmod 0640 /rally/rally_env
 
 # Create cron jobs
