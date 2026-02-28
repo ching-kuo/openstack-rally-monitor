@@ -58,8 +58,8 @@ docker run --rm <new-image> id rally
 
 ```bash
 cd docker
-docker-compose down
-docker-compose up -d --build
+docker compose down
+docker compose up -d --build
 ```
 
 #### 3. Verify ownership
@@ -69,7 +69,7 @@ docker exec rally-monitor ls -la /results
 # Expected: drwxr-x--- rally root ...
 
 docker exec rally-monitor ls -la /rally/logs
-# Expected: -rw------- rally root rally-tests.log
+# Expected: -rw-rw---- root root rally-tests.log
 ```
 
 #### 4. Import Grafana dashboard (optional)
