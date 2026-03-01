@@ -33,6 +33,7 @@ set -euo pipefail
 
 CONFIRM=false
 FORCE=false
+RESULTS_DIR="${RESULTS_DIR:-/results}"
 for arg in "$@"; do
     case "$arg" in
         --confirm) CONFIRM=true ;;
@@ -79,6 +80,76 @@ declare -a _SNAP_PROJECTS=()
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [purge-orphans] $*"; }
 
+# Write a JSON audit record of the deletion run to RESULTS_DIR.
+# Records the Phase 1 snapshot (found IDs) and deletion outcome (deleted/failed counts).
+# The audit file is named purge_audit_<timestamp>.json to preserve history.
+write_audit_log() {
+    local ts found_in_listing="$1" deleted="$2" failed="$3"
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Convert bash arrays to JSON arrays; handle empty arrays gracefully.
+    _arr_to_json() {
+        if [[ "${#@}" -eq 0 ]]; then echo "[]"; return; fi
+        printf '%s\n' "$@" | jq -R . | jq -s .
+    }
+
+    local servers_json volumes_json routers_json secgroups_json
+    local networks_json images_json users_json projects_json
+    servers_json=$(_arr_to_json "${_SNAP_SERVERS[@]+"${_SNAP_SERVERS[@]}"}")
+    volumes_json=$(_arr_to_json "${_SNAP_VOLUMES[@]+"${_SNAP_VOLUMES[@]}"}")
+    routers_json=$(_arr_to_json "${_SNAP_ROUTERS[@]+"${_SNAP_ROUTERS[@]}"}")
+    secgroups_json=$(_arr_to_json "${_SNAP_SECGROUPS[@]+"${_SNAP_SECGROUPS[@]}"}")
+    networks_json=$(_arr_to_json "${_SNAP_NETWORKS[@]+"${_SNAP_NETWORKS[@]}"}")
+    images_json=$(_arr_to_json "${_SNAP_IMAGES[@]+"${_SNAP_IMAGES[@]}"}")
+    users_json=$(_arr_to_json "${_SNAP_USERS[@]+"${_SNAP_USERS[@]}"}")
+    projects_json=$(_arr_to_json "${_SNAP_PROJECTS[@]+"${_SNAP_PROJECTS[@]}"}")
+
+    # Sanitize filename: colons in ISO timestamp → hyphens.
+    local safe_ts="${ts//:/-}"
+    local audit_file="${RESULTS_DIR}/purge_audit_${safe_ts}.json"
+    local audit_tmp="${audit_file}.tmp"
+
+    jq -n \
+        --arg ts "$ts" \
+        --arg host "$(hostname -s 2>/dev/null || echo unknown)" \
+        --argjson confirm "$( $CONFIRM && echo true || echo false )" \
+        --argjson force "$( $FORCE && echo true || echo false )" \
+        --arg project "${OS_PROJECT_NAME:-}" \
+        --argjson total_found "$found_in_listing" \
+        --argjson total_deleted "$deleted" \
+        --argjson total_failed "$failed" \
+        --argjson servers "$servers_json" \
+        --argjson volumes "$volumes_json" \
+        --argjson routers "$routers_json" \
+        --argjson security_groups "$secgroups_json" \
+        --argjson networks "$networks_json" \
+        --argjson images "$images_json" \
+        --argjson users "$users_json" \
+        --argjson projects "$projects_json" \
+        '{
+            timestamp: $ts,
+            hostname: $host,
+            confirm: $confirm,
+            force: $force,
+            project: $project,
+            total_found: $total_found,
+            total_deleted: $total_deleted,
+            total_failed: $total_failed,
+            found_ids: {
+                servers: $servers,
+                volumes: $volumes,
+                routers: $routers,
+                security_groups: $security_groups,
+                networks: $networks,
+                images: $images,
+                users: $users,
+                projects: $projects
+            }
+        }' > "${audit_tmp}" && mv "${audit_tmp}" "${audit_file}"
+
+    log "Audit log written to ${audit_file}"
+}
+
 # Number of resources in a JSON array that match the Rally filter
 rally_count() {
     echo "$1" | jq "[.[] | select(.Name | ${RALLY_FILTER})] | length" 2>/dev/null || echo 0
@@ -123,22 +194,32 @@ _delete_resource() {
 }
 
 # --------------------------------------------------------------------------
+# Generic listing helper — records found resources into the named array.
+# Usage: _list_orphans LABEL SNAP_ARRAY_NAME openstack <subcommand> [args...]
+# The trailing "-f json" flag is appended automatically; do not include it.
+# Requires bash 4.3+ for declare -n nameref support.
+# --------------------------------------------------------------------------
+_list_orphans() {
+    local label="$1" snap_var="$2"; shift 2
+    declare -n _arr="$snap_var"
+    local json count
+    json=$(_os_list "$label" "$@" -f json) || return 0
+    count=$(rally_count "$json")
+    if [[ "$count" -eq 0 ]]; then log "${label}: none"; return; fi
+    log "${label}: ${count} orphaned"
+    rally_list "$json"
+    TOTAL_FOUND=$((TOTAL_FOUND + count))
+    while IFS= read -r id; do [[ -n "$id" ]] && _arr+=("$id"); done < <(rally_ids "$json")
+}
+
+# --------------------------------------------------------------------------
 # Per-resource-type functions — each has a listing phase and deletion phase
 # --------------------------------------------------------------------------
 
 purge_servers() {
-    local json count
-    local -a project_filter=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && project_filter=("--project" "${OS_PROJECT_NAME}")
-
-    # Listing phase
-    json=$(_os_list "Servers" openstack server list --all-projects "${project_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Servers: none"; return; fi
-    log "Servers: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_SERVERS+=("$id"); done < <(rally_ids "$json")
+    local -a pf=()
+    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
+    _list_orphans "Servers" _SNAP_SERVERS openstack server list --all-projects "${pf[@]}"
 }
 purge_servers_delete() {
     [[ "${#_SNAP_SERVERS[@]}" -eq 0 ]] && return
@@ -148,17 +229,9 @@ purge_servers_delete() {
 }
 
 purge_volumes() {
-    local json count
-    local -a project_filter=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && project_filter=("--project" "${OS_PROJECT_NAME}")
-
-    json=$(_os_list "Volumes" openstack volume list --all-projects "${project_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Volumes: none"; return; fi
-    log "Volumes: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_VOLUMES+=("$id"); done < <(rally_ids "$json")
+    local -a pf=()
+    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
+    _list_orphans "Volumes" _SNAP_VOLUMES openstack volume list --all-projects "${pf[@]}"
 }
 purge_volumes_delete() {
     [[ "${#_SNAP_VOLUMES[@]}" -eq 0 ]] && return
@@ -168,17 +241,9 @@ purge_volumes_delete() {
 }
 
 purge_routers() {
-    local json count
-    local -a project_filter=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && project_filter=("--project" "${OS_PROJECT_NAME}")
-
-    json=$(_os_list "Routers" openstack router list "${project_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Routers: none"; return; fi
-    log "Routers: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_ROUTERS+=("$id"); done < <(rally_ids "$json")
+    local -a pf=()
+    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
+    _list_orphans "Routers" _SNAP_ROUTERS openstack router list "${pf[@]}"
 }
 purge_routers_delete() {
     [[ "${#_SNAP_ROUTERS[@]}" -eq 0 ]] && return
@@ -201,17 +266,9 @@ purge_routers_delete() {
 }
 
 purge_security_groups() {
-    local json count
-    local -a project_filter=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && project_filter=("--project" "${OS_PROJECT_NAME}")
-
-    json=$(_os_list "Security groups" openstack security group list "${project_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Security groups: none"; return; fi
-    log "Security groups: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_SECGROUPS+=("$id"); done < <(rally_ids "$json")
+    local -a pf=()
+    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
+    _list_orphans "Security groups" _SNAP_SECGROUPS openstack security group list "${pf[@]}"
 }
 purge_security_groups_delete() {
     [[ "${#_SNAP_SECGROUPS[@]}" -eq 0 ]] && return
@@ -221,17 +278,9 @@ purge_security_groups_delete() {
 }
 
 purge_networks() {
-    local json count
-    local -a project_filter=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && project_filter=("--project" "${OS_PROJECT_NAME}")
-
-    json=$(_os_list "Networks" openstack network list "${project_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Networks: none"; return; fi
-    log "Networks: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_NETWORKS+=("$id"); done < <(rally_ids "$json")
+    local -a pf=()
+    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
+    _list_orphans "Networks" _SNAP_NETWORKS openstack network list "${pf[@]}"
 }
 purge_networks_delete() {
     [[ "${#_SNAP_NETWORKS[@]}" -eq 0 ]] && return
@@ -273,14 +322,7 @@ purge_images_delete() {
 
 purge_users() {
     # Users are global in Keystone; match by name prefix only.
-    local json count
-    json=$(_os_list "Users" openstack user list -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Users: none"; return; fi
-    log "Users: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_USERS+=("$id"); done < <(rally_ids "$json")
+    _list_orphans "Users" _SNAP_USERS openstack user list
 }
 purge_users_delete() {
     [[ "${#_SNAP_USERS[@]}" -eq 0 ]] && return
@@ -291,14 +333,7 @@ purge_users_delete() {
 
 purge_projects() {
     # Projects are global in Keystone; match by name prefix only.
-    local json count
-    json=$(_os_list "Projects" openstack project list -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Projects: none"; return; fi
-    log "Projects: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_PROJECTS+=("$id"); done < <(rally_ids "$json")
+    _list_orphans "Projects" _SNAP_PROJECTS openstack project list
 }
 purge_projects_delete() {
     [[ "${#_SNAP_PROJECTS[@]}" -eq 0 ]] && return
@@ -384,6 +419,8 @@ main() {
     if [[ "${TOTAL_FAILED}" -gt 0 ]]; then
         log "WARNING: ${TOTAL_FAILED} deletion(s) failed — check logs above for details."
     fi
+
+    write_audit_log "${found_in_listing}" "${TOTAL_DELETED}" "${TOTAL_FAILED}"
 
     # Refresh cleanup metrics so the dashboard and Prometheus reflect the new state
     if [[ -x "/scripts/cleanup_monitor.sh" ]]; then

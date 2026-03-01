@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.13-slim
 
 LABEL maintainer="infra-labs"
 LABEL description="OpenStack Rally testing and monitoring tool"
@@ -8,31 +8,22 @@ ENV RALLY_DATABASE_URL=sqlite:////rally/data/rally.db
 ENV RESULTS_DIR=/results
 ENV RALLY_CONFIG_DIR=/rally/config
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libffi-dev \
-    libssl-dev \
-    curl \
-    jq \
-    cron \
-    bash \
-    logrotate \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Create directories
 RUN mkdir -p /rally/data /rally/config /results /exporter /scripts /dashboard
 RUN useradd -r -s /bin/false -d /rally -g 0 rally
 
-# Install Python dependencies
+# Install system deps and Python packages in a single layer.
+# Build-only packages (gcc, libffi-dev, libssl-dev, python3-dev) are removed
+# after pip install so they don't persist in the final image.
 COPY exporter/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
-
-# Install Rally
-RUN pip install --no-cache-dir \
-    rally-openstack \
-    python-openstackclient
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc libffi-dev libssl-dev python3-dev \
+        curl jq cron bash logrotate && \
+    pip install --no-cache-dir -r /tmp/requirements.txt && \
+    pip install --no-cache-dir rally-openstack python-openstackclient && \
+    apt-get remove --purge -y gcc libffi-dev libssl-dev python3-dev && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # Initialize Rally database
 RUN rally db recreate

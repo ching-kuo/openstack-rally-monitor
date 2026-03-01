@@ -61,7 +61,7 @@ setup_deployment() {
             >> "${deploy_log}" 2>&1; then
             log "ERROR: Failed to create deployment. Details:"
             log "--- deployment.log start ---"
-            cat "${deploy_log}" | while IFS= read -r line; do log "  ${line}"; done
+            while IFS= read -r line; do log "  ${line}"; done < "${deploy_log}"
             log "--- deployment.log end ---"
             return 1
         fi
@@ -74,7 +74,7 @@ setup_deployment() {
     log "Activating deployment..."
     if ! rally deployment use "openstack-monitor" >> "${deploy_log}" 2>&1; then
         log "ERROR: Failed to activate deployment. Details:"
-        cat "${deploy_log}" | while IFS= read -r line; do log "  ${line}"; done
+        while IFS= read -r line; do log "  ${line}"; done < "${deploy_log}"
         return 1
     fi
 
@@ -82,7 +82,7 @@ setup_deployment() {
     log "Checking deployment connectivity..."
     if ! rally deployment check >> "${deploy_log}" 2>&1; then
         log "WARNING: Deployment check reported issues. Details:"
-        cat "${deploy_log}" | while IFS= read -r line; do log "  ${line}"; done
+        while IFS= read -r line; do log "  ${line}"; done < "${deploy_log}"
         # Show the deployment config (without secrets) for debugging
         log "Current deployment config:"
         rally deployment config 2>/dev/null | \
@@ -99,7 +99,7 @@ setup_deployment() {
 # 2. Run scenarios for each service
 # --------------------------------------------------------------------------
 run_service_tests() {
-    local service="$1"
+    local service="$1" task_args_file="$2"
     local scenario_file="${RALLY_CONFIG_DIR}/scenarios/${service}.yaml"
     local result_file="${RUN_DIR}/${service}.json"
     local html_file="${RUN_DIR}/${service}.html"
@@ -112,17 +112,6 @@ run_service_tests() {
     log "Running ${service} scenarios..."
     local task_uuid=""
     local log_file="${RUN_DIR}/${service}.log"
-
-    local task_args_file="${RUN_DIR}/task_args.json"
-    cat <<EOF > "${task_args_file}"
-{
-    "env": {
-        "RALLY_NOVA_FLAVOR": "${RALLY_NOVA_FLAVOR:-m1.tiny}",
-        "RALLY_NOVA_IMAGE": "${RALLY_NOVA_IMAGE:-cirros-0.6.2-x86_64-disk}",
-        "OS_AUTH_URL": "${OS_AUTH_URL:-}"
-    }
-}
-EOF
 
     if [[ "${RALLY_DEBUG:-false}" == "true" ]]; then
         log "  DEBUG mode enabled. Full logs saving to ${log_file}"
@@ -169,7 +158,7 @@ EOF
         # Log full task output for debugging
         if [[ -f "${log_file}" ]]; then
             log "  --- FULL ${service} task log ---"
-            cat "${log_file}" | while IFS= read -r line; do log "    ${line}"; done
+            while IFS= read -r line; do log "    ${line}"; done < "${log_file}"
             log "  --- end ---"
         fi
         echo "failed"
@@ -291,7 +280,7 @@ prune_old_results() {
 }
 
 # --------------------------------------------------------------------------
-# 5. Notify cleanup monitor
+# 6. Notify cleanup monitor
 # --------------------------------------------------------------------------
 check_cleanup() {
     log "Running cleanup monitor..."
@@ -340,9 +329,21 @@ main() {
         exit 1
     }
 
+    # Create task args file once — all services share the same scenario parameters.
+    local task_args_file="${RUN_DIR}/task_args.json"
+    cat <<EOF > "${task_args_file}"
+{
+    "env": {
+        "RALLY_NOVA_FLAVOR": "${RALLY_NOVA_FLAVOR:-m1.tiny}",
+        "RALLY_NOVA_IMAGE": "${RALLY_NOVA_IMAGE:-cirros-0.6.2-x86_64-disk}",
+        "OS_AUTH_URL": "${OS_AUTH_URL:-}"
+    }
+}
+EOF
+
     # Run all service tests
     for service in "${SERVICES[@]}"; do
-        run_service_tests "${service}" || true
+        run_service_tests "${service}" "${task_args_file}" || true
     done
 
     # Build summary

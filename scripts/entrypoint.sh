@@ -12,6 +12,10 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
 SCHEDULE_INTERVAL="${RALLY_SCHEDULE_INTERVAL:-240}"
 HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-15}"
 
+log() {
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [entrypoint] $*"
+}
+
 # Convert a minute-based interval to a valid cron schedule expression.
 # Intervals >= 60 that are exact multiples of 60 use the hours field.
 make_cron_schedule() {
@@ -39,17 +43,37 @@ make_cron_schedule() {
     fi
 }
 
-log() {
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [entrypoint] $*"
-}
-
 # --------------------------------------------------------------------------
 # Initialize
 # --------------------------------------------------------------------------
 mkdir -p "${RESULTS_DIR}"
 mkdir -p /rally/logs
-# Note: /results ownership is set in the Dockerfile image layer (for new volumes)
-# and via one-time migration for existing volumes. See CHANGELOG.md for instructions.
+
+# Fix volume ownership if the rally UID changed between image rebuilds.
+# Docker volumes persist across image rebuilds; if the system UID assigned to
+# the 'rally' user changes (e.g. python:3.13-slim vs python:3.14-slim allocate
+# different UIDs), files on existing volumes will be owned by the old UID and
+# the new rally process will get "Permission denied" writing to /results.
+# Running as root here, so chown always succeeds.
+#
+# Security hardening:
+#   - Canonicalize path and validate it resolves inside /results to prevent
+#     env-injection from redirecting chown to arbitrary paths.
+#   - Use --no-dereference so symlinks inside the volume are not followed
+#     (prevents a symlink from redirecting ownership outside the tree).
+_RESULTS_CANONICAL=$(readlink -f "${RESULTS_DIR}" 2>/dev/null || true)
+if [[ "${_RESULTS_CANONICAL}" != /results && "${_RESULTS_CANONICAL}" != /results/* ]]; then
+    log "ERROR: RESULTS_DIR resolves to '${_RESULTS_CANONICAL}', which is outside /results — refusing to chown"
+else
+    _RALLY_UID=$(id -u rally 2>/dev/null || true)
+    _RESULTS_UID=$(stat -c '%u' "${_RESULTS_CANONICAL}" 2>/dev/null || true)
+    if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RALLY_UID}" ]]; then
+        log "WARNING: ${_RESULTS_CANONICAL} is owned by UID ${_RESULTS_UID} but rally user is UID ${_RALLY_UID} — fixing ownership"
+        chown --no-dereference -R rally:root "${_RESULTS_CANONICAL}"
+        log "Ownership fixed"
+    fi
+fi
+unset _RESULTS_CANONICAL _RALLY_UID _RESULTS_UID
 
 # Create a seed summary if none exists (so dashboard works on first boot)
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
@@ -148,7 +172,10 @@ RALLY_ENV_VARS=(
 } > /rally/rally_env.tmp && mv /rally/rally_env.tmp /rally/rally_env
 chmod 0640 /rally/rally_env
 
-# Create cron jobs
+# Create cron jobs.
+# cron.d format: <schedule> <user> <command>
+# The command sources /rally/rally_env (written by entrypoint, mode 0640) to
+# inject OpenStack credentials; set -a / set +a export all sourced variables.
 cat > /etc/cron.d/rally-tests <<EOF_CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -172,7 +199,7 @@ log "Health checks scheduled: ${HEALTH_CRON} (every ${HEALTH_CHECK_INTERVAL} min
 # --------------------------------------------------------------------------
 # Run initial test if no results exist
 # --------------------------------------------------------------------------
-if [[ "$(cat ${RESULTS_DIR}/latest_summary.json | jq -r '.timestamp')" == "waiting_for_first_run" ]]; then
+if [[ "$(jq -r '.timestamp' "${RESULTS_DIR}/latest_summary.json")" == "waiting_for_first_run" ]]; then
     log "Running initial test suite..."
     su -s /bin/bash rally -c "/scripts/run_tests.sh >> /rally/logs/rally-tests.log 2>&1" &
     log "Initial test started in background"

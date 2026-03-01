@@ -34,56 +34,24 @@ count_match() {
 }
 
 # --------------------------------------------------------------------------
-# Check functions
-# Each fetches the resource list once and returns "s_count c_count"
+# check_resource: generic helper used by all per-resource-type checks.
+# Runs the given openstack command, returns "s_count c_count" on stdout.
+# Usage: check_resource openstack <subcommand> [flags...] -f json
 # --------------------------------------------------------------------------
-check_servers() {
+check_resource() {
     local json
-    json=$(openstack server list --all-projects -f json 2>/dev/null) || json="[]"
+    json=$("$@" -f json 2>/dev/null) || json="[]"
     echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
 }
 
-check_networks() {
-    local json
-    json=$(openstack network list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_volumes() {
-    local json
-    json=$(openstack volume list --all-projects -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_images() {
-    local json
-    json=$(openstack image list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_users() {
-    local json
-    json=$(openstack user list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_projects() {
-    local json
-    json=$(openstack project list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_routers() {
-    local json
-    json=$(openstack router list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
-
-check_security_groups() {
-    local json
-    json=$(openstack security group list -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
-}
+check_servers()         { check_resource openstack server list --all-projects; }
+check_networks()        { check_resource openstack network list; }
+check_volumes()         { check_resource openstack volume list --all-projects; }
+check_images()          { check_resource openstack image list; }
+check_users()           { check_resource openstack user list; }
+check_projects()        { check_resource openstack project list; }
+check_routers()         { check_resource openstack router list; }
+check_security_groups() { check_resource openstack security group list; }
 
 # --------------------------------------------------------------------------
 # Main

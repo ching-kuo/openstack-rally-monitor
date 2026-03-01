@@ -1,5 +1,15 @@
 import os
 import re
+import sysconfig
+
+# Locate the site-packages directory dynamically so the patch survives
+# Python minor-version bumps without manual path updates.
+SITE_PACKAGES = sysconfig.get_paths()["purelib"]
+
+
+def _path(rel):
+    return os.path.join(SITE_PACKAGES, rel)
+
 
 def patch_file(path, pattern, replacement):
     if not os.path.exists(path):
@@ -9,6 +19,7 @@ def patch_file(path, pattern, replacement):
     new_content = re.sub(pattern, replacement, content)
     with open(path, "w") as f:
         f.write(new_content)
+
 
 def inject_after_imports(path, injection):
     """Inject code after the import block at the top of a Python file."""
@@ -30,13 +41,15 @@ def inject_after_imports(path, injection):
     with open(path, "w") as f:
         f.write("\n".join(lines))
 
+
 # ==============================================================================
-# Fix Python 3.14 multiprocessing compatibility
-# Python 3.14 changed the default start method from 'fork' to 'forkserver',
+# Fix multiprocessing start method compatibility
+# Python 3.14+ changed the default start method from 'fork' to 'forkserver',
 # which breaks Rally's worker process pickling. Force 'fork' method.
+# On Python 3.13 and earlier this is a no-op (fork is already the default).
 # ==============================================================================
 inject_after_imports(
-    "/usr/local/lib/python3.14/site-packages/rally/task/runner.py",
+    _path("rally/task/runner.py"),
     "multiprocessing.set_start_method('fork', force=True)"
 )
 
@@ -46,42 +59,42 @@ inject_after_imports(
 
 # Patch keystone_v3.py create_user to ensure generated random passwords have required complexity
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/common/services/identity/keystone_v3.py",
+    _path("rally_openstack/common/services/identity/keystone_v3.py"),
     r'name=username, password=password,',
     r'name=username, password=(password or ("Aa1!" + str(__import__("uuid").uuid4()))),'
 )
 
 # Patch keystone_v3.py to disable password expiry and forced password change
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/common/services/identity/keystone_v3.py",
+    _path("rally_openstack/common/services/identity/keystone_v3.py"),
     r'domain=domain_id, enabled=enabled\)',
     r'domain=domain_id, enabled=enabled, options={"ignore_change_password_upon_first_use": True, "ignore_password_expiry": True})'
 )
 
 # Patch keystone_v2.py
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/common/services/identity/keystone_v2.py",
+    _path("rally_openstack/common/services/identity/keystone_v2.py"),
     r'password = password or str\(uuid\.uuid4\(\)\)',
     r'password = password or ("Aa1!" + str(uuid.uuid4()))'
 )
 
 # Patch contexts/keystone/users.py
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/task/contexts/keystone/users.py",
+    _path("rally_openstack/task/contexts/keystone/users.py"),
     r'password = \(str\(uuid\.uuid4\(\)\)',
     r'password = (("Aa1!" + str(uuid.uuid4()))'
 )
 
 # Patch scenarios/keystone/basic.py
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/task/scenarios/keystone/basic.py",
+    _path("rally_openstack/task/scenarios/keystone/basic.py"),
     r'password = self\.generate_random_name\(\)',
     r'password = "Aa1!" + self.generate_random_name()'
 )
 
 # Also patch basic.py create_user to pass a default strong password if kwargs has no password
 patch_file(
-    "/usr/local/lib/python3.14/site-packages/rally_openstack/task/scenarios/keystone/basic.py",
+    _path("rally_openstack/task/scenarios/keystone/basic.py"),
     r'self\.admin_keystone\.create_user\((.*?)\*\*kwargs\)',
     r'self.admin_keystone.create_user(\1password=kwargs.pop("password", "Aa1!" + self.generate_random_name()), **kwargs)'
 )

@@ -91,6 +91,15 @@ async function fetchHealthHistory() {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
+
+// Escape HTML special characters to prevent XSS when interpolating untrusted
+// data (service names, scenario names, timestamps) into innerHTML.
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = String(str ?? "");
+  return div.innerHTML;
+}
+
 function formatTimestamp(ts) {
   if (!ts || ts === "waiting_for_first_run" || ts === "none")
     return "Waiting for first run...";
@@ -172,7 +181,7 @@ function renderTimeline(history) {
     // Tooltip content
     const failedSvcs = Object.entries(run.services || {})
       .filter(([, v]) => v.status === "failed")
-      .map(([k]) => k);
+      .map(([k]) => escapeHtml(k));
     const tooltipDetail =
       status === "failed"
         ? `Failed: ${failedSvcs.join(", ")}`
@@ -182,7 +191,7 @@ function renderTimeline(history) {
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
-                <strong>${formatTimestamp(run.timestamp)}</strong><br>
+                <strong>${escapeHtml(formatTimestamp(run.timestamp))}</strong><br>
                 ${tooltipDetail}
             </div>
         `;
@@ -277,13 +286,13 @@ function renderHealthTimeline(healthHistory) {
 
     const downSvcs = Object.entries(check.services || {})
       .filter(([, v]) => v.status === "down")
-      .map(([k]) => k);
+      .map(([k]) => escapeHtml(k));
     const detail =
       status === "down" ? `Down: ${downSvcs.join(", ")}` : "All services up";
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
-                <strong>${formatTimestamp(check.timestamp)}</strong><br>
+                <strong>${escapeHtml(formatTimestamp(check.timestamp))}</strong><br>
                 ${detail}
             </div>
         `;
@@ -324,7 +333,7 @@ function renderServiceCards(summary, history, health) {
     card.innerHTML = `
             <div class="card-header">
                 <div>
-                    <div class="card-title">${SERVICE_ICONS[name] || "⚙️"} ${name}</div>
+                    <div class="card-title">${SERVICE_ICONS[name] || "⚙️"} ${escapeHtml(name)}</div>
                     <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
                         ${SERVICE_DESCRIPTIONS[name] || ""}
                     </div>
@@ -333,7 +342,7 @@ function renderServiceCards(summary, history, health) {
                     <span class="status-chip ${data.status}">${data.status}</span>
                     <div class="live-indicator ${liveStatus}">
                         <span class="live-dot"></span>
-                        <span>${liveLabel}</span>
+                        <span>${escapeHtml(liveLabel)}</span>
                     </div>
                 </div>
             </div>
@@ -381,7 +390,7 @@ function openModal(serviceName, data) {
       .map(
         (s) => `
             <div class="scenario-row">
-                <div class="scenario-name">${s.name}</div>
+                <div class="scenario-name">${escapeHtml(s.name)}</div>
                 <div class="scenario-stats">
                     <div class="scenario-stat">
                         <div class="scenario-stat-value">${formatDuration(s.duration || 0)}</div>
@@ -685,12 +694,3 @@ refresh();
 
 // Auto-refresh
 setInterval(refresh, REFRESH_INTERVAL);
-
-// Show when next refresh happens
-(function updateTimerDisplay() {
-  let remaining = REFRESH_INTERVAL / 1000;
-  setInterval(() => {
-    remaining -= 1;
-    if (remaining <= 0) remaining = REFRESH_INTERVAL / 1000;
-  }, 1000);
-})();
