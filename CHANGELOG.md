@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.1] - 2026-03-01
+
+### Fixed
+
+- **Dashboard** — health check timeline tooltip was clipped by `overflow: hidden` on the container; changed to `overflow: visible` so tooltips render above the bar correctly
+- **Dashboard** — health check timeline now trims rendered cells to the maximum count that physically fits (2px cell + 2px gap per slot, minus 32px container padding); excess history is no longer rendered off-screen
+- **Dashboard** — health check count badge shows `"N of total checks"` when the visible count is less than the full history, making the trim visible to the user
+
+---
+
 ## [1.2.0] - 2026-03-01
 
 ### Summary

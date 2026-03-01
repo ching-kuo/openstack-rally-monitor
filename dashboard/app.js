@@ -269,8 +269,26 @@ function renderHealthTimeline(healthHistory) {
   const container = document.getElementById("healthTimeline");
   const countBadge = document.getElementById("healthTimelineCount");
 
-  const checks = (healthHistory && healthHistory.checks) || [];
-  countBadge.textContent = `${checks.length} check${checks.length !== 1 ? "s" : ""}`;
+  const allChecks = (healthHistory && healthHistory.checks) || [];
+  let checks = allChecks;
+
+  // Trim checks to the number that can physically fit in the container.
+  // Each cell is at least 2px wide with a 2px gap between cells.
+  // Container padding is 1rem (16px) on each side.
+  const innerWidth = container.clientWidth - 32;
+  if (innerWidth > 0) {
+    const maxCells = Math.floor((innerWidth + 2) / 4); // (minCell + gap) = 4px per slot
+    if (checks.length > maxCells) {
+      checks = allChecks.slice(allChecks.length - maxCells);
+    }
+  }
+
+  const showing = checks.length;
+  const total = allChecks.length;
+  const countLabel = showing < total
+    ? `${showing} of ${total} checks`
+    : `${total} check${total !== 1 ? "s" : ""}`;
+  countBadge.textContent = countLabel;
 
   if (checks.length === 0) {
     container.innerHTML =

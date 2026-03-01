@@ -266,7 +266,7 @@ section {
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-glass);
     backdrop-filter: blur(10px);
-    overflow: hidden;
+    overflow: visible;
     min-height: 56px;
     align-items: stretch;
 }
