@@ -130,28 +130,73 @@ rally_exporter_errors_total = Counter(
     registry=registry,
 )
 
+rally_data_valid = Gauge(
+    "rally_data_valid",
+    "Whether valid test result data is available (1) or not (0)",
+    registry=registry,
+)
+
+
+# ---------------------------------------------------------------------------
+# File Cache State
+# Avoids redundant disk reads when data has not changed between scrapes.
+# CACHE_MAX_AGE_SECONDS is a safety fallback: force re-read even if mtime
+# appears unchanged (e.g., on filesystems with low-resolution timestamps).
+# ---------------------------------------------------------------------------
+CACHE_MAX_AGE_SECONDS: float = 60.0
+
+_summary_mtime: float = -1.0
+_summary_data: dict = {}
+_summary_cache_time: float = 0.0
+
+_cleanup_mtime: float = -1.0
+_cleanup_data: dict = {}
+_cleanup_cache_time: float = 0.0
+
+# Tracks the timestamp of the last summary we processed into labeled metrics.
+# Only when this changes do we clear and rebuild per-service/scenario gauges.
+_last_processed_ts: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
 def load_latest_summary() -> dict:
-    """Load the latest summary JSON file."""
+    """Load the latest summary JSON file, using mtime-based caching."""
+    global _summary_mtime, _summary_data, _summary_cache_time
     summary_file = os.path.join(RESULTS_DIR, "latest_summary.json")
     try:
+        mtime = os.path.getmtime(summary_file)
+        now = time.time()
+        if mtime == _summary_mtime and (now - _summary_cache_time) < CACHE_MAX_AGE_SECONDS:
+            return _summary_data
         with open(summary_file, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+            data = json.load(f)
+        _summary_data = data
+        _summary_mtime = mtime
+        _summary_cache_time = now
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         rally_exporter_errors_total.labels(file="latest_summary.json").inc()
         return {"timestamp": "none", "services": {}}
 
 
 def load_cleanup_metrics() -> dict:
-    """Load cleanup metrics JSON file."""
+    """Load cleanup metrics JSON file, using mtime-based caching."""
+    global _cleanup_mtime, _cleanup_data, _cleanup_cache_time
     metrics_file = os.path.join(RESULTS_DIR, "cleanup_metrics.json")
     try:
+        mtime = os.path.getmtime(metrics_file)
+        now = time.time()
+        if mtime == _cleanup_mtime and (now - _cleanup_cache_time) < CACHE_MAX_AGE_SECONDS:
+            return _cleanup_data
         with open(metrics_file, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
+            data = json.load(f)
+        _cleanup_data = data
+        _cleanup_mtime = mtime
+        _cleanup_cache_time = now
+        return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         rally_exporter_errors_total.labels(file="cleanup_metrics.json").inc()
         return {"cleanup_failed": 0, "orphaned_resources": {}, "details": {}}
 
@@ -169,8 +214,97 @@ def parse_timestamp(ts: str) -> float:
 # ---------------------------------------------------------------------------
 # Metrics Update
 # ---------------------------------------------------------------------------
+_SVC_MAP: dict = {
+    "servers": "nova",
+    "networks": "neutron",
+    "routers": "neutron",
+    "security_groups": "neutron",
+    "volumes": "cinder",
+    "images": "glance",
+    "users": "keystone",
+    "projects": "keystone",
+}
+
+
+def _apply_cleanup_metrics(cleanup: dict) -> None:
+    """Apply cleanup orphan metrics from cleanup_metrics.json.
+
+    Called on every scrape regardless of whether the summary timestamp changed,
+    because cleanup_metrics.json has its own independent update cycle (written
+    after each test run by cleanup_monitor.sh).
+    """
+    # Scenario-created (s_rally_*) orphan metrics — warning/critical severity
+    orphaned = cleanup.get("orphaned_resources", {})
+    for service, count in orphaned.items():
+        rally_cleanup_failure.labels(service=service).set(1 if count > 0 else 0)
+        rally_orphaned_resources.labels(service=service, resource_type="total").set(count)
+
+    for resource_type, count in cleanup.get("details", {}).items():
+        svc = _SVC_MAP.get(resource_type, "unknown")
+        rally_orphaned_resources.labels(service=svc, resource_type=resource_type).set(count)
+
+    # Context-created (c_rally_*) orphan metrics — info severity
+    context_orphaned = cleanup.get("context_orphaned_resources", {})
+    for service, count in context_orphaned.items():
+        rally_context_cleanup_warning.labels(service=service).set(1 if count > 0 else 0)
+        rally_context_orphaned_resources.labels(service=service, resource_type="total").set(count)
+
+    for resource_type, count in cleanup.get("context_details", {}).items():
+        svc = _SVC_MAP.get(resource_type, "unknown")
+        rally_context_orphaned_resources.labels(service=svc, resource_type=resource_type).set(count)
+
+
 def update_metrics():
-    """Read latest results and update all Prometheus metrics."""
+    """Read latest results and update all Prometheus metrics.
+
+    Cleanup metrics (rally_cleanup_failure, rally_orphaned_resources, etc.) are
+    updated on every scrape because cleanup_metrics.json changes independently of
+    the summary timestamp (written after each run by cleanup_monitor.sh).
+
+    Summary-derived labeled metrics (per-service, per-scenario) are only cleared
+    and rebuilt when the summary timestamp changes, to avoid transient metric gaps.
+
+    rally_data_valid and rally_overall_success are always updated to reflect the
+    current validity of the data.
+    """
+    global _last_processed_ts
+
+    summary = load_latest_summary()
+    cleanup = load_cleanup_metrics()
+
+    services = summary.get("services", {})
+    current_ts = summary.get("timestamp", "")
+    is_valid = bool(services) and current_ts not in ("none", "waiting_for_first_run", "")
+
+    # Cleanup metrics are always applied — they come from a separate file
+    # with its own update cycle (written after each run by cleanup_monitor.sh).
+    # Apply them before the validity check so orphan signals remain current
+    # even when the summary file is missing or stale.
+    _apply_cleanup_metrics(cleanup)
+
+    if not is_valid:
+        # No usable data: signal invalidity without disturbing labeled metrics.
+        rally_data_valid.set(0)
+        rally_overall_success.set(0)
+        return
+
+    rally_data_valid.set(1)
+
+    # run_duration_seconds is written to the summary file after the test run
+    # completes, potentially with the same timestamp as the initial write.
+    # Update it on every valid scrape so corrections are never missed.
+    run_duration = summary.get("run_duration_seconds", 0)
+    if run_duration > 0:
+        rally_run_duration_seconds.set(run_duration)
+
+    # If the summary timestamp hasn't changed, summary-derived labeled metrics
+    # are already up-to-date. Skip the clear+rebuild to avoid transient gaps.
+    if current_ts == _last_processed_ts:
+        return
+
+    _last_processed_ts = current_ts
+
+    # New data: clear only summary-derived labeled metrics, then rebuild.
     for metric in [
         rally_task_success,
         rally_task_duration_seconds,
@@ -178,26 +312,16 @@ def update_metrics():
         rally_task_failures_total,
         rally_task_sla_passed,
         rally_service_status,
-        rally_cleanup_failure,
-        rally_orphaned_resources,
-        rally_context_cleanup_warning,
-        rally_context_orphaned_resources,
     ]:
         metric.clear()
 
-    summary = load_latest_summary()
-    cleanup = load_cleanup_metrics()
-
     # Update last run timestamp
-    ts = parse_timestamp(summary.get("timestamp", ""))
+    ts = parse_timestamp(current_ts)
     if ts > 0:
         rally_last_run_timestamp.set(ts)
 
-    # Track overall success
-    all_passed = True
-
     # Per-service metrics
-    services = summary.get("services", {})
+    all_passed = True
     for service, data in services.items():
         status = data.get("status", "pending")
 
@@ -238,52 +362,6 @@ def update_metrics():
             ).set(sla)
 
     rally_overall_success.set(1 if all_passed else 0)
-    run_duration = summary.get("run_duration_seconds", 0)
-    if run_duration > 0:
-        rally_run_duration_seconds.set(run_duration)
-
-    svc_map = {
-        "servers": "nova",
-        "networks": "neutron",
-        "routers": "neutron",
-        "security_groups": "neutron",
-        "volumes": "cinder",
-        "images": "glance",
-        "users": "keystone",
-        "projects": "keystone",
-    }
-
-    # Scenario-created (s_rally_*) orphan metrics — warning/critical severity
-    orphaned = cleanup.get("orphaned_resources", {})
-    for service, count in orphaned.items():
-        rally_cleanup_failure.labels(service=service).set(
-            1 if count > 0 else 0
-        )
-        rally_orphaned_resources.labels(
-            service=service, resource_type="total"
-        ).set(count)
-
-    for resource_type, count in cleanup.get("details", {}).items():
-        svc = svc_map.get(resource_type, "unknown")
-        rally_orphaned_resources.labels(
-            service=svc, resource_type=resource_type
-        ).set(count)
-
-    # Context-created (c_rally_*) orphan metrics — info severity
-    context_orphaned = cleanup.get("context_orphaned_resources", {})
-    for service, count in context_orphaned.items():
-        rally_context_cleanup_warning.labels(service=service).set(
-            1 if count > 0 else 0
-        )
-        rally_context_orphaned_resources.labels(
-            service=service, resource_type="total"
-        ).set(count)
-
-    for resource_type, count in cleanup.get("context_details", {}).items():
-        svc = svc_map.get(resource_type, "unknown")
-        rally_context_orphaned_resources.labels(
-            service=svc, resource_type=resource_type
-        ).set(count)
 
 
 # ---------------------------------------------------------------------------

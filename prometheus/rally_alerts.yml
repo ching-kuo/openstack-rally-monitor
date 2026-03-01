@@ -72,7 +72,7 @@ groups:
       # TEST FAILURES - Warning: a Rally scenario failed
       # -----------------------------------------------------------------------
       - alert: RallyTestFailure
-        expr: rally_task_success == 0
+        expr: rally_task_success == 0 and rally_data_valid == 1
         for: 5m
         labels:
           severity: warning
@@ -88,7 +88,7 @@ groups:
       # SERVICE DOWN - Critical: entire service is failing
       # -----------------------------------------------------------------------
       - alert: RallyServiceDown
-        expr: rally_service_status == 0
+        expr: rally_service_status == 0 and rally_data_valid == 1
         for: 10m
         labels:
           severity: critical
@@ -103,7 +103,7 @@ groups:
       # SLA BREACH - Warning: SLA criteria not met
       # -----------------------------------------------------------------------
       - alert: RallySLABreach
-        expr: rally_task_sla_passed == 0
+        expr: rally_task_sla_passed == 0 and rally_data_valid == 1
         for: 5m
         labels:
           severity: warning
@@ -113,6 +113,27 @@ groups:
           description: |
             The SLA criteria for {{ $labels.scenario }} ({{ $labels.service }})
             have not been met. Check for performance degradation.
+
+  - name: rally_data
+    rules:
+      # -----------------------------------------------------------------------
+      # DATA INVALID - Warning: exporter has no valid result data
+      # Fires when rally_data_valid is 0, meaning the summary file is missing,
+      # corrupt, or still at its initial "waiting_for_first_run" seed value.
+      # -----------------------------------------------------------------------
+      - alert: RallyDataInvalid
+        expr: rally_data_valid == 0
+        for: 30m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally exporter has no valid test result data"
+          description: |
+            The rally_data_valid metric has been 0 for over 30 minutes,
+            meaning the exporter cannot read a valid latest_summary.json.
+            The file may be missing, corrupt, or awaiting the first test run.
+            Check container logs: docker logs rally-monitor
 
   - name: rally_staleness
     rules:
@@ -136,7 +157,7 @@ groups:
       # OVERALL HEALTH - Critical: everything is failing
       # -----------------------------------------------------------------------
       - alert: RallyOverallFailure
-        expr: rally_overall_success == 0
+        expr: rally_overall_success == 0 and rally_data_valid == 1
         for: 15m
         labels:
           severity: critical
