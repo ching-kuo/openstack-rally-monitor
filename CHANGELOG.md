@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2] - 2026-03-02
+
+### Fixed
+
+- **Dashboard** — timeline tooltip text appeared vertically stretched because the tooltip inherited its parent cell's `scaleY` hover transform; fixed by applying a counter-scale (`scaleY(1/1.3)` on hover, `scaleY(1/1.4)` on selected state) so tooltip text renders at normal proportions
+
+---
+
 ## [1.2.1] - 2026-03-01
 
 ### Fixed
