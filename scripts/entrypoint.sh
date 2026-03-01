@@ -49,31 +49,18 @@ make_cron_schedule() {
 mkdir -p "${RESULTS_DIR}"
 mkdir -p /rally/logs
 
-# Fix volume ownership if the rally UID changed between image rebuilds.
-# Docker volumes persist across image rebuilds; if the system UID assigned to
-# the 'rally' user changes (e.g. python:3.13-slim vs python:3.14-slim allocate
-# different UIDs), files on existing volumes will be owned by the old UID and
-# the new rally process will get "Permission denied" writing to /results.
-# Running as root here, so chown always succeeds.
-#
-# Security hardening:
-#   - Canonicalize path and validate it resolves inside /results to prevent
-#     env-injection from redirecting chown to arbitrary paths.
-#   - Use --no-dereference so symlinks inside the volume are not followed
-#     (prevents a symlink from redirecting ownership outside the tree).
-_RESULTS_CANONICAL=$(readlink -f "${RESULTS_DIR}" 2>/dev/null || true)
-if [[ "${_RESULTS_CANONICAL}" != /results && "${_RESULTS_CANONICAL}" != /results/* ]]; then
-    log "ERROR: RESULTS_DIR resolves to '${_RESULTS_CANONICAL}', which is outside /results — refusing to chown"
-else
-    _RALLY_UID=$(id -u rally 2>/dev/null || true)
-    _RESULTS_UID=$(stat -c '%u' "${_RESULTS_CANONICAL}" 2>/dev/null || true)
-    if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RALLY_UID}" ]]; then
-        log "WARNING: ${_RESULTS_CANONICAL} is owned by UID ${_RESULTS_UID} but rally user is UID ${_RALLY_UID} — fixing ownership"
-        chown --no-dereference -R rally:root "${_RESULTS_CANONICAL}"
-        log "Ownership fixed"
-    fi
+# Detect volume ownership mismatch (can happen if an old volume pre-dates the
+# pinned UID in the Dockerfile). CAP_CHOWN is dropped so we cannot fix it here.
+# Log a warning with remediation steps; see CHANGELOG.md Migration Guide.
+_RALLY_UID=$(id -u rally 2>/dev/null || true)
+_RESULTS_UID=$(stat -c '%u' "${RESULTS_DIR}" 2>/dev/null || true)
+if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RALLY_UID}" ]]; then
+    log "WARNING: ${RESULTS_DIR} is owned by UID ${_RESULTS_UID} but rally user is UID ${_RALLY_UID}"
+    log "WARNING: Scripts will fail with Permission denied. Fix with a temporary container (see CHANGELOG.md):"
+    log "  docker volume ls | grep rally-results   # find your volume name"
+    log "  docker run --rm -v <volume>:/results busybox chown -R ${_RALLY_UID}:0 /results"
 fi
-unset _RESULTS_CANONICAL _RALLY_UID _RESULTS_UID
+unset _RALLY_UID _RESULTS_UID
 
 # Create a seed summary if none exists (so dashboard works on first boot)
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then

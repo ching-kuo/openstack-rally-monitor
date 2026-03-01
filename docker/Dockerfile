@@ -10,7 +10,13 @@ ENV RALLY_CONFIG_DIR=/rally/config
 
 # Create directories
 RUN mkdir -p /rally/data /rally/config /results /exporter /scripts /dashboard
-RUN useradd -r -s /bin/false -d /rally -g 0 rally
+# Pin UID to 1500 so it stays stable across base image rebuilds.
+# Without -u, useradd -r picks the next available system UID which can differ
+# between python:3.12-slim, 3.13-slim, etc., causing Permission denied on
+# persistent Docker volumes after a rebuild. 1500 sits above the system-user
+# range (0-999) used by slim base images while staying low enough to avoid
+# bloating sparse lastlog/faillog files.
+RUN useradd -r -u 1500 -s /bin/false -d /rally -g 0 rally
 
 # Install system deps and Python packages in a single layer.
 # Build-only packages (gcc, libffi-dev, libssl-dev, python3-dev) are removed

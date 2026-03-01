@@ -49,7 +49,7 @@ Three processes run inside a single container, managed by `scripts/entrypoint.sh
 | Process | Port | Description |
 |---------|------|-------------|
 | `rally_exporter.py` | `9101` | Flask app; reads JSON from `/results/` and exposes Prometheus metrics |
-| `http.server` (dashboard) | `8080` | Serves static HTML/JS/CSS dashboard backed by symlinked JSON files |
+| `serve.py` (dashboard) | `8080` | Serves static HTML/JS/CSS dashboard with security headers, backed by symlinked JSON files |
 | Cron | — | Schedules Rally test runs and lightweight API health checks |
 
 ## Quick Start
@@ -188,8 +188,8 @@ docker exec rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs
 docker logs -f rally-monitor
-docker exec rally-monitor tail -f /var/log/rally-tests.log
-docker exec rally-monitor tail -f /var/log/health-check.log
+docker exec rally-monitor tail -f /rally/logs/rally-tests.log
+docker exec rally-monitor tail -f /rally/logs/health-check.log
 ```
 
 > **Orphan prefixes:** `s_rally_*` resources are created by scenario plugins and cleaned up during the test. `c_rally_*` resources are created by context plugins (projects, users, networks) and cleaned up after the task completes. Both are detected by `cleanup_monitor.sh` and removable via `purge_orphans.sh`, but reported at different severities — see the alert table above.
@@ -219,14 +219,18 @@ openstack-rally-monitor/
 │   └── patch_rally.py
 ├── exporter/
 │   ├── rally_exporter.py
-│   └── requirements.txt
+│   ├── requirements.txt
+│   ├── requirements-test.txt
+│   └── test_rally_exporter.py
 ├── prometheus/
 │   ├── prometheus.yml
 │   └── rally_alerts.yml
 ├── dashboard/
 │   ├── index.html
 │   ├── style.css
-│   └── app.js
+│   ├── app.js
+│   ├── serve.py
+│   └── test_serve.py
 └── env.sample
 ```
 

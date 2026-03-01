@@ -1,5 +1,73 @@
 # Changelog
 
+## [1.2.0] - 2026-03-01
+
+### Summary
+
+Security hardening, exporter performance, test suite, and container stability improvements. No breaking changes to Rally scenarios, Prometheus scrape target, or environment variables.
+
+Existing deployments upgrading from v1.1.0: if your volume was created by v1.1.0 or earlier (before the `rally` UID was pinned), run the ownership migration below before rebuilding.
+
+### Added
+
+- **Prometheus exporter** — `rally_data_valid` gauge: `1` when valid result data is available, `0` otherwise (useful for alerting on stale/missing results)
+- **Prometheus exporter** — mtime-based file caching: skip JSON re-reads when `latest_summary.json` and `cleanup_metrics.json` have not changed between scrapes (60-second max-age safety fallback)
+- **Tests** — `exporter/test_rally_exporter.py`: unit + integration tests covering metric generation, caching, error paths, and timestamp parsing
+- **Tests** — `dashboard/test_serve.py`: unit tests for the static file server (security headers, path traversal prevention, content-type mapping)
+- **Scripts** — `purge_orphans.sh`: threshold guard — refuses to purge if orphan count exceeds a safety limit, preventing accidental mass deletion
+
+### Changed
+
+- **Docker** — `rally` user UID pinned to `1500` in the Dockerfile (`useradd -u 1500`); previously assigned dynamically by `useradd -r`, which caused ownership drift when upgrading between Python base image versions
+- **Exporter** — cleanup metric service-mapping extracted into `_SVC_MAP`; cleanup and summary metrics now independently tracked and applied
+- **Dashboard** — `escapeHtml()` utility applied to all `innerHTML` sinks (service names, scenario names, timestamps) to prevent XSS from crafted result files
+- **Dashboard** — dead timer-display IIFE removed from `app.js`
+- **Scripts** — `patch_rally.py` uses `sysconfig.get_paths()["purelib"]` for dynamic site-packages path discovery instead of a hardcoded glob
+- **Scripts** — `purge_orphans.sh` refactored: `_list_orphans()` generic helper extracted; duplicate per-service loops replaced with a single parameterized call using bash namerefs
+- **Scripts** — `run_tests.sh`: `task_args.json` written once in `main()` instead of once per service; removed useless `cat` pipes
+- **Entrypoint** — ownership mismatch detection at startup: logs a warning with actionable remediation steps if `/results` is not owned by the `rally` user (e.g., after an upgrade with an existing volume); no exit — container starts regardless to allow inspection
+- **Dockerfile** — `apt-get install`, `pip install`, and build-dep removal consolidated into a single `RUN` layer to reduce image layers and final size
+
+### Fixed
+
+- **Security** — cron environment export uses `printf %q` quoting to prevent shell injection if an `OS_*` variable contains special characters
+- **Security** — `purge_orphans.sh` and `cleanup_monitor.sh`: path containment check prevents traversal outside `/results` when writing output files
+- **Security** — `docker-compose.yml` ports bound to `127.0.0.1` by default, preventing unintended external exposure
+
+### Migration Guide (upgrading from v1.1.0)
+
+#### Check if volume ownership migration is needed
+
+If you are upgrading from v1.1.0 and your volume was created before the UID was pinned (i.e., the `rally` user was assigned a dynamic UID such as 997, 999, or similar), you must migrate volume ownership once.
+
+At startup, the container will log a warning if a mismatch is detected:
+
+```
+[entrypoint] WARNING: /results is owned by UID 997 but rally user is UID 1500
+```
+
+If you see this warning, run the migration below before or after the upgrade:
+
+```bash
+# Find the exact volume name (prefixed by your Compose project name)
+docker volume ls | grep rally-results
+
+# Migrate ownership (replace docker_rally-results with your actual volume name)
+docker run --rm -v docker_rally-results:/results busybox chown -R 1500:0 /results
+```
+
+Note: `docker exec ... chown` will not work because `cap_drop: ALL` removes `CAP_CHOWN`. The busybox container above runs with default Docker capabilities (which include `CAP_CHOWN`).
+
+#### Rebuild and restart
+
+```bash
+cd docker
+docker compose down
+docker compose up -d --build
+```
+
+---
+
 ## [1.1.0] - 2026-02-28
 
 ### Summary
@@ -44,12 +112,12 @@ The volume name is prefixed by your Docker Compose project name (the directory c
 docker volume ls | grep rally-results
 
 # Run the migration (replace docker_rally-results with your actual volume name)
-docker run --rm -v docker_rally-results:/results busybox chown -R 997:0 /results
+docker run --rm -v docker_rally-results:/results busybox chown -R 1500:0 /results
 ```
 
 Note: `docker exec ... chown` will not work because `cap_drop: ALL` removes `CAP_CHOWN` from the running container. The busybox container above runs with default Docker capabilities (which include `CAP_CHOWN`).
 
-UID 997 is the `rally` system user. Verify with:
+UID 1500 is the pinned `rally` user UID (fixed in the Dockerfile to avoid drift between base image rebuilds). Verify with:
 ```bash
 docker run --rm <new-image> id rally
 ```
