@@ -1,10 +1,25 @@
 import os
 import re
+import secrets
 import sysconfig
 
 # Locate the site-packages directory dynamically so the patch survives
 # Python minor-version bumps without manual path updates.
 SITE_PACKAGES = sysconfig.get_paths()["purelib"]
+
+# Inline Python expression embedded into patched library files at build time.
+# Generates a 20-char password containing at least one character from each
+# required class (upper, lower, digit, special).  Uses only stdlib so it works
+# in any Rally library context without additional imports.
+_STRONG_PWD_EXPR = (
+    '"".join(['
+    '__import__("secrets").choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), '
+    '__import__("secrets").choice("abcdefghijklmnopqrstuvwxyz"), '
+    '__import__("secrets").choice("0123456789"), '
+    '__import__("secrets").choice("!@#$%^&*"), '
+    '__import__("secrets").token_hex(8)'
+    '])'
+)
 
 
 def _path(rel):
@@ -61,7 +76,7 @@ inject_after_imports(
 patch_file(
     _path("rally_openstack/common/services/identity/keystone_v3.py"),
     r'name=username, password=password,',
-    r'name=username, password=(password or ("Aa1!" + str(__import__("uuid").uuid4()))),'
+    f'name=username, password=(password or {_STRONG_PWD_EXPR}),',
 )
 
 # Patch keystone_v3.py to disable password expiry and forced password change
@@ -75,26 +90,26 @@ patch_file(
 patch_file(
     _path("rally_openstack/common/services/identity/keystone_v2.py"),
     r'password = password or str\(uuid\.uuid4\(\)\)',
-    r'password = password or ("Aa1!" + str(uuid.uuid4()))'
+    f'password = password or {_STRONG_PWD_EXPR}',
 )
 
 # Patch contexts/keystone/users.py
 patch_file(
     _path("rally_openstack/task/contexts/keystone/users.py"),
     r'password = \(str\(uuid\.uuid4\(\)\)',
-    r'password = (("Aa1!" + str(uuid.uuid4()))'
+    f'password = ({_STRONG_PWD_EXPR}',
 )
 
 # Patch scenarios/keystone/basic.py
 patch_file(
     _path("rally_openstack/task/scenarios/keystone/basic.py"),
     r'password = self\.generate_random_name\(\)',
-    r'password = "Aa1!" + self.generate_random_name()'
+    f'password = {_STRONG_PWD_EXPR}',
 )
 
 # Also patch basic.py create_user to pass a default strong password if kwargs has no password
 patch_file(
     _path("rally_openstack/task/scenarios/keystone/basic.py"),
     r'self\.admin_keystone\.create_user\((.*?)\*\*kwargs\)',
-    r'self.admin_keystone.create_user(\1password=kwargs.pop("password", "Aa1!" + self.generate_random_name()), **kwargs)'
+    rf'self.admin_keystone.create_user(\1password=kwargs.pop("password", {_STRONG_PWD_EXPR}), **kwargs)',
 )
