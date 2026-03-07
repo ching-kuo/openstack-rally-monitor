@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.2.3] - 2026-03-07
+
+### Fixed
+
+- **Docker** — `rally db recreate` moved from Dockerfile build step to `entrypoint.sh` startup; previously ran as root during the image build, creating `/tmp/rally.sqlite` owned by root and unwritable by the `rally` user at runtime
+- **Scripts** — `run_tests.sh` lockfile path changed from `/tmp/rally-run.lock` to `/rally/logs/rally-run.lock`; `/tmp` is not writable by the `rally` user when `cap_drop: ALL` is set
+- **Docs** — all `docker exec` commands now include `-u rally` flag; without it, commands run as root which — due to `cap_drop: ALL` removing `DAC_OVERRIDE` — cannot write to `/results` (owned by `rally`, mode 755)
+- **Docs** — `docker-compose` command updated to `docker compose` throughout README and CLAUDE.md
+
+---
+
 ## [1.2.2] - 2026-03-02
 
 ### Fixed

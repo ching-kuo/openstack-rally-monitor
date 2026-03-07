@@ -68,7 +68,7 @@ vim .env
 
 ```bash
 cd docker
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### 3. Access
@@ -172,19 +172,19 @@ Rally records a task as **passed** based on scenario iteration success rate. Con
 
 ```bash
 # Trigger a manual test run
-docker exec rally-monitor /scripts/run_tests.sh
+docker exec -u rally rally-monitor /scripts/run_tests.sh
 
 # Run a lightweight health check (read-only, non-destructive)
-docker exec rally-monitor /scripts/health_check.sh
+docker exec -u rally rally-monitor /scripts/health_check.sh
 
 # Run orphan detection manually (read-only, updates Prometheus metrics)
-docker exec rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
+docker exec -u rally rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
 
 # Dry-run purge: list all orphaned resources without deleting anything
-docker exec rally-monitor /scripts/purge_orphans.sh
+docker exec -u rally rally-monitor /scripts/purge_orphans.sh
 
 # Purge orphaned resources (permanently deletes s_rally_* and c_rally_* resources)
-docker exec rally-monitor /scripts/purge_orphans.sh --confirm
+docker exec -u rally rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs
 docker logs -f rally-monitor

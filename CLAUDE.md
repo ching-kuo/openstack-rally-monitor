@@ -12,22 +12,22 @@ Rally OpenStack Monitor — a containerized tool that runs OpenStack cloud tests
 
 ```bash
 # Build and start the container
-cd docker && docker-compose up -d --build
+cd docker && docker compose up -d --build
 
 # Trigger a manual test run inside the running container
-docker exec rally-monitor /scripts/run_tests.sh
+docker exec -u rally rally-monitor /scripts/run_tests.sh
 
 # Run a lightweight health check (non-destructive read-only API calls)
-docker exec rally-monitor /scripts/health_check.sh
+docker exec -u rally rally-monitor /scripts/health_check.sh
 
 # Run cleanup orphan detection manually
-docker exec rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
+docker exec -u rally rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
 
 # Purge orphaned Rally resources (dry-run — shows what would be deleted)
-docker exec rally-monitor /scripts/purge_orphans.sh
+docker exec -u rally rally-monitor /scripts/purge_orphans.sh
 
 # Purge orphaned Rally resources (actually deletes them)
-docker exec rally-monitor /scripts/purge_orphans.sh --confirm
+docker exec -u rally rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs
 docker logs -f rally-monitor
