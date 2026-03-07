@@ -296,7 +296,7 @@ main() {
     log "=========================================="
     log "Rally Test Run: ${TIMESTAMP}"
     log "=========================================="
-    LOCKFILE="/tmp/rally-run.lock"
+    LOCKFILE="/rally/logs/rally-run.lock"
     exec 200>"${LOCKFILE}"
     flock -n 200 || { log "Another run is already in progress, exiting."; exit 0; }
     RUN_START_EPOCH=$(date +%s)
