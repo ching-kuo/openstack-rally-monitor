@@ -31,9 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-# Initialize Rally database
-RUN rally db recreate
-
 # Copy application files
 COPY rally/ /rally/config/
 COPY scripts/ /scripts/

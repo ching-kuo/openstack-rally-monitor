@@ -49,6 +49,15 @@ make_cron_schedule() {
 mkdir -p "${RESULTS_DIR}"
 mkdir -p /rally/logs
 
+# Initialize Rally's ephemeral SQLite database as the rally user.
+# rally db recreate was removed from the Dockerfile build step because it ran
+# as root, creating /tmp/rally.sqlite owned by root and unwritable at runtime.
+log "Initializing Rally database..."
+su -s /bin/bash rally -c "rally db recreate" || {
+    log "ERROR: Failed to initialize Rally database"
+    exit 1
+}
+
 # Detect volume ownership mismatch (can happen if an old volume pre-dates the
 # pinned UID in the Dockerfile). CAP_CHOWN is dropped so we cannot fix it here.
 # Log a warning with remediation steps; see CHANGELOG.md Migration Guide.
