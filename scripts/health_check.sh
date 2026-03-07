@@ -27,7 +27,7 @@ check() {
 }
 
 log "Starting health checks..."
-LOCKFILE="/tmp/rally-health.lock"
+LOCKFILE="/rally/logs/rally-health.lock"
 exec 200>"${LOCKFILE}"
 flock -n 200 || { log "Another health check is already in progress, exiting."; exit 0; }
 

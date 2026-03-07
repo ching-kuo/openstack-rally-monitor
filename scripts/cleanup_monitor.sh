@@ -58,7 +58,7 @@ check_security_groups() { check_resource openstack security group list; }
 # --------------------------------------------------------------------------
 main() {
     log "Starting orphaned resource check..."
-    LOCKFILE="/tmp/rally-cleanup.lock"
+    LOCKFILE="/rally/logs/rally-cleanup.lock"
     exec 200>"${LOCKFILE}"
     flock -n 200 || { log "Another cleanup check is already in progress, exiting."; exit 0; }
 
