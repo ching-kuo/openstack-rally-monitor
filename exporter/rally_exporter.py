@@ -105,6 +105,30 @@ rally_context_orphaned_resources = Gauge(
     registry=registry,
 )
 
+rally_rgw_orphaned_users = Gauge(
+    "rally_rgw_orphaned_users",
+    "Number of orphaned RGW implicit-tenant users detected during cleanup scans",
+    registry=registry,
+)
+
+rally_rgw_orphaned_buckets = Gauge(
+    "rally_rgw_orphaned_buckets",
+    "Number of buckets owned by orphaned RGW implicit-tenant users",
+    registry=registry,
+)
+
+rally_rgw_unknown_owner_orphans = Gauge(
+    "rally_rgw_unknown_owner_orphans",
+    "Number of orphaned RGW implicit-tenant users not present in the Rally provenance ledger",
+    registry=registry,
+)
+
+rally_rgw_scan_ok = Gauge(
+    "rally_rgw_scan_ok",
+    "Whether RGW orphan scanning is healthy: 1=ok/skipped, 0=error",
+    registry=registry,
+)
+
 rally_last_run_timestamp = Gauge(
     "rally_last_run_timestamp",
     "Epoch timestamp of the last Rally test run",
@@ -198,7 +222,15 @@ def load_cleanup_metrics() -> dict:
         return data
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         rally_exporter_errors_total.labels(file="cleanup_metrics.json").inc()
-        return {"cleanup_failed": 0, "orphaned_resources": {}, "details": {}}
+        return {
+            "cleanup_failed": 0,
+            "orphaned_resources": {},
+            "details": {},
+            "rgw_scan_status": "skipped",
+            "rgw_orphaned_users": 0,
+            "rgw_orphaned_buckets": 0,
+            "rgw_unknown_owner_orphans": 0,
+        }
 
 
 
@@ -252,6 +284,12 @@ def _apply_cleanup_metrics(cleanup: dict) -> None:
     for resource_type, count in cleanup.get("context_details", {}).items():
         svc = _SVC_MAP.get(resource_type, "unknown")
         rally_context_orphaned_resources.labels(service=svc, resource_type=resource_type).set(count)
+
+    rgw_scan_status = cleanup.get("rgw_scan_status", "skipped")
+    rally_rgw_orphaned_users.set(cleanup.get("rgw_orphaned_users", 0))
+    rally_rgw_orphaned_buckets.set(cleanup.get("rgw_orphaned_buckets", 0))
+    rally_rgw_unknown_owner_orphans.set(cleanup.get("rgw_unknown_owner_orphans", 0))
+    rally_rgw_scan_ok.set(0 if rgw_scan_status == "error" else 1)
 
 
 def update_metrics():

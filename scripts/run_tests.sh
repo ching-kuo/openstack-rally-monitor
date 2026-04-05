@@ -12,6 +12,7 @@ RETENTION_DAYS="${RALLY_RESULTS_RETENTION_DAYS:-7}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
+RALLY_PROJECT_LEDGER_FILE="${RESULTS_DIR}/rally_project_ids.log"
 RUN_LOG="${RUN_DIR}/run.log"
 
 SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift")
@@ -43,6 +44,49 @@ log_environment() {
     log "  RALLY_NOVA_IMAGE=${RALLY_NOVA_IMAGE:-cirros-0.6.2-x86_64-disk}"
     log "  RALLY_DEBUG=${RALLY_DEBUG:-false}"
     log "-------------------"
+}
+
+list_rally_context_project_ids() {
+    local json
+    json=$(openstack project list -f json 2>/dev/null) || return 1
+    echo "${json}" | jq -r '.[] | select(.Name | startswith("c_rally_")) | .ID' 2>/dev/null || return 1
+}
+
+append_rally_project_id() {
+    local project_id="$1" service="$2"
+    printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${project_id}" "${service}" >> "${RALLY_PROJECT_LEDGER_FILE}"
+}
+
+record_new_rally_context_projects() {
+    local service="$1" seen_file="$2"
+    local current_ids project_id
+    current_ids=$(list_rally_context_project_ids) || return 1
+
+    while IFS= read -r project_id; do
+        [[ -n "${project_id}" ]] || continue
+        if ! grep -Fxq "${project_id}" "${seen_file}"; then
+            printf '%s\n' "${project_id}" >> "${seen_file}"
+            append_rally_project_id "${project_id}" "${service}"
+            log "  ${service}: recorded Rally project ${project_id}"
+        fi
+    done <<< "${current_ids}"
+}
+
+track_rally_context_projects() {
+    local service="$1" task_pid="$2" seen_file="$3"
+    local warned=0
+
+    while kill -0 "${task_pid}" 2>/dev/null; do
+        if ! record_new_rally_context_projects "${service}" "${seen_file}"; then
+            if [[ "${warned}" -eq 0 ]]; then
+                log "  ${service}: WARNING - failed to poll Rally context projects; RGW provenance may be incomplete for this task"
+                warned=1
+            fi
+        fi
+        sleep 5
+    done
+
+    record_new_rally_context_projects "${service}" "${seen_file}" || true
 }
 
 # --------------------------------------------------------------------------
@@ -112,12 +156,32 @@ run_service_tests() {
     log "Running ${service} scenarios..."
     local task_uuid=""
     local log_file="${RUN_DIR}/${service}.log"
+    local tracker_seen_file
+    tracker_seen_file=$(mktemp)
+    if ! list_rally_context_project_ids > "${tracker_seen_file}"; then
+        : > "${tracker_seen_file}"
+        log "  ${service}: WARNING - failed to snapshot pre-run Rally projects"
+    fi
 
     if [[ "${RALLY_DEBUG:-false}" == "true" ]]; then
         log "  DEBUG mode enabled. Full logs saving to ${log_file}"
-        rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null || true
+        (
+            rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null
+        ) &
     else
-        rally task start "${scenario_file}" --task-args-file "${task_args_file}" > "${log_file}" 2>&1 || true
+        rally task start "${scenario_file}" --task-args-file "${task_args_file}" > "${log_file}" 2>&1 &
+    fi
+
+    local task_pid=$!
+    track_rally_context_projects "${service}" "${task_pid}" "${tracker_seen_file}" &
+    local tracker_pid=$!
+    local task_rc=0
+    wait "${task_pid}" || task_rc=$?
+    wait "${tracker_pid}" || true
+    rm -f "${tracker_seen_file}"
+
+    if [[ "${task_rc}" -ne 0 ]]; then
+        log "  ${service}: Rally task command exited with code ${task_rc}"
     fi
 
     # Log task output for debugging
@@ -276,7 +340,24 @@ publish_dashboard_files() {
 prune_old_results() {
     log "Pruning results older than ${RETENTION_DAYS} days..."
     find "${RESULTS_DIR}" -maxdepth 1 -type d -name "20*" -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+    prune_rally_project_ledger
     log "Pruning complete"
+}
+
+prune_rally_project_ledger() {
+    [[ -f "${RALLY_PROJECT_LEDGER_FILE}" ]] || return 0
+
+    local cutoff
+    cutoff=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
+        log "Skipping Rally project ledger pruning (date arithmetic unavailable)"
+        return 0
+    }
+
+    awk -v cutoff="${cutoff}" '
+        NF == 1 { print; next }
+        NF >= 2 && $1 >= cutoff { print }
+    ' "${RALLY_PROJECT_LEDGER_FILE}" > "${RALLY_PROJECT_LEDGER_FILE}.tmp" \
+        && mv "${RALLY_PROJECT_LEDGER_FILE}.tmp" "${RALLY_PROJECT_LEDGER_FILE}"
 }
 
 # --------------------------------------------------------------------------

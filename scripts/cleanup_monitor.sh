@@ -21,6 +21,9 @@ RESULTS_DIR="${RESULTS_DIR:-/results}"
 CLEANUP_METRICS_FILE="${RESULTS_DIR}/cleanup_metrics.json"
 SUMMARY_FILE="${1:-${RESULTS_DIR}/latest_summary.json}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/rgw_helpers.sh"
+
 S_FILTER='test("^s_rally")'
 C_FILTER='test("^c_rally")'
 
@@ -53,6 +56,74 @@ check_projects()        { check_resource openstack project list; }
 check_routers()         { check_resource openstack router list; }
 check_security_groups() { check_resource openstack security group list; }
 
+check_rgw_cleanup() {
+    RGW_SCAN_STATUS="skipped"
+    RGW_SCAN_ERRORS=0
+    RGW_ORPHANED_USERS=0
+    RGW_ORPHANED_BUCKETS=0
+    RGW_ORPHANED_OBJECTS=0
+    RGW_RALLY_OWNED_ORPHANS=0
+    RGW_UNKNOWN_OWNER_ORPHANS=0
+
+    if ! rgw_available; then
+        log "RGW orphan scan skipped (RGW admin credentials not configured)"
+        return 0
+    fi
+
+    RGW_SCAN_STATUS="ok"
+
+    local orphans_file
+    orphans_file=$(mktemp)
+    if ! rgw_find_orphaned_users > "${orphans_file}"; then
+        RGW_SCAN_STATUS="error"
+        if [[ "${RGW_LAST_FIND_ERRORS}" -gt 0 ]]; then
+            RGW_SCAN_ERRORS="${RGW_LAST_FIND_ERRORS}"
+        else
+            RGW_SCAN_ERRORS=1
+        fi
+        rm -f "${orphans_file}"
+        log "RGW orphan scan failed during user enumeration"
+        return 0
+    fi
+
+    RGW_SCAN_ERRORS="${RGW_LAST_FIND_ERRORS}"
+
+    local uid project_id bucket_json bucket_count object_count
+    while IFS= read -r uid; do
+        [[ -n "${uid}" ]] || continue
+
+        RGW_ORPHANED_USERS=$((RGW_ORPHANED_USERS + 1))
+        local ownership
+        ownership=$(rgw_classify_owner "${uid}")
+        if [[ "${ownership}" == "rally_owned" ]]; then
+            RGW_RALLY_OWNED_ORPHANS=$((RGW_RALLY_OWNED_ORPHANS + 1))
+        else
+            RGW_UNKNOWN_OWNER_ORPHANS=$((RGW_UNKNOWN_OWNER_ORPHANS + 1))
+        fi
+
+        if ! bucket_json=$(rgw_list_user_buckets "${uid}"); then
+            RGW_SCAN_ERRORS=$((RGW_SCAN_ERRORS + 1))
+            RGW_SCAN_STATUS="error"
+            log "RGW bucket listing failed for orphaned user ${uid}"
+            continue
+        fi
+
+        bucket_count=$(rgw_count_buckets "${bucket_json}")
+        object_count=$(rgw_count_objects "${bucket_json}")
+        RGW_ORPHANED_BUCKETS=$((RGW_ORPHANED_BUCKETS + bucket_count))
+        RGW_ORPHANED_OBJECTS=$((RGW_ORPHANED_OBJECTS + object_count))
+    done < "${orphans_file}"
+
+    rm -f "${orphans_file}"
+
+    if [[ "${RGW_SCAN_ERRORS}" -gt 0 ]]; then
+        RGW_SCAN_STATUS="error"
+        log "RGW orphan scan degraded: users=${RGW_ORPHANED_USERS} buckets=${RGW_ORPHANED_BUCKETS} objects=${RGW_ORPHANED_OBJECTS} errors=${RGW_SCAN_ERRORS}"
+    else
+        log "RGW orphan scan complete: users=${RGW_ORPHANED_USERS} buckets=${RGW_ORPHANED_BUCKETS} objects=${RGW_ORPHANED_OBJECTS}"
+    fi
+}
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -79,6 +150,7 @@ main() {
     read -r s_projects  c_projects  <<< "$(check_projects)"
     read -r s_routers   c_routers   <<< "$(check_routers)"
     read -r s_secgroups c_secgroups <<< "$(check_security_groups)"
+    check_rgw_cleanup
 
     local s_total c_total
     s_total=$(( s_servers + s_networks + s_volumes + s_images + s_users + s_projects + s_routers + s_secgroups ))
@@ -113,6 +185,13 @@ main() {
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "cleanup_failed": ${cleanup_failed},
     "context_cleanup_warning": ${context_cleanup_warning},
+    "rgw_scan_status": "${RGW_SCAN_STATUS}",
+    "rgw_scan_errors": ${RGW_SCAN_ERRORS},
+    "rgw_orphaned_users": ${RGW_ORPHANED_USERS},
+    "rgw_orphaned_buckets": ${RGW_ORPHANED_BUCKETS},
+    "rgw_orphaned_objects": ${RGW_ORPHANED_OBJECTS},
+    "rgw_rally_owned_orphans": ${RGW_RALLY_OWNED_ORPHANS},
+    "rgw_unknown_owner_orphans": ${RGW_UNKNOWN_OWNER_ORPHANS},
     "orphaned_resources": {
         "nova": ${s_servers},
         "neutron": $((s_networks + s_routers + s_secgroups)),
@@ -153,7 +232,7 @@ EOF
 
     log "Cleanup metrics written to ${CLEANUP_METRICS_FILE}"
 
-    if [[ "${cleanup_failed}" -eq 1 ]]; then
+    if [[ "${cleanup_failed}" -eq 1 || "${RGW_SCAN_STATUS}" == "error" ]]; then
         return 1
     fi
 }

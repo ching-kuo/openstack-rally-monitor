@@ -66,6 +66,50 @@ groups:
             cleanly. Monitor for accumulation across runs.
           runbook: "docker exec rally-monitor /scripts/purge_orphans.sh"
 
+      # -----------------------------------------------------------------------
+      # RGW ORPHANS - Warning: orphaned implicit-tenant users/buckets in Ceph
+      # -----------------------------------------------------------------------
+      - alert: RallyRgwOrphanedUsers
+        expr: rally_rgw_orphaned_users > 0
+        for: 30m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally RGW orphaned users detected"
+          description: |
+            {{ $value }} orphaned RGW implicit-tenant user(s) are present.
+            These users outlived their Keystone project teardown and may leak
+            Swift data in Ceph.
+          runbook: "docker exec rally-monitor /scripts/purge_orphans.sh"
+
+      - alert: RallyRgwOrphanedBuckets
+        expr: rally_rgw_orphaned_buckets > 5
+        for: 30m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally RGW orphaned buckets detected"
+          description: |
+            {{ $value }} bucket(s) are owned by orphaned RGW implicit-tenant
+            users. Verify Rally cleanup and purge Rally-owned RGW orphans when safe.
+          runbook: "docker exec rally-monitor /scripts/purge_orphans.sh"
+
+      - alert: RallyRgwScanDegraded
+        expr: rally_rgw_scan_ok == 0
+        for: 15m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally RGW orphan scan degraded"
+          description: |
+            RGW orphan detection is reporting an error state. Check RGW admin API
+            credentials, network reachability, and Keystone lookups before relying
+            on zero-orphan readings.
+          runbook: "docker logs rally-monitor"
+
   - name: rally_tests
     rules:
       # -----------------------------------------------------------------------

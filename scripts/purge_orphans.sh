@@ -28,12 +28,15 @@
 #   6. Images
 #   7. Users
 #   8. Projects     (last — users and resources may belong to them)
+#   9. RadosGW users (after Keystone projects are gone; buckets first, then user)
 # ==============================================================================
 set -euo pipefail
 
 CONFIRM=false
 FORCE=false
 RESULTS_DIR="${RESULTS_DIR:-/results}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/rgw_helpers.sh"
 for arg in "$@"; do
     case "$arg" in
         --confirm) CONFIRM=true ;;
@@ -65,6 +68,9 @@ TOTAL_FAILED=0
 # Any failure means TOTAL_FOUND is an undercount; we abort CONFIRM mode
 # rather than risk deleting beyond the threshold with a bad count.
 _LISTING_ERRORS=0
+_RGW_LISTING_ERRORS=0
+_RGW_SKIPPED_UNKNOWN=0
+RGW_PURGE_SKIPPED=false
 
 # Phase 1 ID snapshots — populated during listing, consumed during deletion.
 # Phase 2 deletes exactly these IDs (no re-listing), ensuring the threshold
@@ -77,6 +83,8 @@ declare -a _SNAP_NETWORKS=()
 declare -a _SNAP_IMAGES=()
 declare -a _SNAP_USERS=()
 declare -a _SNAP_PROJECTS=()
+declare -a _SNAP_RGW_USERS=()
+declare -a _SNAP_RGW_BUCKETS=()
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [purge-orphans] $*"; }
 
@@ -87,14 +95,18 @@ write_audit_log() {
     local ts found_in_listing="$1" deleted="$2" failed="$3"
     ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    # Convert bash arrays to JSON arrays; handle empty arrays gracefully.
     _arr_to_json() {
         if [[ "${#@}" -eq 0 ]]; then echo "[]"; return; fi
         printf '%s\n' "$@" | jq -R . | jq -s .
     }
+    _pairs_to_json() {
+        if [[ "${#@}" -eq 0 ]]; then echo "[]"; return; fi
+        printf '%s\n' "$@" | jq -R 'split("|") | {uid: .[0], bucket: .[1]}' | jq -s .
+    }
 
     local servers_json volumes_json routers_json secgroups_json
     local networks_json images_json users_json projects_json
+    local rgw_users_json rgw_buckets_json
     servers_json=$(_arr_to_json "${_SNAP_SERVERS[@]+"${_SNAP_SERVERS[@]}"}")
     volumes_json=$(_arr_to_json "${_SNAP_VOLUMES[@]+"${_SNAP_VOLUMES[@]}"}")
     routers_json=$(_arr_to_json "${_SNAP_ROUTERS[@]+"${_SNAP_ROUTERS[@]}"}")
@@ -103,6 +115,8 @@ write_audit_log() {
     images_json=$(_arr_to_json "${_SNAP_IMAGES[@]+"${_SNAP_IMAGES[@]}"}")
     users_json=$(_arr_to_json "${_SNAP_USERS[@]+"${_SNAP_USERS[@]}"}")
     projects_json=$(_arr_to_json "${_SNAP_PROJECTS[@]+"${_SNAP_PROJECTS[@]}"}")
+    rgw_users_json=$(_arr_to_json "${_SNAP_RGW_USERS[@]+"${_SNAP_RGW_USERS[@]}"}")
+    rgw_buckets_json=$(_pairs_to_json "${_SNAP_RGW_BUCKETS[@]+"${_SNAP_RGW_BUCKETS[@]}"}")
 
     # Sanitize filename: colons in ISO timestamp → hyphens.
     local safe_ts="${ts//:/-}"
@@ -126,6 +140,11 @@ write_audit_log() {
         --argjson images "$images_json" \
         --argjson users "$users_json" \
         --argjson projects "$projects_json" \
+        --argjson rgw_users "$rgw_users_json" \
+        --argjson rgw_buckets "$rgw_buckets_json" \
+        --argjson rgw_listing_errors "${_RGW_LISTING_ERRORS}" \
+        --argjson rgw_skipped_unknown_owner "${_RGW_SKIPPED_UNKNOWN}" \
+        --argjson rgw_purge_skipped "$( $RGW_PURGE_SKIPPED && echo true || echo false )" \
         '{
             timestamp: $ts,
             hostname: $host,
@@ -135,6 +154,9 @@ write_audit_log() {
             total_found: $total_found,
             total_deleted: $total_deleted,
             total_failed: $total_failed,
+            rgw_listing_errors: $rgw_listing_errors,
+            rgw_skipped_unknown_owner: $rgw_skipped_unknown_owner,
+            rgw_purge_skipped: $rgw_purge_skipped,
             found_ids: {
                 servers: $servers,
                 volumes: $volumes,
@@ -143,7 +165,9 @@ write_audit_log() {
                 networks: $networks,
                 images: $images,
                 users: $users,
-                projects: $projects
+                projects: $projects,
+                rgw_users: $rgw_users,
+                rgw_buckets: $rgw_buckets
             }
         }' > "${audit_tmp}" && mv "${audit_tmp}" "${audit_file}"
 
@@ -342,6 +366,107 @@ purge_projects_delete() {
     done
 }
 
+purge_rgw() {
+    if ! rgw_available; then
+        log "RGW users: skipped (RGW admin credentials not configured)"
+        return
+    fi
+
+    local orphans_file
+    orphans_file=$(mktemp)
+    if ! rgw_find_orphaned_users > "${orphans_file}"; then
+        _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + (RGW_LAST_FIND_ERRORS > 0 ? RGW_LAST_FIND_ERRORS : 1)))
+        log "RGW users: WARNING — orphan scan failed; RGW purge is disabled for this run"
+        rm -f "${orphans_file}"
+        return
+    fi
+
+    _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + RGW_LAST_FIND_ERRORS))
+
+    local listed_any=0
+    local uid bucket_json bucket_count object_count ownership bucket_name
+    while IFS= read -r uid; do
+        [[ -n "${uid}" ]] || continue
+        listed_any=1
+        ownership=$(rgw_classify_owner "${uid}")
+
+        if ! bucket_json=$(rgw_list_user_buckets "${uid}"); then
+            _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + 1))
+            log "RGW user ${uid}: WARNING — bucket listing failed; skipping from purge snapshot"
+            continue
+        fi
+
+        bucket_count=$(rgw_count_buckets "${bucket_json}")
+        object_count=$(rgw_count_objects "${bucket_json}")
+
+        if [[ "${ownership}" == "rally_owned" ]]; then
+            log "RGW user ${uid}: orphaned (rally-owned, ${bucket_count} buckets, ${object_count} objects)"
+            TOTAL_FOUND=$((TOTAL_FOUND + 1))
+            _SNAP_RGW_USERS+=("${uid}")
+            while IFS= read -r bucket_name; do
+                [[ -n "${bucket_name}" ]] || continue
+                log "  RGW bucket ${bucket_name}"
+                TOTAL_FOUND=$((TOTAL_FOUND + 1))
+                _SNAP_RGW_BUCKETS+=("${uid}|${bucket_name}")
+            done < <(echo "${bucket_json}" | jq -r '.[].name // empty' 2>/dev/null || true)
+        else
+            _RGW_SKIPPED_UNKNOWN=$((_RGW_SKIPPED_UNKNOWN + 1))
+            log "RGW user ${uid}: SKIPPED (unknown owner, ${bucket_count} buckets, ${object_count} objects)"
+        fi
+    done < "${orphans_file}"
+
+    rm -f "${orphans_file}"
+
+    if [[ "${listed_any}" -eq 0 ]]; then
+        log "RGW users: none"
+    elif [[ "${#_SNAP_RGW_USERS[@]}" -eq 0 && "${_RGW_SKIPPED_UNKNOWN}" -gt 0 ]]; then
+        log "RGW users: no Rally-owned orphans eligible for purge"
+    fi
+}
+
+purge_rgw_delete() {
+    if [[ "${_RGW_LISTING_ERRORS}" -gt 0 ]]; then
+        RGW_PURGE_SKIPPED=true
+        log "RGW purge skipped: ${_RGW_LISTING_ERRORS} RGW listing error(s) occurred during Phase 1."
+        log "Investigate RGW or Keystone connectivity before retrying."
+        return
+    fi
+
+    [[ "${#_SNAP_RGW_USERS[@]}" -eq 0 ]] && return
+
+    local uid entry bucket_uid bucket_name user_failed
+    for uid in "${_SNAP_RGW_USERS[@]}"; do
+        user_failed=0
+        for entry in "${_SNAP_RGW_BUCKETS[@]}"; do
+            bucket_uid="${entry%%|*}"
+            bucket_name="${entry#*|}"
+            [[ "${bucket_uid}" == "${uid}" ]] || continue
+            if rgw_delete_bucket "${bucket_name}"; then
+                log "  RGW bucket ${bucket_name}: deleted"
+                TOTAL_DELETED=$((TOTAL_DELETED + 1))
+            else
+                log "  RGW bucket ${bucket_name}: deletion FAILED"
+                TOTAL_FAILED=$((TOTAL_FAILED + 1))
+                user_failed=1
+            fi
+        done
+
+        if [[ "${user_failed}" -ne 0 ]]; then
+            log "  RGW user ${uid}: deletion SKIPPED because bucket deletion did not fully succeed"
+            TOTAL_FAILED=$((TOTAL_FAILED + 1))
+            continue
+        fi
+
+        if rgw_delete_user "${uid}"; then
+            log "  RGW user ${uid}: deleted"
+            TOTAL_DELETED=$((TOTAL_DELETED + 1))
+        else
+            log "  RGW user ${uid}: deletion FAILED"
+            TOTAL_FAILED=$((TOTAL_FAILED + 1))
+        fi
+    done
+}
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -364,6 +489,7 @@ main() {
     purge_images
     purge_users
     purge_projects
+    purge_rgw
 
     echo
 
@@ -412,6 +538,7 @@ main() {
     purge_images_delete
     purge_users_delete
     purge_projects_delete
+    purge_rgw_delete
 
     echo
     log "Done. Deleted ${TOTAL_DELETED} of ${found_in_listing} orphaned resources (${TOTAL_FAILED} failed)."
@@ -429,6 +556,9 @@ main() {
     fi
 
     # Exit non-zero if any deletions failed
+    if $RGW_PURGE_SKIPPED; then
+        exit 1
+    fi
     [[ "${TOTAL_FAILED}" -gt 0 ]] && exit 1
 }
 

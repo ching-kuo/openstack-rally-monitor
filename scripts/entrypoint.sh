@@ -93,7 +93,24 @@ fi
 if [[ ! -f "${RESULTS_DIR}/results.json" ]]; then
     jq -n \
         --slurpfile summary "${RESULTS_DIR}/latest_summary.json" \
-        '{summary: $summary[0], cleanup: {cleanup_failed: 0, orphaned_resources: {}, details: {}}}' \
+        '{
+            summary: $summary[0],
+            cleanup: {
+                cleanup_failed: 0,
+                context_cleanup_warning: 0,
+                rgw_scan_status: "skipped",
+                rgw_scan_errors: 0,
+                rgw_orphaned_users: 0,
+                rgw_orphaned_buckets: 0,
+                rgw_orphaned_objects: 0,
+                rgw_rally_owned_orphans: 0,
+                rgw_unknown_owner_orphans: 0,
+                orphaned_resources: {},
+                context_orphaned_resources: {},
+                details: {},
+                context_details: {}
+            }
+        }' \
         > "${RESULTS_DIR}/results.json"
     log "Created seed results.json"
 fi
@@ -158,6 +175,7 @@ RALLY_ENV_VARS=(
     OS_AUTH_TYPE OS_ENDPOINT_TYPE OS_INTERFACE
     RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS
     RALLY_NOVA_FLAVOR RALLY_NOVA_IMAGE RALLY_NEUTRON_NETWORK_CIDR RALLY_DEBUG
+    RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION
     RALLY_CONFIG_DIR
     RESULTS_DIR EXPORTER_PORT DASHBOARD_PORT HEALTH_CHECK_INTERVAL
 )

@@ -37,12 +37,16 @@ def make_summary(timestamp="20240101T120000Z", services=None, run_duration=10.0)
     return {"timestamp": timestamp, "services": services, "run_duration_seconds": run_duration}
 
 
-def make_cleanup(s_nova=0, c_nova=0):
+def make_cleanup(s_nova=0, c_nova=0, rgw_status="skipped", rgw_users=0, rgw_buckets=0, rgw_unknown=0):
     """Build a minimal cleanup_metrics dict."""
     return {
         "timestamp": "20240101T120000Z",
         "cleanup_failed": 1 if s_nova > 0 else 0,
         "context_cleanup_warning": 1 if c_nova > 0 else 0,
+        "rgw_scan_status": rgw_status,
+        "rgw_orphaned_users": rgw_users,
+        "rgw_orphaned_buckets": rgw_buckets,
+        "rgw_unknown_owner_orphans": rgw_unknown,
         "orphaned_resources": {"nova": s_nova},
         "context_orphaned_resources": {"nova": c_nova},
         "details": {"servers": s_nova},
@@ -88,6 +92,10 @@ def reset_module_state():
         exporter.rally_context_orphaned_resources,
     ]:
         m.clear()
+    exporter.rally_rgw_orphaned_users.set(0)
+    exporter.rally_rgw_orphaned_buckets.set(0)
+    exporter.rally_rgw_unknown_owner_orphans.set(0)
+    exporter.rally_rgw_scan_ok.set(1)
     yield
 
 
@@ -189,7 +197,9 @@ class TestLoadLatestSummary:
 class TestLoadCleanupMetrics:
     def test_missing_file_returns_default(self, results_dir):
         result = exporter.load_cleanup_metrics()
-        assert result == {"cleanup_failed": 0, "orphaned_resources": {}, "details": {}}
+        assert result["cleanup_failed"] == 0
+        assert result["rgw_scan_status"] == "skipped"
+        assert result["rgw_orphaned_users"] == 0
 
     def test_corrupt_json_returns_default(self, results_dir):
         (results_dir / "cleanup_metrics.json").write_text("{bad json")
@@ -338,6 +348,31 @@ class TestUpdateMetrics:
         output = metrics_output()
         assert "rally_data_valid 0.0" in output
         assert 'rally_cleanup_failure{service="nova"} 1.0' in output
+
+    def test_rgw_metrics_follow_cleanup_file(self, results_dir):
+        summary_path = results_dir / "latest_summary.json"
+        cleanup_path = results_dir / "cleanup_metrics.json"
+
+        summary_path.write_text(json.dumps(make_summary()))
+        cleanup_path.write_text(json.dumps(make_cleanup(rgw_status="ok", rgw_users=2, rgw_buckets=5, rgw_unknown=1)))
+        exporter.update_metrics()
+
+        output = metrics_output()
+        assert "rally_rgw_orphaned_users 2.0" in output
+        assert "rally_rgw_orphaned_buckets 5.0" in output
+        assert "rally_rgw_unknown_owner_orphans 1.0" in output
+        assert "rally_rgw_scan_ok 1.0" in output
+
+    def test_rgw_scan_error_sets_scan_ok_zero(self, results_dir):
+        summary_path = results_dir / "latest_summary.json"
+        cleanup_path = results_dir / "cleanup_metrics.json"
+
+        summary_path.write_text(json.dumps(make_summary()))
+        cleanup_path.write_text(json.dumps(make_cleanup(rgw_status="error", rgw_users=1, rgw_buckets=2)))
+        exporter.update_metrics()
+
+        output = metrics_output()
+        assert "rally_rgw_scan_ok 0.0" in output
 
 
 # ---------------------------------------------------------------------------

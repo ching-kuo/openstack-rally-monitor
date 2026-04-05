@@ -67,6 +67,7 @@ The entire system runs in a single Docker container (`rally-monitor`) with three
 ```
 run_tests.sh
   → rally task start <scenario>.yaml   (for each of 6 services)
+  → poll live c_rally_* projects       (append IDs to /results/rally_project_ids.log)
   → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json)
   → build_summary()                    → /results/latest_summary.json
   → cleanup_monitor.sh                 → /results/cleanup_metrics.json
@@ -78,7 +79,7 @@ health_check.sh
 
 rally_exporter.py
   → reads /results/latest_summary.json + cleanup_metrics.json on each /metrics scrape
-  → updates Prometheus Gauges in memory
+  → updates Prometheus Gauges in memory (including RGW orphan/scan health)
 ```
 
 ### File Layout (runtime volumes)
@@ -86,6 +87,7 @@ rally_exporter.py
 - `/results/` — Docker volume `rally-results`; persists across restarts
   - `latest_summary.json` — current run summary (seed file created on first boot)
   - `cleanup_metrics.json` — orphaned resource counts from `cleanup_monitor.sh`
+  - `rally_project_ids.log` — append-only ledger of Rally-created Keystone project IDs for RGW purge provenance
   - `results.json` — combined summary + cleanup for dashboard
   - `history.json` — all retained per-run summaries for the timeline
   - `health.json` / `health_history.json` — API health check results
@@ -95,7 +97,7 @@ rally_exporter.py
 
 ### Orphan Detection
 
-`scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. The exporter exposes these as `rally_cleanup_failure` and `rally_orphaned_resources` Prometheus metrics.
+`scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. When `RGW_ADMIN_URL`, `RGW_ACCESS_KEY`, and `RGW_SECRET_KEY` are configured, it also queries the RGW admin REST API for orphaned implicit-tenant users and marks the scan as `ok`, `skipped`, or `error`. The exporter exposes these as OpenStack cleanup gauges plus `rally_rgw_*` metrics.
 
 ### Rally Scenarios
 
@@ -111,18 +113,63 @@ Located in `rally/scenarios/` (6 services: keystone, nova, neutron, glance, cind
 | `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight health checks |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days before old run directories are pruned |
 | `RALLY_NOVA_FLAVOR` / `RALLY_NOVA_IMAGE` | `m1.tiny` / `cirros-...` | Nova scenario inputs |
+| `RGW_ADMIN_URL` / `RGW_ACCESS_KEY` / `RGW_SECRET_KEY` | — | Optional RGW admin API config for orphan detection and purge |
+| `RGW_REGION` | unset | Optional explicit SigV4 region for RGW admin requests |
 | `EXPORTER_PORT` / `DASHBOARD_PORT` | `9101` / `8080` | Exposed ports |
 | `RALLY_DEBUG` | `false` | Set to `true` for verbose rally task logging |
 
 ### Cron Environment
 
-Environment variables are exported to `/etc/rally_env` (mode 0600) at container startup and sourced by cron jobs. The file contains `OS_PASSWORD` — do not loosen its permissions.
+Environment variables are exported to `/rally/rally_env` (mode 0640) at container startup and sourced by cron jobs. The file contains `OS_PASSWORD` and (when configured) `RGW_SECRET_KEY` — do not loosen its permissions.
 
 ### patch_rally.py
 
 `scripts/patch_rally.py` is applied at Docker build time to patch Rally's internal password-generation policy. It runs once inside the image build (via `RUN python3 /scripts/patch_rally.py` in the Dockerfile) and does not need to be re-run manually.
 
+### RGW Helpers
+
+`scripts/rgw_helpers.sh` is a source-only bash library used by both `cleanup_monitor.sh` and `purge_orphans.sh`. It wraps the RGW admin REST API via `curl --aws-sigv4` (no Ceph CLI needed). Key functions: `rgw_list_implicit_users` (paginated user listing), `rgw_find_orphaned_users` (cross-references RGW against Keystone with bulk pre-fetch), `rgw_classify_owner` (checks Rally provenance ledger), `rgw_delete_bucket`/`rgw_delete_user` (idempotent deletion). All deletion is gated on Rally ownership — only project IDs recorded in `rally_project_ids.log` are eligible for purge.
+
 ### Prometheus Integration
 
 - Scrape target: `<host>:9101/metrics`
 - Alert rules: copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and add it under `rule_files:` in `prometheus.yml`
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+|------|----------|
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Finding functions/classes by name or keyword |
+| `get_architecture_overview` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes` for code review.
+3. Use `get_affected_flows` to understand impact.
+4. Use `query_graph` pattern="tests_for" to check coverage.
