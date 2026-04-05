@@ -8,6 +8,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Lightweight Health Checks** — Read-only API probes every 15 minutes between heavy test runs
 - **Prometheus Metrics** — Full metrics exposure for test results, SLA compliance, and orphaned resources
 - **Orphan Detection & Cleanup** — Detects resources left behind by failed Rally cleanups (both `s_rally_*` and `c_rally_*` prefixes) and provides a manual purge tool
+- **RadosGW Orphan Management** — Optional: detects and purges orphaned Ceph RGW implicit-tenant users left behind when Rally deletes Keystone projects (requires RGW admin API credentials)
 - **7-Day History** — Results retained with automatic pruning
 - **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
 
@@ -128,6 +129,10 @@ All settings are controlled via environment variables in `.env`.
 | `RALLY_NOVA_FLAVOR` | `m1.tiny` | Flavor name for Nova scenarios |
 | `RALLY_NOVA_IMAGE` | `cirros-0.6.2-x86_64-disk` | Image name for Nova scenarios |
 | `RALLY_NEUTRON_NETWORK_CIDR` | `10.99.0.0/24` | CIDR for Neutron test networks |
+| `RGW_ADMIN_URL` | — | RGW admin API endpoint (enables RGW orphan detection/purge) |
+| `RGW_ACCESS_KEY` | — | S3 access key for RGW admin user (`buckets=*;users=*` caps) |
+| `RGW_SECRET_KEY` | — | S3 secret key for RGW admin user |
+| `RGW_REGION` | — | Explicit SigV4 region for RGW (omit if not required) |
 | `EXPORTER_PORT` | `9101` | Prometheus exporter port |
 | `DASHBOARD_PORT` | `8080` | Dashboard port |
 
@@ -153,6 +158,9 @@ Defined in `prometheus/rally_alerts.yml`.
 | `RallyCleanupFailure` | critical | `s_rally_*` scenario orphans detected — cleanup failed mid-test |
 | `RallyOrphanedResourcesHigh` | warning | `s_rally_*` orphan count >5 |
 | `RallyContextCleanupWarning` | info | `c_rally_*` context orphans detected — teardown failed on passing run |
+| `RallyRgwOrphanedUsers` | warning | Orphaned RGW implicit-tenant users detected |
+| `RallyRgwOrphanedBuckets` | warning | Orphaned RGW bucket count >5 |
+| `RallyRgwScanDegraded` | warning | RGW orphan scan is failing (API/auth issue) |
 | `RallyTestFailure` | warning | A scenario failed |
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
@@ -167,6 +175,33 @@ Rally records a task as **passed** based on scenario iteration success rate. Con
 |--------|-----------|--------------|----------|
 | `s_rally_*` | Scenario plugins | Cleanup failed **during** the test | critical/warning |
 | `c_rally_*` | Context plugins (users, projects, networks) | Teardown failed **after** a passing run | info |
+
+## RadosGW Orphan Management (Optional)
+
+When `rgw_keystone_implicit_tenants=true` is enabled in your Ceph cluster, each Keystone project automatically gets a corresponding RGW user (`<project_id>$<project_id>`). Rally creates and tears down Keystone projects for every test run, but does not clean up the RGW side — leaving orphaned users and buckets in Ceph.
+
+To enable RGW orphan detection and cleanup, set these environment variables:
+
+```bash
+RGW_ADMIN_URL=https://your-radosgw.example.com/admin
+RGW_ACCESS_KEY=<admin-s3-access-key>
+RGW_SECRET_KEY=<admin-s3-secret-key>
+# RGW_REGION=  # optional, only if your Ceph requires an explicit SigV4 region
+```
+
+The RGW admin user needs `buckets=*;users=*` capabilities:
+
+```bash
+radosgw-admin caps add --uid=<admin-uid> --caps="buckets=*;users=*"
+```
+
+**How it works:**
+
+- `cleanup_monitor.sh` queries the RGW admin API for implicit-tenant users, cross-references against Keystone, and reports orphan counts in `cleanup_metrics.json` with a scan health status (`ok`/`skipped`/`error`)
+- `purge_orphans.sh` deletes only **Rally-owned** RGW orphans — project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`) recorded during test runs. Non-Rally orphans are reported but never deleted.
+- All operations are **fail-closed**: API errors block destructive purge and surface as degraded scan status rather than false zeros
+
+If RGW credentials are not set, all RGW features are silently skipped — existing functionality is unaffected.
 
 ## Useful Commands
 
@@ -216,12 +251,14 @@ openstack-rally-monitor/
 │   ├── health_check.sh
 │   ├── cleanup_monitor.sh
 │   ├── purge_orphans.sh
+│   ├── rgw_helpers.sh
 │   └── patch_rally.py
 ├── exporter/
 │   ├── rally_exporter.py
 │   ├── requirements.txt
 │   ├── requirements-test.txt
-│   └── test_rally_exporter.py
+│   ├── test_rally_exporter.py
+│   └── test_rgw_helpers.py
 ├── prometheus/
 │   ├── prometheus.yml
 │   └── rally_alerts.yml
