@@ -41,6 +41,10 @@ rgw_curl() {
     local __body_var="$1" __status_var="$2" method="$3" path="$4"
     shift 4
 
+    # Pre-set caller variables so they are never unbound even if we return early.
+    printf -v "${__body_var}" '%s' ""
+    printf -v "${__status_var}" '%s' "000"
+
     local base_url="${RGW_ADMIN_URL%/}"
     local url
     if [[ "${path}" == /* ]]; then
@@ -86,23 +90,25 @@ rgw_curl() {
         set +x
     fi
 
-    local http_code rc
-    http_code=$(curl "${curl_args[@]}" "${url}")
-    rc=$?
+    rgw_log "DEBUG: ${method} ${path} -> ${url}"
+    local _rc_http_code _rc
+    _rc_http_code=$(curl "${curl_args[@]}" "${url}" 2>&1)
+    _rc=$?
 
     (( had_xtrace )) && set -x
 
-    if [[ "${rc}" -ne 0 ]]; then
+    if [[ "${_rc}" -ne 0 ]]; then
         rm -f "${body_file}"
-        rgw_log "RGW request failed: ${method} ${path}"
+        rgw_log "RGW request failed: ${method} ${path} (curl exit ${_rc}: ${_rc_http_code})"
         return 1
     fi
 
-    local body
-    body=$(cat "${body_file}")
+    local _body
+    _body=$(cat "${body_file}")
     rm -f "${body_file}"
-    printf -v "${__body_var}" '%s' "${body}"
-    printf -v "${__status_var}" '%s' "${http_code}"
+    printf -v "${__body_var}" '%s' "${_body}"
+    printf -v "${__status_var}" '%s' "${_rc_http_code}"
+    rgw_log "DEBUG: ${method} ${path} -> HTTP ${_rc_http_code} (${#_body} bytes)"
 }
 
 rgw_implicit_project_id() {
@@ -122,12 +128,16 @@ rgw_implicit_project_id() {
 
 rgw_list_implicit_users() {
     local marker=""
+    rgw_log "DEBUG: listing implicit-tenant users from RGW"
     while :; do
         local -a query_args=("list=true" "format=json" "max-entries=${RGW_PAGE_SIZE}")
         [[ -n "${marker}" ]] && query_args+=("marker=${marker}")
 
-        local body http_code
-        rgw_curl body http_code GET "/user" "${query_args[@]}" || return 1
+        local body="" http_code="000"
+        if ! rgw_curl body http_code GET "/user" "${query_args[@]}"; then
+            rgw_log "DEBUG: rgw_curl failed for user listing (http_code=${http_code})"
+            return 1
+        fi
 
         if [[ "${http_code}" != "200" ]]; then
             rgw_log "RGW user listing returned HTTP ${http_code}"
@@ -181,11 +191,12 @@ rgw_list_user_buckets() {
         )
         [[ -n "${marker}" ]] && query_args+=("marker=${marker}")
 
-        local body http_code
-        rgw_curl body http_code GET "/bucket" "${query_args[@]}" || {
+        local body="" http_code="000"
+        if ! rgw_curl body http_code GET "/bucket" "${query_args[@]}"; then
+            rgw_log "DEBUG: rgw_curl failed for bucket listing uid=${uid} (http_code=${http_code})"
             rm -f "${merged_file}"
             return 1
-        }
+        fi
 
         case "${http_code}" in
             200) ;;
@@ -259,7 +270,7 @@ rgw_list_user_buckets() {
 
 rgw_delete_bucket() {
     local bucket_name="$1"
-    local body http_code
+    local body="" http_code="000"
     rgw_curl body http_code DELETE "/bucket" "bucket=${bucket_name}" "purge-objects=true" "format=json" || return 1
     case "${http_code}" in
         200|204|404) return 0 ;;
@@ -272,7 +283,7 @@ rgw_delete_bucket() {
 
 rgw_delete_user() {
     local uid="$1"
-    local body http_code
+    local body="" http_code="000"
     rgw_curl body http_code DELETE "/user" "uid=${uid}" "format=json" || return 1
     case "${http_code}" in
         200|204|404) return 0 ;;
