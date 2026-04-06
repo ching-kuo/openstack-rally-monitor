@@ -243,6 +243,11 @@ rgw_list_user_buckets() {
         mv "${tmp_file}" "${merged_file}"
         rm -f "${page_file}"
 
+        # Plain arrays (e.g. [] or [{...}]) have no pagination wrapper — done.
+        local body_type
+        body_type=$(echo "${body}" | jq -r 'type') || break
+        [[ "${body_type}" != "array" ]] || break
+
         local truncated next_marker
         truncated=$(echo "${body}" | jq -r 'if (.truncated // false) then "true" else "false" end') || {
             rm -f "${merged_file}"
