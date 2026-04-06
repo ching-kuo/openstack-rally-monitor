@@ -13,8 +13,10 @@ RGW_PAGE_SIZE="${RGW_PAGE_SIZE:-1000}"
 RGW_LAST_FIND_ERRORS=0
 
 rgw_log() {
+    # Always write to stderr — this library's stdout is frequently redirected
+    # into temp files by callers (rgw_find_orphaned_users, rgw_list_implicit_users).
     if declare -F log >/dev/null 2>&1; then
-        log "$@"
+        log "$@" >&2
     else
         echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [rgw] $*" >&2
     fi
