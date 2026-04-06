@@ -48,11 +48,13 @@ rgw_curl() {
     printf -v "${__status_var}" '%s' "000"
 
     local base_url="${RGW_ADMIN_URL%/}"
+    # Strip trailing /admin if present so we don't double it.
+    base_url="${base_url%/admin}"
     local url
     if [[ "${path}" == /* ]]; then
-        url="${base_url}${path}"
+        url="${base_url}/admin${path}"
     else
-        url="${base_url}/${path}"
+        url="${base_url}/admin/${path}"
     fi
 
     local query=""
