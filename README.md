@@ -8,7 +8,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Lightweight Health Checks** — Read-only API probes every 15 minutes between heavy test runs
 - **Prometheus Metrics** — Full metrics exposure for test results, SLA compliance, and orphaned resources
 - **Orphan Detection & Cleanup** — Detects resources left behind by failed Rally cleanups (both `s_rally_*` and `c_rally_*` prefixes) and provides a manual purge tool
-- **RadosGW Orphan Management** — Optional: detects and purges orphaned Ceph RGW implicit-tenant users left behind when Rally deletes Keystone projects (requires RGW admin API credentials)
+- **RadosGW Orphan Management** — Optional: detects orphaned Ceph RGW implicit-tenant users and automatically purges rally-owned ones after each test run (requires RGW admin API credentials)
 - **7-Day History** — Results retained with automatic pruning
 - **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
 
@@ -198,8 +198,9 @@ radosgw-admin caps add --uid=<admin-uid> --caps="buckets=*;users=*"
 **How it works:**
 
 - `cleanup_monitor.sh` queries the RGW admin API for implicit-tenant users, cross-references against Keystone, and reports orphan counts in `cleanup_metrics.json` with a scan health status (`ok`/`skipped`/`error`)
-- `purge_orphans.sh` deletes only **Rally-owned** RGW orphans — project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`) recorded during test runs. Non-Rally orphans are reported but never deleted.
-- All operations are **fail-closed**: API errors block destructive purge and surface as degraded scan status rather than false zeros
+- `run_tests.sh` automatically purges **Rally-owned** RGW orphans after each test run via `auto_purge_rgw()`. Project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`). Non-Rally orphans are never touched.
+- `purge_orphans.sh` is available for manual bulk cleanup of all resource types (including RGW) when needed
+- All operations are **fail-closed**: scan errors or inconclusive Keystone lookups block destructive purge and surface as degraded scan status rather than false zeros
 
 If RGW credentials are not set, all RGW features are silently skipped — existing functionality is unaffected.
 

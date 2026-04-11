@@ -71,6 +71,7 @@ run_tests.sh
   → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json)
   → build_summary()                    → /results/latest_summary.json
   → cleanup_monitor.sh                 → /results/cleanup_metrics.json
+  → auto_purge_rgw()                   (deletes rally-owned RGW orphans; no-op without RGW creds)
   → publish_dashboard_files()          → /results/results.json, history.json
 
 health_check.sh
@@ -98,6 +99,8 @@ rally_exporter.py
 ### Orphan Detection
 
 `scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. When `RGW_ADMIN_URL`, `RGW_ACCESS_KEY`, and `RGW_SECRET_KEY` are configured, it also queries the RGW admin REST API for orphaned implicit-tenant users and marks the scan as `ok`, `skipped`, or `error`. The exporter exposes these as OpenStack cleanup gauges plus `rally_rgw_*` metrics.
+
+After detection, `run_tests.sh` automatically purges rally-owned RGW orphans via `auto_purge_rgw()`. This only runs when RGW admin credentials are configured. It is fail-closed: if the orphan scan had errors or Keystone lookups were inconclusive, purge is skipped entirely. Only users whose project IDs appear in `rally_project_ids.log` are eligible for deletion. Unknown-owner orphans are never touched. The `cleanup_metrics.json` reflects the pre-purge state; the next run's metrics will reflect the post-purge state. For non-RGW resources, `purge_orphans.sh` remains the manual cleanup tool.
 
 ### Rally Scenarios
 

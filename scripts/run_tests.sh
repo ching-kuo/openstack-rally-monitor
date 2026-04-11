@@ -14,6 +14,7 @@ RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
 RALLY_PROJECT_LEDGER_FILE="${RESULTS_DIR}/rally_project_ids.log"
 RUN_LOG="${RUN_DIR}/run.log"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift")
 
@@ -25,6 +26,8 @@ log() {
         echo "${msg}" >> "${RUN_LOG}"
     fi
 }
+
+source "${SCRIPT_DIR}/rgw_helpers.sh"
 
 # --------------------------------------------------------------------------
 # 0. Log environment for debugging (passwords redacted)
@@ -371,6 +374,83 @@ check_cleanup() {
 }
 
 # --------------------------------------------------------------------------
+# 7. Auto-purge rally-owned RGW orphans
+# --------------------------------------------------------------------------
+auto_purge_rgw() {
+    rgw_available || return 0
+
+    log "Auto-purging rally-owned RGW orphans..."
+
+    local orphans_file
+    orphans_file=$(mktemp)
+    if ! rgw_find_orphaned_users > "${orphans_file}"; then
+        log "WARNING: RGW orphan scan failed; skipping auto-purge"
+        rm -f "${orphans_file}"
+        return 0
+    fi
+
+    if [[ "${RGW_LAST_FIND_ERRORS}" -gt 0 ]]; then
+        log "WARNING: RGW scan had ${RGW_LAST_FIND_ERRORS} error(s); skipping auto-purge (fail-closed)"
+        rm -f "${orphans_file}"
+        return 0
+    fi
+
+    local purged=0 failed=0 skipped=0
+    local uid ownership bucket_json bucket_name bucket_ok
+    while IFS= read -r uid; do
+        [[ -n "${uid}" ]] || continue
+        ownership=$(rgw_classify_owner "${uid}")
+
+        if [[ "${ownership}" != "rally_owned" ]]; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        if ! bucket_json=$(rgw_list_user_buckets "${uid}"); then
+            log "  RGW user ${uid}: bucket listing failed; skipping"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        local bucket_names
+        if ! bucket_names=$(echo "${bucket_json}" | jq -r '.[].name // empty' 2>/dev/null); then
+            log "  RGW user ${uid}: bucket JSON parse failed; skipping"
+            failed=$((failed + 1))
+            continue
+        fi
+
+        bucket_ok=1
+        while IFS= read -r bucket_name; do
+            [[ -n "${bucket_name}" ]] || continue
+            if rgw_delete_bucket "${bucket_name}"; then
+                log "  RGW bucket ${bucket_name}: deleted"
+            else
+                log "  RGW bucket ${bucket_name}: deletion FAILED"
+                bucket_ok=0
+                failed=$((failed + 1))
+            fi
+        done <<< "${bucket_names}"
+
+        if [[ "${bucket_ok}" -eq 0 ]]; then
+            log "  RGW user ${uid}: skipped (bucket deletion incomplete)"
+            continue
+        fi
+
+        if rgw_delete_user "${uid}"; then
+            log "  RGW user ${uid}: deleted"
+            purged=$((purged + 1))
+        else
+            log "  RGW user ${uid}: deletion FAILED"
+            failed=$((failed + 1))
+        fi
+    done < "${orphans_file}"
+
+    rm -f "${orphans_file}"
+
+    log "RGW auto-purge complete: purged=${purged} failed=${failed} skipped_unknown=${skipped}"
+}
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
@@ -433,6 +513,9 @@ EOF
     # Check cleanup
     check_cleanup
 
+    # Auto-purge rally-owned RGW orphans (only when RGW admin is configured)
+    auto_purge_rgw
+
     # Publish static files for the dashboard (replaces API calls)
     publish_dashboard_files
 
@@ -451,4 +534,6 @@ EOF
     log "=========================================="
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
