@@ -60,21 +60,12 @@ def get(base, path):
 # ---------------------------------------------------------------------------
 
 class TestPathTraversal:
-    def test_dotdot_in_path_is_blocked(self, server):
+    @pytest.mark.parametrize("path", ["/../secret.txt", "/../../etc/passwd", "/%2e%2e/etc/passwd"])
+    def test_dotdot_paths_are_blocked(self, server, path):
         base, dashboard_dir, _ = server
         secret = dashboard_dir.parent / "secret.txt"
         secret.write_text("TOP SECRET")
-        code, _, _ = get(base, "/../secret.txt")
-        assert code == 403
-
-    def test_multiple_dotdot_segments_blocked(self, server):
-        base, _, _ = server
-        code, _, _ = get(base, "/../../etc/passwd")
-        assert code == 403
-
-    def test_url_encoded_dotdot_blocked(self, server):
-        base, _, _ = server
-        code, _, _ = get(base, "/%2e%2e/etc/passwd")
+        code, _, _ = get(base, path)
         assert code == 403
 
 
@@ -83,30 +74,29 @@ class TestPathTraversal:
 # ---------------------------------------------------------------------------
 
 class TestAllowlist:
-    def test_index_html_served(self, server):
+    @pytest.mark.parametrize(
+        ("request_path", "filename", "content", "expected_fragment"),
+        [
+            ("/index.html", "index.html", "<html><body>ok</body></html>", b"ok"),
+            ("/", "index.html", "<html></html>", None),
+            ("/app.js", "app.js", "// ok", None),
+            ("/style.css", "style.css", "body {}", None),
+        ],
+    )
+    def test_allowed_static_files_are_served(
+        self,
+        server,
+        request_path,
+        filename,
+        content,
+        expected_fragment,
+    ):
         base, dashboard_dir, _ = server
-        (dashboard_dir / "index.html").write_text("<html><body>ok</body></html>")
-        code, _, body = get(base, "/index.html")
+        (dashboard_dir / filename).write_text(content)
+        code, _, body = get(base, request_path)
         assert code == 200
-        assert b"ok" in body
-
-    def test_root_serves_index(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "index.html").write_text("<html></html>")
-        code, _, _ = get(base, "/")
-        assert code == 200
-
-    def test_app_js_served(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "app.js").write_text("// ok")
-        code, _, _ = get(base, "/app.js")
-        assert code == 200
-
-    def test_style_css_served(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "style.css").write_text("body {}")
-        code, _, _ = get(base, "/style.css")
-        assert code == 200
+        if expected_fragment is not None:
+            assert expected_fragment in body
 
     def test_unknown_file_blocked(self, server):
         base, dashboard_dir, _ = server
@@ -126,21 +116,21 @@ class TestAllowlist:
         code, _, _ = get(base, "/nonexistent.html")
         assert code == 404
 
-    def test_json_symlink_served(self, server):
-        base, dashboard_dir, results_dir = server
-        (results_dir / "results.json").write_text('{"ok": true}')
-        (dashboard_dir / "results.json").symlink_to(results_dir / "results.json")
-        code, _, body = get(base, "/results.json")
-        assert code == 200
-        assert b"ok" in body
-
     def test_all_json_symlinks_served(self, server):
         base, dashboard_dir, results_dir = server
-        for name in ("results.json", "history.json", "health.json", "health_history.json"):
-            (results_dir / name).write_text("{}")
+        payloads = {
+            "results.json": '{"ok": true}',
+            "history.json": "{}",
+            "health.json": "{}",
+            "health_history.json": "{}",
+        }
+        for name, payload in payloads.items():
+            (results_dir / name).write_text(payload)
             (dashboard_dir / name).symlink_to(results_dir / name)
-            code, _, _ = get(base, f"/{name}")
+            code, _, body = get(base, f"/{name}")
             assert code == 200, f"{name} should be served"
+            if name == "results.json":
+                assert b"ok" in body
 
     def test_symlink_pointing_outside_results_is_blocked(self, server):
         """Symlink to a file outside both SERVE_ROOT and RESULTS_ROOT is denied."""
@@ -151,38 +141,27 @@ class TestAllowlist:
         code, _, _ = get(base, "/results.json")
         assert code == 403
 
-    def test_symlink_to_sensitive_file_blocked(self, server):
-        """Symlink to /etc/passwd (or equivalent) must be blocked."""
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "results.json").symlink_to("/etc/hostname")
-        code, _, _ = get(base, "/results.json")
-        assert code == 403
-
 
 # ---------------------------------------------------------------------------
 # Security headers
 # ---------------------------------------------------------------------------
 
 class TestSecurityHeaders:
-    def test_x_frame_options_present(self, server):
+    @pytest.mark.parametrize(
+        ("header", "expected_value"),
+        [
+            ("x-frame-options", "DENY"),
+            ("x-content-type-options", "nosniff"),
+            ("content-security-policy", None),
+        ],
+    )
+    def test_security_headers_present(self, server, header, expected_value):
         base, dashboard_dir, _ = server
         (dashboard_dir / "index.html").write_text("<html></html>")
         _, headers, _ = get(base, "/")
-        assert "x-frame-options" in headers
-        assert headers["x-frame-options"] == "DENY"
-
-    def test_x_content_type_options_present(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "index.html").write_text("<html></html>")
-        _, headers, _ = get(base, "/")
-        assert "x-content-type-options" in headers
-        assert headers["x-content-type-options"] == "nosniff"
-
-    def test_content_security_policy_present(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "index.html").write_text("<html></html>")
-        _, headers, _ = get(base, "/")
-        assert "content-security-policy" in headers
+        assert header in headers
+        if expected_value is not None:
+            assert headers[header] == expected_value
 
 
 # ---------------------------------------------------------------------------
@@ -197,14 +176,15 @@ class TestCacheHeaders:
         _, headers, _ = get(base, "/results.json")
         assert "no-store" in headers.get("cache-control", "")
 
-    def test_html_has_max_age(self, server):
+    @pytest.mark.parametrize(
+        ("request_path", "filename", "content"),
+        [
+            ("/", "index.html", "<html></html>"),
+            ("/app.js", "app.js", "// ok"),
+        ],
+    )
+    def test_static_assets_have_max_age(self, server, request_path, filename, content):
         base, dashboard_dir, _ = server
-        (dashboard_dir / "index.html").write_text("<html></html>")
-        _, headers, _ = get(base, "/")
-        assert "max-age=300" in headers.get("cache-control", "")
-
-    def test_js_has_max_age(self, server):
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "app.js").write_text("// ok")
-        _, headers, _ = get(base, "/app.js")
+        (dashboard_dir / filename).write_text(content)
+        _, headers, _ = get(base, request_path)
         assert "max-age=300" in headers.get("cache-control", "")

@@ -21,7 +21,7 @@ docker exec -u rally rally-monitor /scripts/run_tests.sh
 docker exec -u rally rally-monitor /scripts/health_check.sh
 
 # Run cleanup orphan detection manually
-docker exec -u rally rally-monitor /scripts/cleanup_monitor.sh /results/latest_summary.json
+docker exec -u rally rally-monitor /scripts/cleanup_monitor.sh
 
 # Purge orphaned Rally resources (dry-run — shows what would be deleted)
 docker exec -u rally rally-monitor /scripts/purge_orphans.sh

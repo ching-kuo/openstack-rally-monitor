@@ -89,27 +89,36 @@ EOF_SUMMARY
     log "Created seed summary"
 fi
 
+if [[ ! -f "${RESULTS_DIR}/cleanup_metrics.json" ]]; then
+    cat > "${RESULTS_DIR}/cleanup_metrics.json" <<'EOF_CLEANUP'
+{
+    "timestamp": "waiting_for_first_run",
+    "cleanup_failed": 0,
+    "context_cleanup_warning": 0,
+    "rgw_scan_status": "skipped",
+    "rgw_scan_errors": 0,
+    "rgw_orphaned_users": 0,
+    "rgw_orphaned_buckets": 0,
+    "rgw_orphaned_objects": 0,
+    "rgw_rally_owned_orphans": 0,
+    "rgw_unknown_owner_orphans": 0,
+    "orphaned_resources": {},
+    "context_orphaned_resources": {},
+    "details": {},
+    "context_details": {}
+}
+EOF_CLEANUP
+    log "Created seed cleanup_metrics.json"
+fi
+
 # Seed dashboard JSON files into the persistent results volume if missing
 if [[ ! -f "${RESULTS_DIR}/results.json" ]]; then
     jq -n \
         --slurpfile summary "${RESULTS_DIR}/latest_summary.json" \
+        --slurpfile cleanup "${RESULTS_DIR}/cleanup_metrics.json" \
         '{
             summary: $summary[0],
-            cleanup: {
-                cleanup_failed: 0,
-                context_cleanup_warning: 0,
-                rgw_scan_status: "skipped",
-                rgw_scan_errors: 0,
-                rgw_orphaned_users: 0,
-                rgw_orphaned_buckets: 0,
-                rgw_orphaned_objects: 0,
-                rgw_rally_owned_orphans: 0,
-                rgw_unknown_owner_orphans: 0,
-                orphaned_resources: {},
-                context_orphaned_resources: {},
-                details: {},
-                context_details: {}
-            }
+            cleanup: $cleanup[0]
         }' \
         > "${RESULTS_DIR}/results.json"
     log "Created seed results.json"
@@ -181,7 +190,9 @@ RALLY_ENV_VARS=(
 )
 {
     for k in "${RALLY_ENV_VARS[@]}"; do
-        [[ -v "$k" ]] && printf 'export %s=%q\n' "$k" "${!k}"
+        if [[ -n "${!k+x}" ]]; then
+            printf 'export %s=%q\n' "$k" "${!k}"
+        fi
     done
 } > /rally/rally_env.tmp && mv /rally/rally_env.tmp /rally/rally_env
 chmod 0640 /rally/rally_env

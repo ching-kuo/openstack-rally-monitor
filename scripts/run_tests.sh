@@ -219,7 +219,6 @@ run_service_tests() {
         status=$(rally task status "${task_uuid}" 2>/dev/null | awk '{print $NF}') || status="unknown"
 
         log "  ${service}: task=${task_uuid} status=${status}"
-        echo "${status}"
     else
         log "  ${service}: FAILED to start task (no task UUID found)"
         # Log full task output for debugging
@@ -228,7 +227,6 @@ run_service_tests() {
             while IFS= read -r line; do log "    ${line}"; done < "${log_file}"
             log "  --- end ---"
         fi
-        echo "failed"
     fi
 }
 
@@ -314,9 +312,36 @@ build_summary() {
 # --------------------------------------------------------------------------
 # 4. Publish static JSON files for the dashboard
 # --------------------------------------------------------------------------
+ensure_cleanup_metrics_file() {
+    local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
+    [[ -f "${cleanup_file}" ]] && return 0
+
+    cat > "${cleanup_file}.tmp" <<'EOF'
+{
+    "timestamp": "waiting_for_first_run",
+    "cleanup_failed": 0,
+    "context_cleanup_warning": 0,
+    "rgw_scan_status": "skipped",
+    "rgw_scan_errors": 0,
+    "rgw_orphaned_users": 0,
+    "rgw_orphaned_buckets": 0,
+    "rgw_orphaned_objects": 0,
+    "rgw_rally_owned_orphans": 0,
+    "rgw_unknown_owner_orphans": 0,
+    "orphaned_resources": {},
+    "context_orphaned_resources": {},
+    "details": {},
+    "context_details": {}
+}
+EOF
+    mv "${cleanup_file}.tmp" "${cleanup_file}"
+    log "Seeded missing cleanup metrics file at ${cleanup_file}"
+}
+
 publish_dashboard_files() {
     log "Publishing dashboard static files..."
     local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
+    ensure_cleanup_metrics_file
 
     # Write into the persistent results volume so files survive container restarts.
     # /dashboard/results.json and /dashboard/history.json are symlinks pointing here.
@@ -342,7 +367,7 @@ publish_dashboard_files() {
 # --------------------------------------------------------------------------
 prune_old_results() {
     log "Pruning results older than ${RETENTION_DAYS} days..."
-    find "${RESULTS_DIR}" -maxdepth 1 -type d -name "20*" -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+    find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
     prune_rally_project_ledger
     log "Pruning complete"
 }
@@ -368,7 +393,7 @@ prune_rally_project_ledger() {
 # --------------------------------------------------------------------------
 check_cleanup() {
     log "Running cleanup monitor..."
-    /scripts/cleanup_monitor.sh "${RUN_DIR}/summary.json" || {
+    /scripts/cleanup_monitor.sh || {
         log "WARNING: Cleanup monitor detected issues"
     }
 }

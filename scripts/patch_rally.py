@@ -1,6 +1,5 @@
 import os
 import re
-import secrets
 import sysconfig
 
 # Locate the site-packages directory dynamically so the patch survives

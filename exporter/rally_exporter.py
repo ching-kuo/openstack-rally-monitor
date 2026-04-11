@@ -10,7 +10,6 @@ import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from flask import Flask, Response, jsonify
 from prometheus_client import (
@@ -180,57 +179,69 @@ _cleanup_cache_time: float = 0.0
 # Tracks the timestamp of the last summary we processed into labeled metrics.
 # Only when this changes do we clear and rebuild per-service/scenario gauges.
 _last_processed_ts: str = ""
+_last_applied_cleanup: dict = {}
 
 
 # ---------------------------------------------------------------------------
 # Data Loading
 # ---------------------------------------------------------------------------
+def _load_cached_json(
+    filename: str, cached_mtime: float, cached_data: dict, cached_time: float
+) -> tuple:
+    """Load a JSON file with simple mtime-based caching."""
+    path = os.path.join(RESULTS_DIR, filename)
+    try:
+        mtime = os.path.getmtime(path)
+        now = time.time()
+        if mtime == cached_mtime and (now - cached_time) < CACHE_MAX_AGE_SECONDS:
+            return cached_data, cached_mtime, cached_time
+
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data, mtime, now
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        rally_exporter_errors_total.labels(file=filename).inc()
+        return None, cached_mtime, cached_time
+
+
 def load_latest_summary() -> dict:
     """Load the latest summary JSON file, using mtime-based caching."""
     global _summary_mtime, _summary_data, _summary_cache_time
-    summary_file = os.path.join(RESULTS_DIR, "latest_summary.json")
-    try:
-        mtime = os.path.getmtime(summary_file)
-        now = time.time()
-        if mtime == _summary_mtime and (now - _summary_cache_time) < CACHE_MAX_AGE_SECONDS:
-            return _summary_data
-        with open(summary_file, "r") as f:
-            data = json.load(f)
-        _summary_data = data
-        _summary_mtime = mtime
-        _summary_cache_time = now
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        rally_exporter_errors_total.labels(file="latest_summary.json").inc()
+    data, _summary_mtime, _summary_cache_time = _load_cached_json(
+        "latest_summary.json",
+        _summary_mtime,
+        _summary_data,
+        _summary_cache_time,
+    )
+    if data is None:
         return {"timestamp": "none", "services": {}}
+    _summary_data = data
+    return data
 
 
 def load_cleanup_metrics() -> dict:
     """Load cleanup metrics JSON file, using mtime-based caching."""
     global _cleanup_mtime, _cleanup_data, _cleanup_cache_time
-    metrics_file = os.path.join(RESULTS_DIR, "cleanup_metrics.json")
-    try:
-        mtime = os.path.getmtime(metrics_file)
-        now = time.time()
-        if mtime == _cleanup_mtime and (now - _cleanup_cache_time) < CACHE_MAX_AGE_SECONDS:
-            return _cleanup_data
-        with open(metrics_file, "r") as f:
-            data = json.load(f)
-        _cleanup_data = data
-        _cleanup_mtime = mtime
-        _cleanup_cache_time = now
-        return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        rally_exporter_errors_total.labels(file="cleanup_metrics.json").inc()
+    data, _cleanup_mtime, _cleanup_cache_time = _load_cached_json(
+        "cleanup_metrics.json",
+        _cleanup_mtime,
+        _cleanup_data,
+        _cleanup_cache_time,
+    )
+    if data is None:
         return {
             "cleanup_failed": 0,
             "orphaned_resources": {},
+            "context_orphaned_resources": {},
             "details": {},
+            "context_details": {},
             "rgw_scan_status": "skipped",
             "rgw_orphaned_users": 0,
             "rgw_orphaned_buckets": 0,
             "rgw_unknown_owner_orphans": 0,
         }
+    _cleanup_data = data
+    return data
 
 
 
@@ -265,6 +276,21 @@ def _apply_cleanup_metrics(cleanup: dict) -> None:
     because cleanup_metrics.json has its own independent update cycle (written
     after each test run by cleanup_monitor.sh).
     """
+    global _last_applied_cleanup
+    if cleanup is _last_applied_cleanup:
+        return
+    _last_applied_cleanup = cleanup
+
+    # cleanup_metrics.json is a full snapshot, so clear prior labels first to
+    # avoid leaking stale orphan counts when the file is missing or malformed.
+    for metric in [
+        rally_cleanup_failure,
+        rally_orphaned_resources,
+        rally_context_cleanup_warning,
+        rally_context_orphaned_resources,
+    ]:
+        metric.clear()
+
     # Scenario-created (s_rally_*) orphan metrics — warning/critical severity
     orphaned = cleanup.get("orphaned_resources", {})
     for service, count in orphaned.items():

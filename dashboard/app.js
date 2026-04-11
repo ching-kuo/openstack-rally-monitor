@@ -3,7 +3,7 @@
  * ===========================================
  * Fetches results from the exporter API, renders service cards,
  * 7-day status timeline, trend charts, and cleanup status.
- * Auto-refreshes every 60 seconds.
+ * Auto-refreshes every 5 minutes.
  */
 
 // ---------------------------------------------------------------------------
@@ -32,11 +32,9 @@ const SERVICE_DESCRIPTIONS = {
 let durationChart = null;
 let healthLatencyChart = null;
 
-// Tracks which historical run is pinned.
-// null = no run yet; auto-select latest on first render.
-// showingLive = true when user explicitly clicked "Back to Latest"
+// selectedRunIndex is only set when the user pins a historical run.
+// null = live view; newly completed runs appear automatically.
 let selectedRunIndex = null;
-let showingLive = false;
 let cachedHistory = { runs: [] };
 let cachedResults = null;
 let cachedHealth = null;
@@ -208,7 +206,6 @@ function renderTimeline(history) {
 // ---------------------------------------------------------------------------
 function selectHistoricalRun(run, index) {
   selectedRunIndex = index;
-  showingLive = false;
 
   // Update selected highlight on all cells
   document.querySelectorAll(".timeline-cell").forEach((cell, i) => {
@@ -238,7 +235,6 @@ function selectHistoricalRun(run, index) {
 
 function backToLatest() {
   selectedRunIndex = null;
-  showingLive = true;
 
   // Remove selected highlight
   document.querySelectorAll(".timeline-cell").forEach((cell) => {
@@ -674,19 +670,10 @@ async function refresh() {
   renderHealthTimeline(healthHistoryData);
   renderHealthChart(healthHistoryData);
 
-  // Auto-select the latest run on initial load (unless user chose live view)
-  if (
-    historyData &&
-    selectedRunIndex === null &&
-    !showingLive &&
-    historyData.runs.length > 0
-  ) {
-    const lastIdx = historyData.runs.length - 1;
-    selectHistoricalRun(historyData.runs[lastIdx], lastIdx);
-  }
-
   // Update service cards for the pinned run (keeps live health indicators fresh)
-  if (selectedRunIndex !== null) {
+  if (selectedRunIndex !== null && selectedRunIndex >= cachedHistory.runs.length) {
+    backToLatest();
+  } else if (selectedRunIndex !== null) {
     const pinnedRun = cachedHistory.runs[selectedRunIndex];
     if (pinnedRun) renderServiceCards(pinnedRun, cachedHistory, cachedHealth);
   }
@@ -698,7 +685,7 @@ async function refresh() {
   }
 
   // If showing live view (user clicked Back to Latest), render live service cards
-  if (selectedRunIndex === null && showingLive && resultsData) {
+  if (selectedRunIndex === null && resultsData) {
     renderServiceCards(
       resultsData.summary,
       historyData || cachedHistory,

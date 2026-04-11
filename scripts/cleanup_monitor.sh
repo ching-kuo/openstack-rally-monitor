@@ -19,7 +19,6 @@ set -euo pipefail
 
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 CLEANUP_METRICS_FILE="${RESULTS_DIR}/cleanup_metrics.json"
-SUMMARY_FILE="${1:-${RESULTS_DIR}/latest_summary.json}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
@@ -88,7 +87,7 @@ check_rgw_cleanup() {
 
     RGW_SCAN_ERRORS="${RGW_LAST_FIND_ERRORS}"
 
-    local uid project_id bucket_json bucket_count object_count
+    local uid bucket_json bucket_count object_count
     while IFS= read -r uid; do
         [[ -n "${uid}" ]] || continue
 

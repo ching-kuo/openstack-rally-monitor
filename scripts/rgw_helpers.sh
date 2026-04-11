@@ -389,10 +389,7 @@ rgw_find_orphaned_users() {
         return 1
     fi
 
-    local bulk_ok=0
-    if rgw_prefetch_keystone_projects; then
-        bulk_ok=1
-    else
+    if ! rgw_prefetch_keystone_projects; then
         rgw_log "Keystone bulk project list failed; falling back to per-project lookups"
     fi
 

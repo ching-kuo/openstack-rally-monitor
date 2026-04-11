@@ -73,6 +73,7 @@ def reset_module_state():
     exporter._cleanup_data = {}
     exporter._cleanup_cache_time = 0.0
     exporter._last_processed_ts = ""
+    exporter._last_applied_cleanup = {}
     # Reset scalar metrics
     exporter.rally_data_valid.set(0)
     exporter.rally_overall_success.set(0)
@@ -119,28 +120,16 @@ def client():
 # ---------------------------------------------------------------------------
 
 class TestParseTimestamp:
-    def test_valid_format(self):
-        ts = exporter.parse_timestamp("20240101T120000Z")
-        assert ts > 0
-
     def test_known_epoch(self):
         # 2024-01-01T12:00:00Z = 1704110400
         assert exporter.parse_timestamp("20240101T120000Z") == pytest.approx(1704110400.0)
 
-    def test_none_string_returns_zero(self):
-        assert exporter.parse_timestamp("none") == 0.0
-
-    def test_empty_string_returns_zero(self):
-        assert exporter.parse_timestamp("") == 0.0
-
-    def test_waiting_string_returns_zero(self):
-        assert exporter.parse_timestamp("waiting_for_first_run") == 0.0
-
-    def test_invalid_format_returns_zero(self):
-        assert exporter.parse_timestamp("not-a-date") == 0.0
-
-    def test_none_value_returns_zero(self):
-        assert exporter.parse_timestamp(None) == 0.0
+    @pytest.mark.parametrize(
+        "invalid_value",
+        ["none", "", "waiting_for_first_run", "not-a-date", None],
+    )
+    def test_invalid_values_return_zero(self, invalid_value):
+        assert exporter.parse_timestamp(invalid_value) == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -148,12 +137,10 @@ class TestParseTimestamp:
 # ---------------------------------------------------------------------------
 
 class TestLoadLatestSummary:
-    def test_missing_file_returns_default(self, results_dir):
-        result = exporter.load_latest_summary()
-        assert result == {"timestamp": "none", "services": {}}
-
-    def test_corrupt_json_returns_default(self, results_dir):
-        (results_dir / "latest_summary.json").write_text("not valid json {{")
+    @pytest.mark.parametrize("contents", [None, "not valid json {{"])
+    def test_missing_or_corrupt_file_returns_default(self, results_dir, contents):
+        if contents is not None:
+            (results_dir / "latest_summary.json").write_text(contents)
         result = exporter.load_latest_summary()
         assert result == {"timestamp": "none", "services": {}}
 
@@ -195,16 +182,14 @@ class TestLoadLatestSummary:
 # ---------------------------------------------------------------------------
 
 class TestLoadCleanupMetrics:
-    def test_missing_file_returns_default(self, results_dir):
+    @pytest.mark.parametrize("contents", [None, "{bad json"])
+    def test_missing_or_corrupt_file_returns_default(self, results_dir, contents):
+        if contents is not None:
+            (results_dir / "cleanup_metrics.json").write_text(contents)
         result = exporter.load_cleanup_metrics()
         assert result["cleanup_failed"] == 0
         assert result["rgw_scan_status"] == "skipped"
         assert result["rgw_orphaned_users"] == 0
-
-    def test_corrupt_json_returns_default(self, results_dir):
-        (results_dir / "cleanup_metrics.json").write_text("{bad json")
-        result = exporter.load_cleanup_metrics()
-        assert result["cleanup_failed"] == 0
 
     def test_valid_file_returns_data(self, results_dir):
         cleanup = make_cleanup(s_nova=3)
@@ -348,6 +333,29 @@ class TestUpdateMetrics:
         output = metrics_output()
         assert "rally_data_valid 0.0" in output
         assert 'rally_cleanup_failure{service="nova"} 1.0' in output
+
+    def test_cleanup_labels_clear_when_cleanup_file_disappears(self, results_dir):
+        """Cleanup labels should not linger after the cleanup snapshot disappears."""
+        summary_path = results_dir / "latest_summary.json"
+        cleanup_path = results_dir / "cleanup_metrics.json"
+
+        summary_path.write_text(json.dumps(make_summary()))
+        cleanup_path.write_text(json.dumps(make_cleanup(s_nova=2, c_nova=1)))
+        exporter.update_metrics()
+
+        output = metrics_output()
+        assert 'rally_cleanup_failure{service="nova"} 1.0' in output
+        assert 'rally_context_cleanup_warning{service="nova"} 1.0' in output
+
+        cleanup_path.unlink()
+        exporter._cleanup_mtime = -1.0
+        exporter.update_metrics()
+
+        output = metrics_output()
+        assert 'rally_cleanup_failure{service="nova"}' not in output
+        assert 'rally_orphaned_resources{service="nova",resource_type="servers"}' not in output
+        assert 'rally_context_cleanup_warning{service="nova"}' not in output
+        assert 'rally_context_orphaned_resources{service="nova",resource_type="servers"}' not in output
 
     def test_rgw_metrics_follow_cleanup_file(self, results_dir):
         summary_path = results_dir / "latest_summary.json"
