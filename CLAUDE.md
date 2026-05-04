@@ -96,6 +96,16 @@ rally_exporter.py
 - `/rally/data/` — Docker volume `rally-data`; SQLite DB for Rally state
 - `/dashboard/` — ephemeral; `results.json` etc. are symlinks → `/results/`
 
+### Theme Customization
+
+Dashboard theming follows a narrow `themes/<name>/` contract without a build step. The shipped default theme is `/dashboard/themes/default/` and contains `tokens.css`, `logo.svg`, and `favicon.svg`. At container startup, `scripts/entrypoint.sh` ensures `/results/branding/` exists and recreates `/dashboard/themes/custom -> /results/branding`.
+
+`dashboard/index.html` loads styles in this cascade order: `themes/default/tokens.css`, `style.css`, `themes/custom/tokens.css`, then `themes/custom/overrides.css`. Custom files are optional and partial; missing custom assets fall back to defaults. `dashboard/app.js` probes `themes/custom/logo.svg` and `themes/custom/favicon.svg` with GET at boot, then swaps the header logo and favicon only when those files exist.
+
+`dashboard/serve.py` keeps a deny-by-default allowlist. Theme paths must live under `themes/`, use one of `.css`, `.svg`, `.png`, or `.ico`, and resolve either under `/dashboard/themes/` or under the tighter `/results/branding/` custom-theme root. Do not widen this to all of `/results/`.
+
+Public theme tokens are documented in `docs/CUSTOMIZING.md`. Internal glass/radius/shadow tokens and decorative alpha literals are not stable API. SVGs loaded via `<img>` do not inherit page CSS variables, so a custom theme must supply its own `logo.svg` to recolor the brand mark.
+
 ### Orphan Detection
 
 `scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. When `RGW_ADMIN_URL`, `RGW_ACCESS_KEY`, and `RGW_SECRET_KEY` are configured, it also queries the RGW admin REST API for orphaned implicit-tenant users and marks the scan as `ok`, `skipped`, or `error`. The exporter exposes these as OpenStack cleanup gauges plus `rally_rgw_*` metrics.

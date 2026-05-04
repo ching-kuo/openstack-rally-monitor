@@ -12,6 +12,18 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **7-Day History** — Results retained with automatic pruning
 - **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
 
+## Dashboard Customization
+
+The dashboard can be reskinned with a small Horizon-style theme overlay. Place optional `tokens.css`, `overrides.css`, `logo.svg`, or `favicon.svg` files under `/results/branding/`, or bind mount a local theme directory:
+
+```yaml
+volumes:
+  - rally-results:/results
+  - ./my-theme:/results/branding:ro
+```
+
+See [docs/CUSTOMIZING.md](docs/CUSTOMIZING.md) for the stable token contract, fallback behavior, and examples.
+
 ## Architecture
 
 ```
@@ -268,7 +280,11 @@ openstack-rally-monitor/
 │   ├── style.css
 │   ├── app.js
 │   ├── serve.py
+│   ├── themes/
+│   │   └── default/
 │   └── test_serve.py
+├── docs/
+│   └── CUSTOMIZING.md
 └── env.sample
 ```
 

@@ -21,49 +21,6 @@
     box-sizing: border-box;
 }
 
-:root {
-    --bg-primary: #0a0e1a;
-    --bg-secondary: #111827;
-    --bg-card: rgba(17, 24, 39, 0.7);
-    --bg-glass: rgba(255, 255, 255, 0.03);
-    --border-glass: rgba(255, 255, 255, 0.08);
-    --border-glow: rgba(99, 102, 241, 0.3);
-
-    --text-primary: #f1f5f9;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
-
-    --accent-indigo: #6366f1;
-    --accent-cyan: #06b6d4;
-    --accent-emerald: #10b981;
-    --accent-red: #ef4444;
-    --accent-amber: #f59e0b;
-    --accent-rose: #f43f5e;
-
-    --success: #10b981;
-    --failure: #ef4444;
-    --pending: #64748b;
-    --warning: #f59e0b;
-
-    --gradient-primary: linear-gradient(135deg, #6366f1, #06b6d4);
-    --gradient-success: linear-gradient(135deg, #10b981, #059669);
-    --gradient-failure: linear-gradient(135deg, #ef4444, #dc2626);
-
-    --radius-sm: 8px;
-    --radius-md: 12px;
-    --radius-lg: 16px;
-    --radius-xl: 20px;
-
-    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
-    --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.15);
-
-    --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-
-    --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
 html {
     font-size: 16px;
     scroll-behavior: smooth;
@@ -71,8 +28,8 @@ html {
 
 body {
     font-family: var(--font);
-    background: var(--bg-primary);
-    color: var(--text-primary);
+    background: var(--color-surface-base);
+    color: var(--color-text-primary);
     line-height: 1.6;
     min-height: 100vh;
     overflow-x: hidden;
@@ -105,7 +62,7 @@ footer {
     justify-content: space-between;
     align-items: center;
     padding: 1.25rem 2rem;
-    background: var(--bg-glass);
+    background: var(--surface-glass);
     backdrop-filter: blur(20px);
     border-bottom: 1px solid var(--border-glass);
     position: sticky;
@@ -122,7 +79,17 @@ footer {
 .logo {
     display: flex;
     align-items: center;
+    width: 32px;
+    height: 32px;
+    overflow: hidden;
     animation: pulse-glow 3s ease-in-out infinite alternate;
+}
+
+#brandLogo {
+    display: block;
+    width: 32px;
+    height: 32px;
+    object-fit: contain;
 }
 
 @keyframes pulse-glow {
@@ -138,7 +105,7 @@ footer {
 .header h1 {
     font-size: 1.25rem;
     font-weight: 700;
-    background: var(--gradient-primary);
+    background: var(--gradient-brand);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -147,7 +114,7 @@ footer {
 
 .subtitle {
     font-size: 0.75rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     font-weight: 400;
 }
 
@@ -163,7 +130,7 @@ footer {
     gap: 0.5rem;
     padding: 0.4rem 1rem;
     border-radius: 100px;
-    background: var(--bg-glass);
+    background: var(--surface-glass);
     border: 1px solid var(--border-glass);
     font-size: 0.8rem;
     font-weight: 600;
@@ -184,19 +151,19 @@ footer {
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--text-muted);
+    background: var(--color-text-muted);
     transition: var(--transition);
 }
 
 .health-badge.healthy .health-dot {
-    background: var(--success);
-    box-shadow: 0 0 8px var(--success);
+    background: var(--color-success);
+    box-shadow: 0 0 8px var(--color-success);
     animation: dot-pulse 2s ease-in-out infinite;
 }
 
 .health-badge.unhealthy .health-dot {
-    background: var(--failure);
-    box-shadow: 0 0 8px var(--failure);
+    background: var(--color-failure);
+    box-shadow: 0 0 8px var(--color-failure);
     animation: dot-pulse 1s ease-in-out infinite;
 }
 
@@ -214,7 +181,7 @@ footer {
 
 .last-run {
     font-size: 0.75rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
 }
 
 /* --- Sections --- */
@@ -234,7 +201,7 @@ section {
 .section-header h2 {
     font-size: 1.1rem;
     font-weight: 600;
-    color: var(--text-primary);
+    color: var(--color-text-primary);
 }
 
 .section-badge {
@@ -242,18 +209,18 @@ section {
     font-weight: 600;
     padding: 0.25rem 0.75rem;
     border-radius: 100px;
-    background: var(--bg-glass);
+    background: var(--surface-glass);
     border: 1px solid var(--border-glass);
-    color: var(--text-secondary);
+    color: var(--color-text-secondary);
 }
 
 .section-badge.ok {
-    color: var(--success);
+    color: var(--color-success);
     border-color: rgba(16, 185, 129, 0.3);
 }
 
 .section-badge.error {
-    color: var(--failure);
+    color: var(--color-failure);
     border-color: rgba(239, 68, 68, 0.3);
 }
 
@@ -262,7 +229,7 @@ section {
     display: flex;
     gap: 3px;
     padding: 1rem;
-    background: var(--bg-card);
+    background: var(--color-surface-card);
     border-radius: var(--radius-lg);
     border: 1px solid var(--border-glass);
     backdrop-filter: blur(10px);
@@ -276,7 +243,7 @@ section {
     align-items: center;
     justify-content: center;
     width: 100%;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     font-size: 0.85rem;
 }
 
@@ -312,7 +279,7 @@ section {
 
 /* Selected cell ring (click-to-inspect historical run) */
 .timeline-cell.selected {
-    outline: 2px solid #f59e0b;
+    outline: 2px solid var(--color-warning);
     outline-offset: 2px;
     z-index: 3;
     transform: scaleY(1.4);
@@ -328,7 +295,7 @@ section {
     left: 50%;
     transform: translateX(-50%);
     transform-origin: bottom center;
-    background: var(--bg-secondary);
+    background: var(--color-surface-raised);
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-sm);
     padding: 0.5rem 0.75rem;
@@ -363,7 +330,7 @@ section {
     align-items: center;
     gap: 0.4rem;
     font-size: 0.7rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
 }
 
 .legend-dot {
@@ -373,15 +340,15 @@ section {
 }
 
 .legend-passed {
-    background: var(--success);
+    background: var(--color-success);
 }
 
 .legend-failed {
-    background: var(--failure);
+    background: var(--color-failure);
 }
 
 .legend-pending {
-    background: var(--pending);
+    background: var(--color-pending);
 }
 
 /* --- Service Cards --- */
@@ -392,7 +359,7 @@ section {
 }
 
 .service-card {
-    background: var(--bg-card);
+    background: var(--color-surface-card);
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-lg);
     padding: 1.25rem;
@@ -410,7 +377,7 @@ section {
     left: 0;
     right: 0;
     height: 3px;
-    background: var(--gradient-primary);
+    background: var(--gradient-brand);
     opacity: 0;
     transition: var(--transition);
 }
@@ -426,15 +393,15 @@ section {
 }
 
 .service-card.status-passed {
-    border-left: 3px solid var(--success);
+    border-left: 3px solid var(--color-success);
 }
 
 .service-card.status-failed {
-    border-left: 3px solid var(--failure);
+    border-left: 3px solid var(--color-failure);
 }
 
 .service-card.status-pending {
-    border-left: 3px solid var(--pending);
+    border-left: 3px solid var(--color-pending);
 }
 
 .card-header {
@@ -468,17 +435,17 @@ section {
 
 .status-chip.passed {
     background: rgba(16, 185, 129, 0.12);
-    color: var(--success);
+    color: var(--color-success);
 }
 
 .status-chip.failed {
     background: rgba(239, 68, 68, 0.12);
-    color: var(--failure);
+    color: var(--color-failure);
 }
 
 .status-chip.pending {
     background: rgba(100, 116, 139, 0.12);
-    color: var(--pending);
+    color: var(--color-pending);
 }
 
 .card-metrics {
@@ -495,12 +462,12 @@ section {
 .metric-value {
     font-size: 1.1rem;
     font-weight: 700;
-    color: var(--text-primary);
+    color: var(--color-text-primary);
 }
 
 .metric-label {
     font-size: 0.6rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
@@ -522,11 +489,11 @@ section {
 }
 
 .card-timeline-cell.passed {
-    background: var(--success);
+    background: var(--color-success);
 }
 
 .card-timeline-cell.failed {
-    background: var(--failure);
+    background: var(--color-failure);
 }
 
 .card-timeline-cell.pending {
@@ -539,7 +506,7 @@ section {
     align-items: center;
     gap: 5px;
     font-size: 0.65rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
 }
 
 .live-dot {
@@ -550,26 +517,26 @@ section {
 }
 
 .live-indicator.up .live-dot {
-    background: var(--success);
+    background: var(--color-success);
     box-shadow: 0 0 5px rgba(16, 185, 129, 0.7);
     animation: livepulse 2s ease-in-out infinite;
 }
 
 .live-indicator.up {
-    color: var(--success);
+    color: var(--color-success);
 }
 
 .live-indicator.down .live-dot {
-    background: var(--failure);
+    background: var(--color-failure);
     box-shadow: 0 0 5px rgba(239, 68, 68, 0.7);
 }
 
 .live-indicator.down {
-    color: var(--failure);
+    color: var(--color-failure);
 }
 
 .live-indicator.unknown .live-dot {
-    background: var(--pending);
+    background: var(--color-pending);
 }
 
 @keyframes livepulse {
@@ -585,7 +552,7 @@ section {
 }
 
 .chart-card {
-    background: var(--bg-card);
+    background: var(--color-surface-card);
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-lg);
     padding: 1.25rem;
@@ -596,7 +563,7 @@ section {
     font-size: 0.85rem;
     font-weight: 600;
     margin-bottom: 1rem;
-    color: var(--text-secondary);
+    color: var(--color-text-secondary);
 }
 
 .chart-card canvas {
@@ -611,7 +578,7 @@ section {
 }
 
 .cleanup-item {
-    background: var(--bg-card);
+    background: var(--color-surface-card);
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-md);
     padding: 1rem;
@@ -629,7 +596,7 @@ section {
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     margin-bottom: 0.25rem;
 }
 
@@ -639,16 +606,16 @@ section {
 }
 
 .cleanup-count.zero {
-    color: var(--success);
+    color: var(--color-success);
 }
 
 .cleanup-count.nonzero {
-    color: var(--failure);
+    color: var(--color-failure);
 }
 
 .cleanup-label {
     font-size: 0.65rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
 }
 
 /* --- Modal --- */
@@ -675,7 +642,7 @@ section {
 }
 
 .modal {
-    background: var(--bg-secondary);
+    background: var(--color-surface-raised);
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-xl);
     width: 90%;
@@ -699,7 +666,7 @@ section {
     border-bottom: 1px solid var(--border-glass);
     position: sticky;
     top: 0;
-    background: var(--bg-secondary);
+    background: var(--color-surface-raised);
     z-index: 1;
 }
 
@@ -712,7 +679,7 @@ section {
 .modal-close {
     background: none;
     border: 1px solid var(--border-glass);
-    color: var(--text-secondary);
+    color: var(--color-text-secondary);
     font-size: 1.25rem;
     cursor: pointer;
     width: 32px;
@@ -727,7 +694,7 @@ section {
 .modal-close:hover {
     background: rgba(239, 68, 68, 0.1);
     border-color: rgba(239, 68, 68, 0.3);
-    color: var(--failure);
+    color: var(--color-failure);
 }
 
 .modal-body {
@@ -741,7 +708,7 @@ section {
     padding: 0.75rem;
     border-radius: var(--radius-sm);
     margin-bottom: 0.5rem;
-    background: var(--bg-glass);
+    background: var(--surface-glass);
     border: 1px solid var(--border-glass);
     transition: var(--transition);
 }
@@ -776,7 +743,7 @@ section {
 
 .scenario-stat-label {
     font-size: 0.6rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
 }
 
 /* --- Historical Run Banner --- */
@@ -798,7 +765,7 @@ section {
     border: 1px solid rgba(245, 158, 11, 0.3);
     border-radius: var(--radius-md);
     font-size: 0.8rem;
-    color: var(--accent-amber);
+    color: var(--color-warning);
 }
 
 .historical-banner-icon {
@@ -814,7 +781,7 @@ section {
 .back-to-latest-btn {
     background: rgba(245, 158, 11, 0.15);
     border: 1px solid rgba(245, 158, 11, 0.4);
-    color: var(--accent-amber);
+    color: var(--color-warning);
     padding: 0.25rem 0.75rem;
     border-radius: var(--radius-sm);
     font-size: 0.75rem;
@@ -833,7 +800,7 @@ section {
 .footer {
     text-align: center;
     padding: 1.5rem;
-    color: var(--text-muted);
+    color: var(--color-text-muted);
     font-size: 0.75rem;
     border-top: 1px solid var(--border-glass);
     margin-top: 2rem;

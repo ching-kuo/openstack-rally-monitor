@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.3.0] - 2026-05-04
+
+### Added
+
+- **Dashboard** — theme customization via `themes/<name>/` directory contract. Default theme ships at `dashboard/themes/default/` with `tokens.css`, `logo.svg`, and `favicon.svg`. Operators can supply optional `tokens.css`, `overrides.css`, `logo.svg`, or `favicon.svg` under `/results/branding/` (symlinked at runtime to `/dashboard/themes/custom`). Missing custom files transparently fall through to defaults
+- **Dashboard** — `dashboard/style.css` `:root` extracted to a public token contract (surfaces, text, status, brand, gradients, chart series, chart chrome). Internal radius/shadow/glass tokens remain unstable
+- **Dashboard** — Chart.js datasets and chrome (axis labels, ticks, grid) now read colors from CSS custom properties at render time instead of hardcoded hex
+- **Server** — `dashboard/serve.py` allowlist extended with a third branch for theme assets gated by prefix (`themes/`), suffix (`.css`/`.svg`/`.png`/`.ico`), and tightened containment (`SERVE_ROOT/themes/` or `${RESULTS_DIR}/branding/`); MIME type derived from the requested suffix so operator symlinks inside `branding/` cannot mask their type
+- **Docs** — `docs/CUSTOMIZING.md` documents the public token contract, override workflows, fallback semantics, and what does and does not reskin
+
+### Changed
+
+- **Dashboard** — header logo replaced inline SVG with `<img src="themes/default/logo.svg">`; `<img>`-loaded SVG does not inherit page CSS variables, so custom themes must supply their own `logo.svg` to recolor the brand mark
+
+---
+
 ## [1.2.3] - 2026-03-07
 
 ### Fixed

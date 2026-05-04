@@ -12,7 +12,8 @@ from urllib.parse import unquote
 
 SERVE_ROOT = Path(os.getcwd()).resolve()
 
-# Deny-by-default allowlists. Update ALLOWED_STATIC when adding new dashboard assets.
+# Deny-by-default allowlists. Update ALLOWED_STATIC for new dashboard assets;
+# theme assets are gated by THEME_PREFIX + ALLOWED_THEME_SUFFIXES + BRANDING_ROOT.
 ALLOWED_STATIC = {
     "index.html",
     "app.js",
@@ -21,7 +22,10 @@ ALLOWED_STATIC = {
     "vendor/inter-variable.woff2",
 }
 ALLOWED_JSON_SYMLINKS = {"results.json", "history.json", "health.json", "health_history.json"}
+THEME_PREFIX = "themes/"
+ALLOWED_THEME_SUFFIXES = {".css", ".svg", ".png", ".ico"}
 RESULTS_ROOT = Path(os.environ.get("RESULTS_DIR", "/results")).resolve()
+BRANDING_ROOT = (RESULTS_ROOT / "branding").resolve()
 
 SECURITY_HEADERS = [
     ("X-Frame-Options", "DENY"),
@@ -78,12 +82,24 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
             pass  # known static asset within dashboard dir
         elif rel_str in ALLOWED_JSON_SYMLINKS and target.is_relative_to(RESULTS_ROOT):
             pass  # known JSON symlink resolving into /results/
+        elif (
+            rel_str.startswith(THEME_PREFIX)
+            and PurePosixPath(rel_str).suffix in ALLOWED_THEME_SUFFIXES
+            and (
+                target.is_relative_to((SERVE_ROOT / "themes").resolve())
+                or target.is_relative_to(BRANDING_ROOT)
+            )
+        ):
+            pass  # theme assets from the shipped theme or operator branding dir
         else:
             self._send_error(403)
             return
 
-        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        is_json = target.suffix.lower() == ".json"
+        # Determine MIME from the requested path's suffix (already allowlisted),
+        # not the symlink target's — operator symlinks inside branding/ may
+        # point to a file with a different extension.
+        content_type = mimetypes.guess_type(str(unresolved))[0] or "application/octet-stream"
+        is_json = unresolved.suffix.lower() == ".json"
 
         try:
             data = target.read_bytes()

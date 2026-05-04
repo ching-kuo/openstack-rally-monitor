@@ -47,6 +47,7 @@ make_cron_schedule() {
 # Initialize
 # --------------------------------------------------------------------------
 mkdir -p "${RESULTS_DIR}"
+mkdir -p "${RESULTS_DIR}/branding"
 mkdir -p /rally/logs
 
 # Initialize Rally's ephemeral SQLite database as the rally user.
@@ -146,6 +147,8 @@ ln -sf "${RESULTS_DIR}/results.json"         /dashboard/results.json
 ln -sf "${RESULTS_DIR}/history.json"         /dashboard/history.json
 ln -sf "${RESULTS_DIR}/health.json"          /dashboard/health.json
 ln -sf "${RESULTS_DIR}/health_history.json"  /dashboard/health_history.json
+ln -sfn "${RESULTS_DIR}/branding"            /dashboard/themes/custom
+log "Custom theme slot: ${RESULTS_DIR}/branding"
 log "Dashboard symlinks updated"
 
 # --------------------------------------------------------------------------

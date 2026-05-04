@@ -1,0 +1,64 @@
+/*
+ * Rally OpenStack Monitor default theme tokens.
+ *
+ * Public, stable custom-theme contract:
+ * surfaces, text, status, brand, gradients, chart series, and chart chrome.
+ * Internal tokens below support the shipped theme only and may change without
+ * notice; custom themes should not depend on them.
+ */
+:root {
+    /* Public: surfaces */
+    --color-surface-base: #0a0e1a;
+    --color-surface-raised: #111827;
+    --color-surface-card: rgba(17, 24, 39, 0.7);
+
+    /* Public: text */
+    --color-text-primary: #f1f5f9;
+    --color-text-secondary: #94a3b8;
+    --color-text-muted: #64748b;
+
+    /* Public: status */
+    --color-success: #10b981;
+    --color-failure: #ef4444;
+    --color-pending: #64748b;
+    --color-warning: #f59e0b;
+
+    /* Public: brand */
+    --color-brand-primary: #6366f1;
+    --color-brand-secondary: #06b6d4;
+
+    /* Public: gradients */
+    --gradient-brand: linear-gradient(135deg, #6366f1, #06b6d4);
+    --gradient-success: linear-gradient(135deg, #10b981, #059669);
+    --gradient-failure: linear-gradient(135deg, #ef4444, #dc2626);
+
+    /* Public: charts */
+    --chart-series-1: #6366f1;
+    --chart-series-2: #06b6d4;
+    --chart-series-3: #10b981;
+    --chart-series-4: #f59e0b;
+    --chart-series-5: #ef4444;
+    --chart-series-6: #8b5cf6;
+    --chart-series-7: #ec4899;
+    --chart-axis-label: #94a3b8;
+    --chart-axis-tick: #64748b;
+    --chart-grid: rgba(255,255,255,0.04);
+
+    /* Internal default-theme support tokens */
+    --surface-glass: rgba(255, 255, 255, 0.03);
+    --border-glass: rgba(255, 255, 255, 0.08);
+    --border-glow: rgba(99, 102, 241, 0.3);
+
+    --radius-sm: 8px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 20px;
+
+    --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+    --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.15);
+
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}

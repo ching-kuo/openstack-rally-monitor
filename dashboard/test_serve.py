@@ -4,7 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import HTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -33,6 +33,7 @@ def server(dirs, monkeypatch):
     dashboard_dir, results_dir = dirs
     monkeypatch.setattr(serve, "SERVE_ROOT", dashboard_dir)
     monkeypatch.setattr(serve, "RESULTS_ROOT", results_dir)
+    monkeypatch.setattr(serve, "BRANDING_ROOT", (results_dir / "branding").resolve())
 
     srv = HTTPServer(("127.0.0.1", 0), serve.SecureStaticHandler)
     port = srv.server_address[1]
@@ -140,6 +141,126 @@ class TestAllowlist:
         (dashboard_dir / "results.json").symlink_to(outside)
         code, _, _ = get(base, "/results.json")
         assert code == 403
+
+
+# ---------------------------------------------------------------------------
+# Theme asset allowlist
+# ---------------------------------------------------------------------------
+
+class TestThemeAllowlist:
+    def test_default_tokens_served_with_css_mime_type(self, server):
+        base, dashboard_dir, _ = server
+        theme_dir = dashboard_dir / "themes" / "default"
+        theme_dir.mkdir(parents=True)
+        (theme_dir / "tokens.css").write_text(":root { --color-brand-primary: #6366f1; }")
+
+        code, headers, body = get(base, "/themes/default/tokens.css")
+
+        assert code == 200
+        assert headers["content-type"].startswith("text/css")
+        assert b"--color-brand-primary" in body
+
+    def test_default_logo_served_with_svg_mime_type(self, server):
+        base, dashboard_dir, _ = server
+        theme_dir = dashboard_dir / "themes" / "default"
+        theme_dir.mkdir(parents=True)
+        (theme_dir / "logo.svg").write_text("<svg></svg>")
+
+        code, headers, body = get(base, "/themes/default/logo.svg")
+
+        assert code == 200
+        assert headers["content-type"].startswith("image/svg+xml")
+        assert b"<svg" in body
+
+    def test_custom_tokens_served_from_branding_symlink(self, server):
+        base, dashboard_dir, results_dir = server
+        branding_dir = results_dir / "branding"
+        branding_dir.mkdir()
+        (branding_dir / "tokens.css").write_text(":root { --chart-series-1: #ff00ff; }")
+        themes_dir = dashboard_dir / "themes"
+        themes_dir.mkdir()
+        (themes_dir / "custom").symlink_to(branding_dir)
+
+        code, _, body = get(base, "/themes/custom/tokens.css")
+
+        assert code == 200
+        assert b"--chart-series-1" in body
+
+    def test_missing_custom_theme_file_returns_404(self, server):
+        base, dashboard_dir, results_dir = server
+        branding_dir = results_dir / "branding"
+        branding_dir.mkdir()
+        themes_dir = dashboard_dir / "themes"
+        themes_dir.mkdir()
+        (themes_dir / "custom").symlink_to(branding_dir)
+
+        code, _, _ = get(base, "/themes/custom/tokens.css")
+
+        assert code == 404
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/themes/default/secret.txt",
+            "/themes/default/manifest.webmanifest",
+        ],
+    )
+    def test_disallowed_theme_extensions_are_blocked(self, server, path):
+        base, dashboard_dir, _ = server
+        target = dashboard_dir.joinpath(*PurePosixPath(path.lstrip("/")).parts)
+        target.parent.mkdir(parents=True)
+        target.write_text("secret")
+
+        code, _, _ = get(base, path)
+
+        assert code == 403
+
+    def test_theme_traversal_is_blocked(self, server):
+        base, _, _ = server
+        code, _, _ = get(base, "/themes/../etc/passwd")
+        assert code == 403
+
+    def test_custom_theme_symlink_outside_branding_is_blocked(self, server):
+        base, dashboard_dir, results_dir = server
+        (results_dir / "tokens.css").write_text(":root {}")
+        themes_dir = dashboard_dir / "themes" / "custom"
+        themes_dir.mkdir(parents=True)
+        (themes_dir / "tokens.css").symlink_to(results_dir / "tokens.css")
+
+        code, _, _ = get(base, "/themes/custom/tokens.css")
+
+        assert code == 403
+
+    def test_custom_theme_symlink_outside_results_is_blocked(self, server):
+        base, dashboard_dir, _ = server
+        outside = dashboard_dir.parent / "outside.css"
+        outside.write_text(":root {}")
+        themes_dir = dashboard_dir / "themes" / "custom"
+        themes_dir.mkdir(parents=True)
+        (themes_dir / "tokens.css").symlink_to(outside)
+
+        code, _, _ = get(base, "/themes/custom/tokens.css")
+
+        assert code == 403
+
+    def test_custom_theme_symlink_inside_branding_uses_requested_suffix(self, server):
+        base, dashboard_dir, results_dir = server
+        branding_dir = results_dir / "branding"
+        branding_dir.mkdir()
+        (branding_dir / "actual.txt").write_text(":root {}")
+        themes_dir = dashboard_dir / "themes"
+        themes_dir.mkdir()
+        (themes_dir / "custom").symlink_to(branding_dir)
+        (branding_dir / "foo.css").symlink_to(branding_dir / "actual.txt")
+
+        code, headers, body = get(base, "/themes/custom/foo.css")
+
+        assert code == 200
+        # MIME type must follow the requested suffix, not the symlink target
+        # (otherwise the browser, given X-Content-Type-Options: nosniff, drops
+        # the stylesheet because it arrives as text/plain).
+        assert headers["content-type"].startswith("text/css")
+        assert b":root" in body
 
 
 # ---------------------------------------------------------------------------

@@ -119,6 +119,35 @@ function formatDuration(seconds) {
   return `${(seconds / 60).toFixed(1)}m`;
 }
 
+function readToken(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function readChartTheme() {
+  return {
+    series: Array.from({ length: 7 }, (_, i) => readToken(`--chart-series-${i + 1}`)),
+    axisLabel: readToken("--chart-axis-label"),
+    axisTick: readToken("--chart-axis-tick"),
+    grid: readToken("--chart-grid"),
+  };
+}
+
+function withAlpha(color, alpha) {
+  const hex = color.match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const alphaHex = Math.round(alpha * 255).toString(16).padStart(2, "0");
+    return `${color}${alphaHex}`;
+  }
+
+  const rgb = color.match(/^rgba?\(([^)]+)\)$/i);
+  if (rgb) {
+    const channels = rgb[1].split(",").slice(0, 3).map((part) => part.trim());
+    if (channels.length === 3) return `rgba(${channels.join(", ")}, ${alpha})`;
+  }
+
+  return color;
+}
+
 function getRunStatus(runData) {
   const services = runData.services || {};
   const statuses = Object.values(services).map((s) => s.status);
@@ -348,7 +377,7 @@ function renderServiceCards(summary, history, health) {
             <div class="card-header">
                 <div>
                     <div class="card-title">${SERVICE_ICONS[name] || "⚙️"} ${escapeHtml(name)}</div>
-                    <div style="font-size: 0.7rem; color: var(--text-muted); margin-top: 0.15rem;">
+                    <div style="font-size: 0.7rem; color: var(--color-text-muted); margin-top: 0.15rem;">
                         ${SERVICE_DESCRIPTIONS[name] || ""}
                     </div>
                 </div>
@@ -370,7 +399,7 @@ function renderServiceCards(summary, history, health) {
                     <div class="metric-label">Iterations</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value" style="color: ${(data.failed_iterations || 0) > 0 ? "var(--failure)" : "var(--success)"}">
+                    <div class="metric-value" style="color: ${(data.failed_iterations || 0) > 0 ? "var(--color-failure)" : "var(--color-success)"}">
                         ${data.failed_iterations || 0}
                     </div>
                     <div class="metric-label">Failures</div>
@@ -398,7 +427,7 @@ function openModal(serviceName, data) {
   const scenarios = data.scenarios || [];
   if (scenarios.length === 0) {
     body.innerHTML =
-      '<p style="color: var(--text-muted); text-align: center;">No scenario data available</p>';
+      '<p style="color: var(--color-text-muted); text-align: center;">No scenario data available</p>';
   } else {
     body.innerHTML = scenarios
       .map(
@@ -415,7 +444,7 @@ function openModal(serviceName, data) {
                         <div class="scenario-stat-label">Iters</div>
                     </div>
                     <div class="scenario-stat">
-                        <div class="scenario-stat-value" style="color: ${(s.failures || 0) > 0 ? "var(--failure)" : "var(--success)"}">${s.failures || 0}</div>
+                        <div class="scenario-stat-value" style="color: ${(s.failures || 0) > 0 ? "var(--color-failure)" : "var(--color-success)"}">${s.failures || 0}</div>
                         <div class="scenario-stat-label">Fails</div>
                     </div>
                     <span class="status-chip ${s.sla ? "passed" : "failed"}">${s.sla ? "SLA OK" : "SLA FAIL"}</span>
@@ -442,6 +471,40 @@ document.addEventListener("keydown", (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Theme Assets
+// ---------------------------------------------------------------------------
+async function resolveThemeAssets() {
+  const assets = [
+    {
+      id: "brandLogo",
+      attr: "src",
+      customPath: "themes/custom/logo.svg",
+      defaultPath: "themes/default/logo.svg",
+    },
+    {
+      id: "favicon",
+      attr: "href",
+      customPath: "themes/custom/favicon.svg",
+      defaultPath: "themes/default/favicon.svg",
+    },
+  ];
+
+  await Promise.all(
+    assets.map(async ({ id, attr, customPath, defaultPath }) => {
+      const element = document.getElementById(id);
+      if (!element) return;
+
+      try {
+        const response = await fetch(customPath, { cache: "no-store" });
+        element.setAttribute(attr, response.ok ? customPath : defaultPath);
+      } catch (err) {
+        element.setAttribute(attr, defaultPath);
+      }
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
 function renderCharts(history) {
@@ -458,16 +521,7 @@ function renderCharts(history) {
     return t.length > 16 ? t.substring(0, 16) : t;
   });
 
-  // Color palette
-  const colors = [
-    "#6366f1",
-    "#06b6d4",
-    "#10b981",
-    "#f59e0b",
-    "#ef4444",
-    "#8b5cf6",
-    "#ec4899",
-  ];
+  const chartTheme = readChartTheme();
 
   // Duration chart
   const durationCtx = document.getElementById("durationChart").getContext("2d");
@@ -480,8 +534,8 @@ function renderCharts(history) {
       datasets: services.map((svc, i) => ({
         label: svc,
         data: runs.map((r) => ((r.services || {})[svc] || {}).duration || 0),
-        borderColor: colors[i % colors.length],
-        backgroundColor: colors[i % colors.length] + "15",
+        borderColor: chartTheme.series[i % chartTheme.series.length],
+        backgroundColor: withAlpha(chartTheme.series[i % chartTheme.series.length], 0.08),
         borderWidth: 2,
         tension: 0.4,
         fill: true,
@@ -496,7 +550,7 @@ function renderCharts(history) {
         legend: {
           position: "bottom",
           labels: {
-            color: "#94a3b8",
+            color: chartTheme.axisLabel,
             font: { family: "Inter", size: 11 },
             boxWidth: 12,
             padding: 12,
@@ -505,18 +559,18 @@ function renderCharts(history) {
       },
       scales: {
         x: {
-          ticks: { color: "#64748b", font: { size: 10 } },
-          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { color: chartTheme.axisTick, font: { size: 10 } },
+          grid: { color: chartTheme.grid },
         },
         y: {
           title: {
             display: true,
             text: "Seconds",
-            color: "#64748b",
+            color: chartTheme.axisTick,
             font: { size: 11 },
           },
-          ticks: { color: "#64748b", font: { size: 10 } },
-          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { color: chartTheme.axisTick, font: { size: 10 } },
+          grid: { color: chartTheme.grid },
         },
       },
     },
@@ -538,15 +592,7 @@ function renderHealthChart(healthHistory) {
     return t.length > 16 ? t.substring(0, 16) : t;
   });
 
-  const colors = [
-    "#6366f1",
-    "#06b6d4",
-    "#10b981",
-    "#f59e0b",
-    "#ef4444",
-    "#8b5cf6",
-    "#ec4899",
-  ];
+  const chartTheme = readChartTheme();
 
   const ctx = document.getElementById("healthLatencyChart").getContext("2d");
   if (healthLatencyChart) healthLatencyChart.destroy();
@@ -560,8 +606,8 @@ function renderHealthChart(healthHistory) {
         data: checks.map(
           (c) => ((c.services || {})[svc] || {}).latency_ms ?? null,
         ),
-        borderColor: colors[i % colors.length],
-        backgroundColor: colors[i % colors.length] + "15",
+        borderColor: chartTheme.series[i % chartTheme.series.length],
+        backgroundColor: withAlpha(chartTheme.series[i % chartTheme.series.length], 0.08),
         borderWidth: 2,
         tension: 0.4,
         fill: false,
@@ -577,7 +623,7 @@ function renderHealthChart(healthHistory) {
         legend: {
           position: "bottom",
           labels: {
-            color: "#94a3b8",
+            color: chartTheme.axisLabel,
             font: { family: "Inter", size: 11 },
             boxWidth: 12,
             padding: 12,
@@ -586,18 +632,18 @@ function renderHealthChart(healthHistory) {
       },
       scales: {
         x: {
-          ticks: { color: "#64748b", font: { size: 10 }, maxTicksLimit: 8 },
-          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { color: chartTheme.axisTick, font: { size: 10 }, maxTicksLimit: 8 },
+          grid: { color: chartTheme.grid },
         },
         y: {
           title: {
             display: true,
             text: "Latency (ms)",
-            color: "#64748b",
+            color: chartTheme.axisTick,
             font: { size: 11 },
           },
-          ticks: { color: "#64748b", font: { size: 10 } },
-          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { color: chartTheme.axisTick, font: { size: 10 } },
+          grid: { color: chartTheme.grid },
           beginAtZero: true,
         },
       },
@@ -695,7 +741,9 @@ async function refresh() {
 }
 
 // Initial load
-refresh();
+async function startDashboard() {
+  await Promise.all([resolveThemeAssets(), refresh()]);
+  setInterval(refresh, REFRESH_INTERVAL);
+}
 
-// Auto-refresh
-setInterval(refresh, REFRESH_INTERVAL);
+startDashboard();
