@@ -201,11 +201,13 @@ chmod 0640 /rally/rally_env
 # cron.d format: <schedule> <user> <command>
 # The command sources /rally/rally_env (written by entrypoint, mode 0640) to
 # inject OpenStack credentials; set -a / set +a export all sourced variables.
+# mirror_job_logs.sh appends to the retained file log and forwards the same
+# stream to PID 1 stdout so docker logs shows scheduled job output as well.
 cat > /etc/cron.d/rally-tests <<EOF_CRON
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-${CRON_SCHEDULE} rally set -a; . /rally/rally_env; set +a; /scripts/run_tests.sh >> /rally/logs/rally-tests.log 2>&1
-${HEALTH_CRON} rally set -a; . /rally/rally_env; set +a; /scripts/health_check.sh >> /rally/logs/health-check.log 2>&1
+${CRON_SCHEDULE} rally set -a; . /rally/rally_env; set +a; /scripts/mirror_job_logs.sh /rally/logs/rally-tests.log /scripts/run_tests.sh
+${HEALTH_CRON} rally set -a; . /rally/rally_env; set +a; /scripts/mirror_job_logs.sh /rally/logs/health-check.log /scripts/health_check.sh
 0 0 * * * root logrotate /etc/logrotate.d/rally-monitor > /dev/null 2>&1
 EOF_CRON
 chmod 0644 /etc/cron.d/rally-tests
@@ -226,7 +228,7 @@ log "Health checks scheduled: ${HEALTH_CRON} (every ${HEALTH_CHECK_INTERVAL} min
 # --------------------------------------------------------------------------
 if [[ "$(jq -r '.timestamp' "${RESULTS_DIR}/latest_summary.json")" == "waiting_for_first_run" ]]; then
     log "Running initial test suite..."
-    su -s /bin/bash rally -c "/scripts/run_tests.sh >> /rally/logs/rally-tests.log 2>&1" &
+    su -s /bin/bash rally -c "/scripts/mirror_job_logs.sh /rally/logs/rally-tests.log /scripts/run_tests.sh" &
     log "Initial test started in background"
 fi
 
