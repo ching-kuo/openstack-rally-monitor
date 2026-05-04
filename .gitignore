@@ -33,3 +33,5 @@ __pycache__/
 
 # Vendored frontend assets (downloaded at Docker build time, never committed)
 dashboard/vendor/
+# Added by code-review-graph
+.code-review-graph/
