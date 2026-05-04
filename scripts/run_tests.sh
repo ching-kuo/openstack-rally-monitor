@@ -535,11 +535,12 @@ EOF
     # Build summary
     build_summary
 
+    # Auto-purge rally-owned RGW orphans before writing cleanup metrics so
+    # dashboard/Prometheus state reflects the post-purge resource state.
+    auto_purge_rgw
+
     # Check cleanup
     check_cleanup
-
-    # Auto-purge rally-owned RGW orphans (only when RGW admin is configured)
-    auto_purge_rgw
 
     # Publish static files for the dashboard (replaces API calls)
     publish_dashboard_files

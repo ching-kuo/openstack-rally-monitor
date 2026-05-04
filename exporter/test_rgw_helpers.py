@@ -282,3 +282,11 @@ def test_auto_purge_rgw_skips_user_on_bucket_failure(tmp_path):
     assert "\nDELETED_USERS=\n" in proc.stdout or proc.stdout.strip().endswith("DELETED_USERS=")
     assert "bucket deletion incomplete" in proc.stdout
     assert "failed=" in proc.stdout
+
+
+def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
+    script = RUN_TESTS.read_text(encoding="utf-8")
+    main_body = script.split("# Main", 1)[1]
+
+    assert main_body.index("auto_purge_rgw") < main_body.index("check_cleanup")
+    assert main_body.index("check_cleanup") < main_body.index("publish_dashboard_files")
