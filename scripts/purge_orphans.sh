@@ -241,9 +241,9 @@ _list_orphans() {
 # --------------------------------------------------------------------------
 
 purge_servers() {
-    local -a pf=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
-    _list_orphans "Servers" _SNAP_SERVERS openstack server list --all-projects "${pf[@]}"
+    # Rally orphans live in c_rally_* context projects, not OS_PROJECT_NAME.
+    # Name-prefix matching already provides scope; admin role is required.
+    _list_orphans "Servers" _SNAP_SERVERS openstack server list --all-projects
 }
 purge_servers_delete() {
     [[ "${#_SNAP_SERVERS[@]}" -eq 0 ]] && return
@@ -253,21 +253,27 @@ purge_servers_delete() {
 }
 
 purge_volumes() {
-    local -a pf=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
-    _list_orphans "Volumes" _SNAP_VOLUMES openstack volume list --all-projects "${pf[@]}"
+    _list_orphans "Volumes" _SNAP_VOLUMES openstack volume list --all-projects
 }
 purge_volumes_delete() {
     [[ "${#_SNAP_VOLUMES[@]}" -eq 0 ]] && return
     for id in "${_SNAP_VOLUMES[@]}"; do
-        _delete_resource "Volume" "$id" openstack volume delete
+        # Volumes can get stuck in error_deleting / deleting after a failed
+        # cleanup; cinder protects those states from plain `volume delete`.
+        # Reset to `error` first, then force-delete.
+        local status
+        status=$(openstack volume show "$id" -f value -c status 2>/dev/null || echo "")
+        case "$status" in
+            error_deleting|deleting|error)
+                openstack volume set --state error "$id" 2>/dev/null || true
+                ;;
+        esac
+        _delete_resource "Volume" "$id" openstack volume delete --force
     done
 }
 
 purge_routers() {
-    local -a pf=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
-    _list_orphans "Routers" _SNAP_ROUTERS openstack router list "${pf[@]}"
+    _list_orphans "Routers" _SNAP_ROUTERS openstack router list
 }
 purge_routers_delete() {
     [[ "${#_SNAP_ROUTERS[@]}" -eq 0 ]] && return
@@ -290,9 +296,7 @@ purge_routers_delete() {
 }
 
 purge_security_groups() {
-    local -a pf=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
-    _list_orphans "Security groups" _SNAP_SECGROUPS openstack security group list "${pf[@]}"
+    _list_orphans "Security groups" _SNAP_SECGROUPS openstack security group list
 }
 purge_security_groups_delete() {
     [[ "${#_SNAP_SECGROUPS[@]}" -eq 0 ]] && return
@@ -302,9 +306,7 @@ purge_security_groups_delete() {
 }
 
 purge_networks() {
-    local -a pf=()
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && pf=("--project" "${OS_PROJECT_NAME}")
-    _list_orphans "Networks" _SNAP_NETWORKS openstack network list "${pf[@]}"
+    _list_orphans "Networks" _SNAP_NETWORKS openstack network list
 }
 purge_networks_delete() {
     [[ "${#_SNAP_NETWORKS[@]}" -eq 0 ]] && return
@@ -314,28 +316,7 @@ purge_networks_delete() {
 }
 
 purge_images() {
-    local json count
-    # Images: must be owner-scoped when OS_PROJECT_NAME is set.
-    # If the project ID lookup fails, skip images entirely to avoid listing
-    # every image in the cloud (fail closed, not open).
-    local -a owner_filter=()
-    if [[ -n "${OS_PROJECT_NAME:-}" ]]; then
-        local project_id
-        project_id=$(openstack project show "${OS_PROJECT_NAME}" -f value -c id 2>/dev/null) || true
-        if [[ -z "${project_id:-}" ]]; then
-            log "Images: WARNING — could not resolve project ID for '${OS_PROJECT_NAME}'; skipping to avoid global listing."
-            _LISTING_ERRORS=$((_LISTING_ERRORS + 1))
-            return 0
-        fi
-        owner_filter=("--owner" "${project_id}")
-    fi
-    json=$(_os_list "Images" openstack image list "${owner_filter[@]}" -f json) || return 0
-    count=$(rally_count "$json")
-    if [[ "$count" -eq 0 ]]; then log "Images: none"; return; fi
-    log "Images: ${count} orphaned"
-    rally_list "$json"
-    TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _SNAP_IMAGES+=("$id"); done < <(rally_ids "$json")
+    _list_orphans "Images" _SNAP_IMAGES openstack image list
 }
 purge_images_delete() {
     [[ "${#_SNAP_IMAGES[@]}" -eq 0 ]] && return
@@ -526,7 +507,7 @@ main() {
     # Phase 2: deletion pass — uses only the IDs snapshotted in Phase 1.
     # No new listing occurs; the set being deleted matches exactly what was counted.
     log "Phase 2: deleting ${TOTAL_FOUND} orphaned Rally resources (from Phase 1 snapshot)..."
-    [[ -n "${OS_PROJECT_NAME:-}" ]] && log "Project-scoped to: ${OS_PROJECT_NAME}"
+    log "Matching by name prefix (s_rally_*, c_rally_*) across all projects."
     local found_in_listing="${TOTAL_FOUND}"
     echo
 
