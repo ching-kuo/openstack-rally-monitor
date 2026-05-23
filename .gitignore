@@ -33,5 +33,9 @@ __pycache__/
 
 # Vendored frontend assets (downloaded at Docker build time, never committed)
 dashboard/vendor/
+
+# Operator branding overlay (operator drops files into /results/branding/
+# at runtime; the local stash is for previewing only and never committed)
+dashboard/themes/custom/
 # Added by code-review-graph
 .code-review-graph/

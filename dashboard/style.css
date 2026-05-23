@@ -746,6 +746,142 @@ section {
     color: var(--color-text-muted);
 }
 
+/* --- Operator Announcement Banner --- */
+.announcement-banner {
+    /* Outer edges align with section content (sections are 1400px max with
+       2rem horizontal padding, so their content area is 1400 - 4rem wide). */
+    max-width: calc(1400px - 4rem);
+    width: calc(100% - 4rem);
+    margin: 1rem auto 0;
+    padding: 0.85rem 1.25rem;
+    background: var(--color-surface-card);
+    border: 1px solid var(--border-glass);
+    border-left-width: 4px;
+    border-radius: var(--radius-md);
+    backdrop-filter: blur(10px);
+    font-size: 0.85rem;
+    color: var(--color-text-primary);
+    position: relative;
+    z-index: 1;
+    animation: fadeInUp 0.3s ease-out;
+}
+
+/* Type-driven coloring. Each type sets a per-banner --announce-accent that
+   feeds both the left border and the type label. Background tints are
+   hardcoded rgba (decorative alpha literals, treated as not stable API per
+   CLAUDE.md) because rgba() cannot interpolate a custom property. The visible
+   [TYPE] label is the redundant non-color signal that disambiguates the
+   banner for color-vision-deficient operators. */
+.announcement-banner.type-incident {
+    --announce-accent: var(--color-failure);
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.announcement-banner.type-maintenance {
+    --announce-accent: var(--color-warning);
+    background: rgba(245, 158, 11, 0.06);
+}
+
+.announcement-banner.type-scheduled {
+    --announce-accent: var(--color-brand-secondary);
+    background: rgba(6, 182, 212, 0.06);
+}
+
+.announcement-banner[class*="type-"] {
+    border-left-color: var(--announce-accent);
+}
+
+.announcement-banner .type-label {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-right: 0.6rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--announce-accent);
+    vertical-align: 0.05em;
+}
+
+.announcement-banner .announcement-primary {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    line-height: 1.5;
+}
+
+.announcement-banner .announcement-body {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.announcement-banner details {
+    margin-top: 0.65rem;
+}
+
+.announcement-banner details > summary {
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: var(--color-text-secondary);
+    padding: 0.2rem 0;
+    list-style: revert;
+}
+
+.announcement-banner details > summary:focus-visible {
+    outline: 2px solid var(--color-brand-primary);
+    outline-offset: 2px;
+    border-radius: var(--radius-sm);
+}
+
+.announcement-details-body {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border-glass);
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.announcement-section.is-secondary {
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--border-glass);
+}
+
+.announcement-section .type-label {
+    margin-bottom: 0.25rem;
+}
+
+.update-list {
+    margin-top: 0.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.update-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, max-content) 1fr;
+    gap: 0.6rem;
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+
+.update-row .update-ts {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--color-text-muted);
+    font-size: 0.7rem;
+    white-space: nowrap;
+}
+
+.update-row .update-body {
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
 /* --- Historical Run Banner --- */
 .historical-banner {
     max-width: 1400px;

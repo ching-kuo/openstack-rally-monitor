@@ -143,11 +143,15 @@ fi
 
 # Symlink JSON data files into /dashboard so the HTTP server can serve them.
 # Recreated on every startup since /dashboard is ephemeral (not a volume).
-ln -sf "${RESULTS_DIR}/results.json"         /dashboard/results.json
-ln -sf "${RESULTS_DIR}/history.json"         /dashboard/history.json
-ln -sf "${RESULTS_DIR}/health.json"          /dashboard/health.json
-ln -sf "${RESULTS_DIR}/health_history.json"  /dashboard/health_history.json
-ln -sfn "${RESULTS_DIR}/branding"            /dashboard/themes/custom
+ln -sf "${RESULTS_DIR}/results.json"            /dashboard/results.json
+ln -sf "${RESULTS_DIR}/history.json"            /dashboard/history.json
+ln -sf "${RESULTS_DIR}/health.json"             /dashboard/health.json
+ln -sf "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
+# Operator-announcement state. The symlink is unconditional; the target file
+# appears lazily on the first announce.sh post. serve.py's target.exists()
+# check 404s on the dangling symlink until then.
+ln -sf "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
+ln -sfn "${RESULTS_DIR}/branding"               /dashboard/themes/custom
 log "Custom theme slot: ${RESULTS_DIR}/branding"
 log "Dashboard symlinks updated"
 

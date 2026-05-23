@@ -535,6 +535,15 @@ EOF
     # Build summary
     build_summary
 
+    # Auto-clear incident-type announcements when the run is unambiguously
+    # all-green. The deployment_setup_failed path above (lines 508-515)
+    # already exits 1 before reaching here, so the empty-services guard in
+    # ALL_GREEN_PREDICATE inside announce.sh primarily protects direct
+    # `docker exec` invocations against a stale latest_summary.json — not the
+    # normal cron flow. It also stays load-bearing if a future refactor
+    # removes the early exit.
+    /scripts/announce.sh auto-clear-if-all-green --summary-file "${SUMMARY_FILE}" || true
+
     # Auto-purge rally-owned RGW orphans before writing cleanup metrics so
     # dashboard/Prometheus state reflects the post-purge resource state.
     auto_purge_rgw

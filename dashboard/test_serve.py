@@ -124,6 +124,7 @@ class TestAllowlist:
             "history.json": "{}",
             "health.json": "{}",
             "health_history.json": "{}",
+            "announcement-state.json": '{"announcements": []}',
         }
         for name, payload in payloads.items():
             (results_dir / name).write_text(payload)
@@ -132,6 +133,36 @@ class TestAllowlist:
             assert code == 200, f"{name} should be served"
             if name == "results.json":
                 assert b"ok" in body
+
+    def test_announcement_state_dangling_symlink_returns_404(self, server):
+        """The symlink is created unconditionally at container start; the
+        target file appears only after the first post. A dangling symlink
+        must 404, not 5xx."""
+        base, dashboard_dir, results_dir = server
+        (dashboard_dir / "announcement-state.json").symlink_to(
+            results_dir / "announcement-state.json"
+        )
+        code, _, _ = get(base, "/announcement-state.json")
+        assert code == 404
+
+    def test_announcement_state_has_no_store_cache_control(self, server):
+        base, dashboard_dir, results_dir = server
+        (results_dir / "announcement-state.json").write_text('{"announcements": []}')
+        (dashboard_dir / "announcement-state.json").symlink_to(
+            results_dir / "announcement-state.json"
+        )
+        _, headers, _ = get(base, "/announcement-state.json")
+        assert "no-store" in headers.get("cache-control", "")
+        assert headers["content-type"].startswith("application/json")
+
+    def test_arbitrary_results_json_not_widened_by_allowlist(self, server):
+        """Adding announcement-state.json must not widen the allowlist to
+        every *.json in /results/."""
+        base, dashboard_dir, results_dir = server
+        (results_dir / "secrets.json").write_text('{"token": "leak"}')
+        (dashboard_dir / "secrets.json").symlink_to(results_dir / "secrets.json")
+        code, _, _ = get(base, "/secrets.json")
+        assert code == 403
 
     def test_symlink_pointing_outside_results_is_blocked(self, server):
         """Symlink to a file outside both SERVE_ROOT and RESULTS_ROOT is denied."""

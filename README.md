@@ -216,6 +216,51 @@ radosgw-admin caps add --uid=<admin-uid> --caps="buckets=*;users=*"
 
 If RGW credentials are not set, all RGW features are silently skipped — existing functionality is unaffected.
 
+## Operator Announcements
+
+The dashboard renders a single banner above the 7-day timeline that operators can publish to via `docker exec`. Three types are supported:
+
+| Type          | Color    | Lifecycle |
+|---------------|----------|-----------|
+| `incident`    | red      | Active until cleared manually, or auto-cleared after the next all-green Rally run |
+| `maintenance` | amber    | Active until `--expires-at`, or until cleared manually |
+| `scheduled`   | blue     | Hidden until `--effective-from`, then visible until `--expires-at` |
+
+All examples below run as the `rally` user. Using a different UID can leave the state file owned by root and break subsequent cron-driven auto-clears.
+
+```bash
+# Publish an incident (clears automatically when the next Rally run is all-green)
+docker exec -u rally rally-monitor /scripts/announce.sh \
+    post --type incident --body "RGW backend degraded — investigating"
+
+# Publish a maintenance window (auto-expires at the given UTC time)
+docker exec -u rally rally-monitor /scripts/announce.sh \
+    post --type maintenance \
+    --body "Lab maintenance — expect failures" \
+    --expires-at 2026-05-16T18:00:00Z
+
+# Publish a scheduled-future announcement (hidden until effective_from)
+docker exec -u rally rally-monitor /scripts/announce.sh \
+    post --type scheduled \
+    --body "Compute upgrade window" \
+    --effective-from 2026-05-17T10:00:00Z \
+    --expires-at 2026-05-17T12:00:00Z
+
+# Append a progress update to an existing incident or maintenance record
+docker exec -u rally rally-monitor /scripts/announce.sh \
+    update <id> --body "Restarted nginx, observing"
+
+# List active announcements (returns the full state JSON)
+docker exec -u rally rally-monitor /scripts/announce.sh list
+
+# Clear an announcement explicitly (idempotent — succeeds even if the id is gone)
+docker exec -u rally rally-monitor /scripts/announce.sh clear <id>
+```
+
+`post` prints the new announcement's ID to stdout so it can be captured for follow-up updates. Timestamps must be ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`). Bodies are plain text (max 500 characters); HTML and Markdown are not rendered.
+
+State lives at `/results/announcement-state.json`. The dashboard picks up changes on its existing 5-minute refresh cycle — no new HTTP endpoint is introduced.
+
 ## Useful Commands
 
 ```bash

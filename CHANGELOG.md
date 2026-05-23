@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard** — operator announcement banner above the 7-day timeline. Three types are supported with distinct lifecycles: `incident` (active until cleared, or auto-cleared after the next all-green Rally run), `maintenance` (active until `--expires-at`), and `scheduled` (hidden until `--effective-from`, then visible until `--expires-at`). The banner shows a visible `[TYPE]` label alongside type-colored borders so color is not the sole signal. A native `<details>` element exposes progress updates and other concurrent records; the open state survives the 5-minute auto-refresh when the same primary record is still active. Outer edges align with section content (`max-width: calc(1400px - 4rem)`) so the banner sits flush with the timeline cards below
+- **CLI** — `scripts/announce.sh post | update | clear | list | auto-clear-if-all-green`. Bodies are plain text (max 500 chars); timestamps must be ISO 8601 UTC and are validated semantically before reaching `jq`. State is persisted atomically to `/results/announcement-state.json` via `tmpfile + mv`. ID format `<type>-<YYYYMMDDTHHmmssZ>-<8 hex chars>`. Invoke via `docker exec -u rally rally-monitor /scripts/announce.sh ...`
+- **Scripts** — `scripts/run_tests.sh` invokes `announce.sh auto-clear-if-all-green` after `build_summary` and before `publish_dashboard_files`. The predicate `(.services | length) > 0 AND (.error // null) == null AND (.services | to_entries | all(.value.status == "passed"))` guards against the `deployment_setup_failed` shape — the empty-services check is critical because `jq all(...)` returns `true` on empty iteration, which would silently erase the very banner the operator posted to explain the failure
+- **Scripts** — every mutating subcommand wraps its read-modify-write cycle in `flock` on `/results/.announce.lock`, preventing an operator post/update/clear from racing with a cron-driven `auto-clear-if-all-green`. Falls through to direct execution (single-operator behavior) when `flock` is unavailable
+- **Server** — `dashboard/serve.py` `ALLOWED_JSON_SYMLINKS` extended with `announcement-state.json`. Same containment as the existing entries (`target.is_relative_to(RESULTS_ROOT)`); no new attack surface
+- **Tests** — `scripts/test_announce.py` covers CLI behavior (35 cases including the empty-services guard, ISO 8601 semantic validation, ID-entropy under burst posts, atomicity, and a corrupt-state-file refusal). `dashboard/test_serve.py` extended with allowlist regression coverage for the new entry
+
+### Changed
+
+- **Docs** — README gains an "Operator Announcements" section; CLAUDE.md gains an "Announcement System" architecture subsection that explains the deliberate placement at `/results/announcement-state.json` (outside `/results/branding/` to avoid the documented read-only theme bind-mount collision)
+
 ### Fixed
 
 - **Scripts** — `purge_orphans.sh` no longer narrows listings to `OS_PROJECT_NAME`. Rally creates orphan resources inside `c_rally_*` context projects, not the service account's project, so the redundant `--project`/`--owner` filter masked every scenario-leaked server, volume, router, security group, network, and image. Detection now matches the always-on `cleanup_monitor.sh` (admin scope + name-prefix match across all projects)

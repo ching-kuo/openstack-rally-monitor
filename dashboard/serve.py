@@ -21,7 +21,13 @@ ALLOWED_STATIC = {
     "vendor/chart.umd.min.js",
     "vendor/inter-variable.woff2",
 }
-ALLOWED_JSON_SYMLINKS = {"results.json", "history.json", "health.json", "health_history.json"}
+ALLOWED_JSON_SYMLINKS = {
+    "results.json",
+    "history.json",
+    "health.json",
+    "health_history.json",
+    "announcement-state.json",
+}
 THEME_PREFIX = "themes/"
 ALLOWED_THEME_SUFFIXES = {".css", ".svg", ".png", ".ico"}
 RESULTS_ROOT = Path(os.environ.get("RESULTS_DIR", "/results")).resolve()

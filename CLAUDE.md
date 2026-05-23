@@ -106,6 +106,20 @@ Dashboard theming follows a narrow `themes/<name>/` contract without a build ste
 
 Public theme tokens are documented in `docs/CUSTOMIZING.md`. Internal glass/radius/shadow tokens and decorative alpha literals are not stable API. SVGs loaded via `<img>` do not inherit page CSS variables, so a custom theme must supply its own `logo.svg` to recolor the brand mark.
 
+### Announcement System
+
+Operator-authored dashboard banners are managed by `scripts/announce.sh` — a bash + jq CLI invoked via `docker exec -u rally rally-monitor /scripts/announce.sh ...`. State lives at `/results/announcement-state.json` (top-level shape: `{"announcements": [...]}`), written atomically via `tmpfile + mv`. No HTTP write endpoint is introduced; authorization equals "you can `docker exec -u rally` on the host."
+
+The state file lives directly under `/results/` rather than under `/results/branding/` to avoid a collision with the documented read-only theme bind-mount pattern (`./my-theme:/results/branding:ro` in `docs/CUSTOMIZING.md`), which would otherwise silently break every write.
+
+`scripts/entrypoint.sh` creates `/dashboard/announcement-state.json -> /results/announcement-state.json` unconditionally at startup; the file appears lazily on the first `post`, and `serve.py`'s `target.exists()` check 404s on the dangling symlink until then. The dashboard fetches via the same GET surface as other JSON files: one entry in `ALLOWED_JSON_SYMLINKS`.
+
+The CLI supports five subcommands: `post`, `update`, `clear`, `list`, and `auto-clear-if-all-green`. The last is invoked from `scripts/run_tests.sh::main` after `build_summary` and before `publish_dashboard_files`; it removes every `incident`-type record when the post-run summary is unambiguously all-green. The predicate is `(.services | length) > 0 AND (.error // null) == null AND (.services | to_entries | all(.value.status == "passed"))`. The empty-services and `.error` guards are critical — a naive `all(...)` returns `true` on the `{"services": {}, "error": "deployment_setup_failed"}` shape and would silently erase the incident banner during the exact failure mode it exists to communicate.
+
+Mutating subcommands wrap their read-modify-write cycle in `flock` on `/results/.announce.lock`. Without this, an operator `post` running between a cron-driven `auto-clear-if-all-green`'s read and write would be silently overwritten. `list` is unlocked so it never blocks on a stuck mutator.
+
+The dashboard renders one banner above the 7-day timeline. Body text is rendered via `textContent` (no Markdown, no HTML); a `<details>` element exposes progress updates and other concurrent records. Each banner carries a visible bracketed type label (`[INCIDENT]` / `[MAINTENANCE]` / `[SCHEDULED]`) so color is not the sole signal — color tokens reused from the public theme contract: `--color-failure` (incident), `--color-warning` (maintenance), `--color-brand-secondary` (scheduled). Auto-refresh preserves `<details>` open state when the same primary announcement is still active.
+
 ### Orphan Detection
 
 `scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. When `RGW_ADMIN_URL`, `RGW_ACCESS_KEY`, and `RGW_SECRET_KEY` are configured, it also queries the RGW admin REST API for orphaned implicit-tenant users and marks the scan as `ok`, `skipped`, or `error`. The exporter exposes these as OpenStack cleanup gauges plus `rally_rgw_*` metrics.
