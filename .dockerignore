@@ -5,6 +5,10 @@
 # Vendored frontend assets (downloaded at build time via curl — never copy local copies)
 dashboard/vendor/
 
+# Operator branding preview slot — symlinked at runtime to /results/branding/.
+# Baking a directory here would prevent the entrypoint from creating the symlink.
+dashboard/themes/custom/
+
 # Runtime data and results
 results/
 tmp/

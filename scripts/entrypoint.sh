@@ -151,7 +151,13 @@ ln -sf "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
 # appears lazily on the first announce.sh post. serve.py's target.exists()
 # check 404s on the dangling symlink until then.
 ln -sf "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
-ln -sfn "${RESULTS_DIR}/branding"               /dashboard/themes/custom
+# `ln -sfn` cannot overwrite an existing directory, so if the image was built
+# with a preview `dashboard/themes/custom/` staged in the source tree (e.g.
+# operator-side scaffolding), the symlink would silently turn into a child
+# entry and the dashboard would serve the baked-in files instead of the
+# operator's runtime branding. Remove first, then link.
+rm -rf /dashboard/themes/custom
+ln -s "${RESULTS_DIR}/branding"                 /dashboard/themes/custom
 log "Custom theme slot: ${RESULTS_DIR}/branding"
 log "Dashboard symlinks updated"
 
