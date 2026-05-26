@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- **Scripts** — `mirror_job_logs.sh` no longer writes to `/proc/1/fd/1`; cron jobs run as `rally` (UID 1500) and the cross-uid write to root-owned PID 1 stdout failed with `Permission denied`, aborting the pipeline before `tee` reached the log file. `entrypoint.sh` now spawns a `tail -F` of the job log files as a PID 1 child to forward output into `docker logs`
 - **Scripts** — `purge_orphans.sh` no longer narrows listings to `OS_PROJECT_NAME`. Rally creates orphan resources inside `c_rally_*` context projects, not the service account's project, so the redundant `--project`/`--owner` filter masked every scenario-leaked server, volume, router, security group, network, and image. Detection now matches the always-on `cleanup_monitor.sh` (admin scope + name-prefix match across all projects)
 - **Scripts** — `purge_orphans.sh` resets stuck volumes (`error_deleting` / `deleting` / `error`) to `error` via `openstack volume set --state` before issuing `openstack volume delete --force`. Cinder protects the `error_deleting` state from a plain delete, leaving volumes from failed scenario cleanups un-purgeable until manually intervened
 

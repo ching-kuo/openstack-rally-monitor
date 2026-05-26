@@ -31,8 +31,8 @@ docker exec -u rally rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs
 docker logs -f rally-monitor
-docker exec rally-monitor tail -f /var/log/rally-tests.log
-docker exec rally-monitor tail -f /var/log/health-check.log
+docker exec rally-monitor tail -f /rally/logs/rally-tests.log
+docker exec rally-monitor tail -f /rally/logs/health-check.log
 ```
 
 ### Exporter (local dev, outside Docker)

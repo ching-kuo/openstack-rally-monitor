@@ -230,6 +230,12 @@ chmod 0644 /etc/cron.d/rally-tests
 touch /rally/logs/rally-tests.log  && chmod 0660 /rally/logs/rally-tests.log
 touch /rally/logs/health-check.log && chmod 0660 /rally/logs/health-check.log
 
+# Forward cron job logs into `docker logs` (cron jobs run as rally and can't
+# write to PID 1's stdout). `-F` handles the `copytruncate` rotation used in
+# docker/logrotate.conf — re-reading from offset 0 when the file shrinks.
+tail -F -n 0 -q /rally/logs/rally-tests.log /rally/logs/health-check.log &
+LOG_TAIL_PID=$!
+
 # Start cron daemon
 cron
 
@@ -255,10 +261,11 @@ log "  - Rally tests:   every ${SCHEDULE_INTERVAL} min (${CRON_SCHEDULE})"
 log "  - Health checks: every ${HEALTH_CHECK_INTERVAL} min (${HEALTH_CRON})"
 
 # Trap signals for graceful shutdown
-trap 'log "Shutting down..."; kill ${EXPORTER_PID} ${DASHBOARD_PID} 2>/dev/null; exit 0' SIGTERM SIGINT
+trap 'log "Shutting down..."; kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null; exit 0' SIGTERM SIGINT
 
-# Wait for any child to exit
-wait -n ${EXPORTER_PID} ${DASHBOARD_PID} 2>/dev/null || true
+# Wait for any child to exit. Tailer death is fatal — otherwise `docker logs`
+# would silently go dark.
+wait -n ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null || true
 log "A child process exited, shutting down..."
-kill ${EXPORTER_PID} ${DASHBOARD_PID} 2>/dev/null || true
+kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null || true
 exit 1
