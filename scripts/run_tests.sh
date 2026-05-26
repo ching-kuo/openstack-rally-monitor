@@ -398,6 +398,26 @@ check_cleanup() {
     }
 }
 
+# Inject the freshly-written cleanup_metrics.json into the current run's
+# summary.json (and latest_summary.json) so history.json carries per-run
+# cleanup counts instead of showing zeros for every historical entry.
+attach_cleanup_to_summary() {
+    local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
+    local run_summary="${RUN_DIR}/summary.json"
+    [[ -f "${cleanup_file}" ]] || return 0
+
+    for target in "${run_summary}" "${SUMMARY_FILE}"; do
+        [[ -f "${target}" ]] || continue
+        if jq --slurpfile cleanup "${cleanup_file}" '. + {cleanup: $cleanup[0]}' \
+                "${target}" > "${target}.tmp"; then
+            mv "${target}.tmp" "${target}"
+        else
+            rm -f "${target}.tmp"
+            log "WARNING: failed to attach cleanup metrics to ${target}"
+        fi
+    done
+}
+
 # --------------------------------------------------------------------------
 # 7. Auto-purge rally-owned RGW orphans
 # --------------------------------------------------------------------------
@@ -550,6 +570,10 @@ EOF
 
     # Check cleanup
     check_cleanup
+
+    # Fold cleanup metrics into the run's summary so history.json carries
+    # per-run cleanup counts (results.json already merges them at publish time).
+    attach_cleanup_to_summary
 
     # Publish static files for the dashboard (replaces API calls)
     publish_dashboard_files
