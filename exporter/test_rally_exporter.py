@@ -203,38 +203,33 @@ class TestLoadCleanupMetrics:
 # ---------------------------------------------------------------------------
 
 class TestUpdateMetrics:
-    def test_missing_file_sets_data_invalid(self, results_dir):
-        """CQ-08: Missing summary file must not report success."""
-        exporter.update_metrics()
-        output = metrics_output()
-        assert "rally_data_valid 0.0" in output
-        assert "rally_overall_success 0.0" in output
-
-    def test_empty_services_sets_data_invalid(self, results_dir):
-        """CQ-08: Summary with empty services must not report success."""
-        summary = {"timestamp": "20240101T120000Z", "services": {}}
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert "rally_data_valid 0.0" in output
-        assert "rally_overall_success 0.0" in output
-
-    def test_waiting_for_first_run_sets_data_invalid(self, results_dir):
-        """CQ-08: Seed/waiting summary must not report success."""
-        summary = {
-            "timestamp": "waiting_for_first_run",
-            "services": {
-                "nova": {
-                    "status": "pending",
-                    "duration": 0,
-                    "total_iterations": 0,
-                    "failed_iterations": 0,
-                    "sla_passed": True,
-                    "scenarios": [],
-                }
-            },
-        }
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
+    @pytest.mark.parametrize(
+        "summary",
+        [
+            pytest.param(None, id="missing_file"),
+            pytest.param({"timestamp": "20240101T120000Z", "services": {}}, id="empty_services"),
+            pytest.param(
+                {
+                    "timestamp": "waiting_for_first_run",
+                    "services": {
+                        "nova": {
+                            "status": "pending",
+                            "duration": 0,
+                            "total_iterations": 0,
+                            "failed_iterations": 0,
+                            "sla_passed": True,
+                            "scenarios": [],
+                        }
+                    },
+                },
+                id="waiting_for_first_run",
+            ),
+        ],
+    )
+    def test_invalid_summary_sets_data_invalid(self, results_dir, summary):
+        """CQ-08: missing, empty-services, or seed/waiting summaries must not report success."""
+        if summary is not None:
+            (results_dir / "latest_summary.json").write_text(json.dumps(summary))
         exporter.update_metrics()
         output = metrics_output()
         assert "rally_data_valid 0.0" in output

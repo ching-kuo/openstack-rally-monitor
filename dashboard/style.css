@@ -417,10 +417,6 @@ section {
     text-transform: capitalize;
 }
 
-.card-icon {
-    font-size: 1.25rem;
-}
-
 .status-chip {
     display: inline-flex;
     align-items: center;

@@ -54,7 +54,7 @@ cp env.sample .env
 
 The entire system runs in a single Docker container (`rally-monitor`) with three concurrent processes managed by `scripts/entrypoint.sh`:
 
-1. **Prometheus Exporter** (`exporter/rally_exporter.py`) — Flask app on `:9101` that reads JSON files from `/results/` and exposes them as Prometheus gauge metrics on `/metrics`. Also serves `/health` and `/api/results`, `/api/history`.
+1. **Prometheus Exporter** (`exporter/rally_exporter.py`) — Flask app on `:9101` that reads JSON files from `/results/` and exposes them as Prometheus gauge metrics on `/metrics`. Also serves `/health` (liveness) and `/ready` (readiness).
 
 2. **Dashboard** (`dashboard/`) — Static files served by Python's `http.server` on `:8080`. The dashboard is pure HTML/JS/CSS with no build step; it fetches JSON from symlinked files (`results.json`, `history.json`, `health.json`, `health_history.json`) in the same directory.
 

@@ -15,8 +15,14 @@
 
 - **Docs** — README gains an "Operator Announcements" section; CLAUDE.md gains an "Announcement System" architecture subsection that explains the deliberate placement at `/results/announcement-state.json` (outside `/results/branding/` to avoid the documented read-only theme bind-mount collision)
 
+### Removed
+
+- **Dashboard** — dead `.card-icon` CSS rule (never emitted to the DOM; service cards inline the service emoji inside `.card-title`) and the unused internal `--shadow-sm` token. Both are internal, non-public-contract assets, so custom themes are unaffected
+- **Tooling** — `.antigravityignore` (was byte-identical to `.claudeignore`)
+
 ### Fixed
 
+- **Docs** — `CLAUDE.md` no longer claims the exporter serves `/api/results` and `/api/history`; the real HTTP endpoints are `/metrics`, `/health`, and `/ready`
 - **Scripts** — `mirror_job_logs.sh` no longer writes to `/proc/1/fd/1`; cron jobs run as `rally` (UID 1500) and the cross-uid write to root-owned PID 1 stdout failed with `Permission denied`, aborting the pipeline before `tee` reached the log file. `entrypoint.sh` now spawns a `tail -F` of the job log files as a PID 1 child to forward output into `docker logs`
 - **Scripts** — `purge_orphans.sh` no longer narrows listings to `OS_PROJECT_NAME`. Rally creates orphan resources inside `c_rally_*` context projects, not the service account's project, so the redundant `--project`/`--owner` filter masked every scenario-leaked server, volume, router, security group, network, and image. Detection now matches the always-on `cleanup_monitor.sh` (admin scope + name-prefix match across all projects)
 - **Scripts** — `purge_orphans.sh` resets stuck volumes (`error_deleting` / `deleting` / `error`) to `error` via `openstack volume set --state` before issuing `openstack volume delete --force`. Cinder protects the `error_deleting` state from a plain delete, leaving volumes from failed scenario cleanups un-purgeable until manually intervened
