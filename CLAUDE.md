@@ -11,7 +11,10 @@ Rally OpenStack Monitor — a containerized tool that runs OpenStack cloud tests
 ### Build and Run
 
 ```bash
-# Build and start the container
+# Pull the CI-published image and start the container (default)
+cd docker && docker compose pull && docker compose up -d
+
+# Or build locally instead of pulling (tagged with the same image name)
 cd docker && docker compose up -d --build
 
 # Trigger a manual test run inside the running container
@@ -144,6 +147,7 @@ Located in `rally/scenarios/` (6 services: keystone, nova, neutron, glance, cind
 | `RGW_REGION` | unset | Optional explicit SigV4 region for RGW admin requests |
 | `EXPORTER_PORT` / `DASHBOARD_PORT` | `9101` / `8080` | Exposed ports |
 | `RALLY_DEBUG` | `false` | Set to `true` for verbose rally task logging |
+| `RALLY_MONITOR_IMAGE` | `ghcr.io/ching-kuo/openstack-rally-monitor:latest` | Compose-only: image tag to pull/run |
 
 ### Cron Environment
 
@@ -161,6 +165,12 @@ Environment variables are exported to `/rally/rally_env` (mode 0640) at containe
 
 - Scrape target: `<host>:9101/metrics`
 - Alert rules: copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and add it under `rule_files:` in `prometheus.yml`
+
+### CI
+
+`.github/workflows/build-push.yml` builds the container image and pushes it to GitHub Container Registry (`ghcr.io/<owner>/<repo>`). It runs on push to `main`, on `v*` tags, on PRs to `main` (build-only, no push), and via manual dispatch. Auth uses the built-in `GITHUB_TOKEN` (`packages: write`), so no extra secrets are required. The build context is the repo root with `docker/Dockerfile`, matching `docker/docker-compose.yml`. Tags are derived by `docker/metadata-action` (branch, PR ref, semver, SHA, and `latest` on the default branch); layer caching uses the GitHub Actions cache backend.
+
+`docker/docker-compose.yml` defaults to this published image (`image: ${RALLY_MONITOR_IMAGE:-ghcr.io/ching-kuo/openstack-rally-monitor:latest}`) while retaining the `build:` block, so `docker compose pull` fetches upstream and `docker compose up --build` still builds locally under the same tag.
 
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph

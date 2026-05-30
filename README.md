@@ -77,10 +77,25 @@ cp env.sample .env
 vim .env
 ```
 
-### 2. Build and Run
+### 2. Pull and Run
+
+By default the compose file uses the pre-built image published to GitHub Container Registry by CI (`.github/workflows/build-push.yml`). Pull it and start:
 
 ```bash
 cd docker
+docker compose pull
+docker compose up -d
+```
+
+Override the image with the `RALLY_MONITOR_IMAGE` environment variable to pin a specific tag. Available tags: `latest` (default branch), the branch name, version tags (`vX.Y.Z`), and the commit SHA:
+
+```bash
+RALLY_MONITOR_IMAGE=ghcr.io/ching-kuo/openstack-rally-monitor:v1.2.3 docker compose up -d
+```
+
+To build locally instead of pulling (the built image is tagged with the same name):
+
+```bash
 docker compose up -d --build
 ```
 

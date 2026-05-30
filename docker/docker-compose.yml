@@ -1,5 +1,6 @@
 services:
   rally-monitor:
+    image: ${RALLY_MONITOR_IMAGE:-ghcr.io/ching-kuo/openstack-rally-monitor:latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile
