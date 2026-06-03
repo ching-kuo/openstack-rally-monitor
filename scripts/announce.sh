@@ -302,6 +302,8 @@ cmd_list() {
 # summary shape (services: {}, error: "deployment_setup_failed") — `jq all(...)`
 # returns true on empty input, which would silently erase the very banner the
 # operator posted to explain the failure.
+# NOTE: run_tests.sh::record_smoke_result duplicates this predicate for its
+# uptime pass/fail classification — keep the two in sync.
 ALL_GREEN_PREDICATE='
     (.services | length) > 0
     and (.error // null) == null

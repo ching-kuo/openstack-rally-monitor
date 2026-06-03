@@ -462,6 +462,23 @@ document
   .addEventListener("click", backToLatest);
 
 // ---------------------------------------------------------------------------
+// Uptime Badges
+// ---------------------------------------------------------------------------
+// Renders "<percent>% uptime / <N>d" into a section-header badge. Stays hidden
+// until the backing scripts have published an uptime object (first boots and
+// data files written before the uptime feature have none).
+function renderUptimeBadge(id, uptime) {
+  const badge = document.getElementById(id);
+  if (!badge) return;
+  if (!uptime || typeof uptime.percent !== "number") {
+    badge.style.display = "none";
+    return;
+  }
+  badge.textContent = `${uptime.percent}% uptime / ${uptime.window_days}d`;
+  badge.style.display = "";
+}
+
+// ---------------------------------------------------------------------------
 // Health Check Timeline
 // ---------------------------------------------------------------------------
 function renderHealthTimeline(healthHistory) {
@@ -754,10 +771,15 @@ function renderCharts(history) {
 // ---------------------------------------------------------------------------
 // API Health Latency Chart
 // ---------------------------------------------------------------------------
+// Health history now retains up to UPTIME_WINDOW_DAYS of checks (for the
+// uptime figure); cap what the chart plots so it stays readable and cheap.
+// 672 = 7 days at 15-min intervals, the chart's historical span.
+const HEALTH_CHART_MAX_POINTS = 672;
+
 function renderHealthChart(healthHistory) {
-  const checks = ((healthHistory && healthHistory.checks) || []).filter(
-    (c) => c.services && Object.keys(c.services).length > 0,
-  );
+  const checks = ((healthHistory && healthHistory.checks) || [])
+    .filter((c) => c.services && Object.keys(c.services).length > 0)
+    .slice(-HEALTH_CHART_MAX_POINTS);
   if (checks.length < 2) return;
 
   const services = ["keystone", "nova", "neutron", "glance", "cinder", "swift"];
@@ -892,6 +914,11 @@ async function refresh() {
   // Always update health check timeline and latency chart
   renderHealthTimeline(healthHistoryData);
   renderHealthChart(healthHistoryData);
+
+  // Uptime badges (smoke-test uptime rides on results.json, API uptime on
+  // health_history.json)
+  if (resultsData) renderUptimeBadge("smokeUptimeBadge", resultsData.uptime);
+  renderUptimeBadge("apiUptimeBadge", healthHistoryData && healthHistoryData.uptime);
 
   // Update service cards for the pinned run (keeps live health indicators fresh)
   if (selectedRunIndex !== null && selectedRunIndex >= cachedHistory.runs.length) {

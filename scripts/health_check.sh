@@ -65,14 +65,19 @@ jq -n \
 OVERALL=$(jq -r '.overall' "${HEALTH_FILE}")
 log "Health check complete. Overall: ${OVERALL}"
 
-# Append to rolling health history (keep last 672 entries = 7 days at 15-min intervals)
+# Append to rolling health history. The cap is sized to cover the uptime
+# window at the configured check interval, floored at 672 entries (7 days at
+# 15-min intervals) so the dashboard health timeline never loses data.
 HISTORY_FILE="${RESULTS_DIR}/health_history.json"
-if [ -f "${HISTORY_FILE}" ]; then
-    jq --slurpfile cur "${HEALTH_FILE}" \
-        '.checks += $cur | .checks = .checks[-672:]' \
-        "${HISTORY_FILE}" > "${HISTORY_FILE}.tmp" \
-        && mv "${HISTORY_FILE}.tmp" "${HISTORY_FILE}"
-else
-    jq -n --slurpfile cur "${HEALTH_FILE}" '{checks: $cur}' > "${HISTORY_FILE}"
-fi
+UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
+MAX_ENTRIES=$(( UPTIME_WINDOW_DAYS * 24 * 60 / ${HEALTH_CHECK_INTERVAL:-15} ))
+if (( MAX_ENTRIES < 672 )); then MAX_ENTRIES=672; fi
+
+[ -f "${HISTORY_FILE}" ] || echo '{"checks": []}' > "${HISTORY_FILE}"
+jq --slurpfile cur "${HEALTH_FILE}" \
+    --argjson max "${MAX_ENTRIES}" \
+    --argjson days "${UPTIME_WINDOW_DAYS}" \
+    -f "$(dirname "${BASH_SOURCE[0]}")/health_history_filter.jq" \
+    "${HISTORY_FILE}" > "${HISTORY_FILE}.tmp" \
+    && mv "${HISTORY_FILE}.tmp" "${HISTORY_FILE}"
 log "History updated ($(jq '.checks | length' "${HISTORY_FILE}") entries)"

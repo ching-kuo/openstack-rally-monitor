@@ -73,13 +73,16 @@ run_tests.sh
   → poll live c_rally_* projects       (append IDs to /results/rally_project_ids.log)
   → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json)
   → build_summary()                    → /results/latest_summary.json
+  → record_smoke_result()              → /results/smoke_history.json (rolling uptime ledger)
   → auto_purge_rgw()                   (deletes rally-owned RGW orphans; no-op without RGW creds)
   → cleanup_monitor.sh                 → /results/cleanup_metrics.json
   → publish_dashboard_files()          → /results/results.json, history.json
 
 health_check.sh
   → openstack <service> list (read-only)
-  → /results/health.json, health_history.json (rolling 672-entry window)
+  → /results/health.json, health_history.json (rolling window sized to cover
+    UPTIME_WINDOW_DAYS at HEALTH_CHECK_INTERVAL, min 672 entries; carries an
+    embedded uptime object computed by scripts/health_history_filter.jq)
 
 rally_exporter.py
   → reads /results/latest_summary.json + cleanup_metrics.json on each /metrics scrape
@@ -92,7 +95,8 @@ rally_exporter.py
   - `latest_summary.json` — current run summary (seed file created on first boot)
   - `cleanup_metrics.json` — orphaned resource counts from `cleanup_monitor.sh`
   - `rally_project_ids.log` — append-only ledger of Rally-created Keystone project IDs for RGW purge provenance
-  - `results.json` — combined summary + cleanup for dashboard
+  - `smoke_history.json` — rolling per-run `{timestamp, status}` uptime ledger with embedded uptime figures; pruned by `UPTIME_WINDOW_DAYS`, independent of run-directory retention
+  - `results.json` — combined summary + cleanup + smoke uptime for dashboard
   - `history.json` — all retained per-run summaries for the timeline
   - `health.json` / `health_history.json` — API health check results
   - `<TIMESTAMP>/` — per-run directories with `<service>.json`, `<service>.html`, `run.log`
@@ -123,6 +127,15 @@ Mutating subcommands wrap their read-modify-write cycle in `flock` on `/results/
 
 The dashboard renders one banner above the 7-day timeline. Body text is rendered via `textContent` (no Markdown, no HTML); a `<details>` element exposes progress updates and other concurrent records. Each banner carries a visible bracketed type label (`[INCIDENT]` / `[MAINTENANCE]` / `[SCHEDULED]`) so color is not the sole signal — color tokens reused from the public theme contract: `--color-failure` (incident), `--color-warning` (maintenance), `--color-brand-secondary` (scheduled). Auto-refresh preserves `<details>` open state when the same primary announcement is still active.
 
+### Uptime Tracking
+
+The dashboard shows two uptime badges (in the timeline section headers), both computed over `UPTIME_WINDOW_DAYS` (default 30):
+
+- **Smoke-test uptime** — `run_tests.sh::record_smoke_result` appends `{timestamp, status}` to `/results/smoke_history.json` after every run (including the deployment-failure path) and recomputes the embedded `uptime` object. A run is `passed` only under the same all-green predicate `announce.sh` uses (non-empty services, no `.error`, all passed) — the predicate is duplicated in both scripts with keep-in-sync cross-references. The ledger is pruned by timestamp, so uptime coverage is independent of `RALLY_RESULTS_RETENTION_DAYS`. `publish_dashboard_files` embeds `uptime` into `results.json`; `record_smoke_result` also syncs it directly into an existing `results.json` so the deployment-failure path (which exits before publish) still updates the badge. The failure path deliberately does not run a full publish: the empty-services failure summary would render as "All Healthy" via `getRunStatus`.
+- **API uptime** — `health_check.sh` applies `scripts/health_history_filter.jq` (via `jq -f`, so tests exercise the shipped filter) to append the check, cap stored history (`UPTIME_WINDOW_DAYS * 24 * 60 / HEALTH_CHECK_INTERVAL`, floored at 672 so the 7-day health timeline never shrinks), and embed `uptime` into `health_history.json`. The count cap bounds storage; the timestamp cutoff defines the uptime window — they are intentionally separate.
+
+`dashboard/app.js::renderUptimeBadge` hides a badge until its `uptime.percent` is a number, so first boots and pre-feature data files render unchanged. The latency chart plots at most `HEALTH_CHART_MAX_POINTS` (672) checks regardless of stored history size. Uptime is dashboard-only by design — Prometheus users can derive it with `avg_over_time()` on existing gauges.
+
 ### Orphan Detection
 
 `scripts/cleanup_monitor.sh` runs after each Rally test suite. It queries each OpenStack service for resources prefixed with `s_rally` (scenario resources) or `c_rally` (context resources — projects, users, networks created by Rally contexts) and writes counts to `cleanup_metrics.json`. When `RGW_ADMIN_URL`, `RGW_ACCESS_KEY`, and `RGW_SECRET_KEY` are configured, it also queries the RGW admin REST API for orphaned implicit-tenant users and marks the scan as `ok`, `skipped`, or `error`. The exporter exposes these as OpenStack cleanup gauges plus `rally_rgw_*` metrics.
@@ -142,6 +155,7 @@ Located in `rally/scenarios/` (6 services: keystone, nova, neutron, glance, cind
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full test runs |
 | `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight health checks |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days before old run directories are pruned |
+| `UPTIME_WINDOW_DAYS` | `30` | Window in days for dashboard uptime percentages; sizes the smoke ledger and the health history cap |
 | `RALLY_NOVA_FLAVOR` / `RALLY_NOVA_IMAGE` | `m1.tiny` / `cirros-...` | Nova scenario inputs |
 | `RGW_ADMIN_URL` / `RGW_ACCESS_KEY` / `RGW_SECRET_KEY` | — | Optional RGW admin API config for orphan detection and purge |
 | `RGW_REGION` | unset | Optional explicit SigV4 region for RGW admin requests |

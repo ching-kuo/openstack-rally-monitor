@@ -13,6 +13,8 @@ TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
 RALLY_PROJECT_LEDGER_FILE="${RESULTS_DIR}/rally_project_ids.log"
+SMOKE_HISTORY_FILE="${RESULTS_DIR}/smoke_history.json"
+UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
 RUN_LOG="${RUN_DIR}/run.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -310,6 +312,59 @@ build_summary() {
 }
 
 # --------------------------------------------------------------------------
+# 3.5 Record run outcome in the rolling smoke-test uptime ledger
+# --------------------------------------------------------------------------
+# Kept separately from the per-run directories (which are pruned after
+# RALLY_RESULTS_RETENTION_DAYS) so uptime can cover UPTIME_WINDOW_DAYS.
+# A run counts as "passed" only when it has services, no top-level error,
+# and every service passed -- a copy of ALL_GREEN_PREDICATE in announce.sh;
+# keep the two in sync.
+record_smoke_result() {
+    local status
+    status=$(jq -r '
+        if (.services | length) > 0 and ((.error // null) == null)
+           and (.services | to_entries | all(.value.status == "passed"))
+        then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
+
+    [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
+
+    if jq --arg ts "${TIMESTAMP}" --arg status "${status}" \
+          --argjson days "${UPTIME_WINDOW_DAYS}" '
+        ((now - ($days * 86400)) | strftime("%Y%m%dT%H%M%SZ")) as $cutoff
+        | .runs = ([.runs[], {timestamp: $ts, status: $status}]
+                   | map(select(.timestamp >= $cutoff)))
+        | ([.runs[] | select(.status == "passed")] | length) as $up
+        | .uptime = {
+            window_days: $days,
+            runs_total: (.runs | length),
+            runs_passed: $up,
+            percent: (if (.runs | length) > 0
+                      then (10000 * $up / (.runs | length) | round / 100)
+                      else null end)
+        }' "${SMOKE_HISTORY_FILE}" > "${SMOKE_HISTORY_FILE}.tmp"; then
+        mv "${SMOKE_HISTORY_FILE}.tmp" "${SMOKE_HISTORY_FILE}"
+        log "Smoke uptime ledger updated (status=${status}, window=${UPTIME_WINDOW_DAYS}d)"
+    else
+        rm -f "${SMOKE_HISTORY_FILE}.tmp"
+        log "WARNING: failed to update smoke uptime ledger"
+        return 0
+    fi
+
+    # Keep the published uptime in sync even on paths that exit before
+    # publish_dashboard_files() runs (e.g. deployment setup failure).
+    local results_file="${RESULTS_DIR}/results.json"
+    [[ -f "${results_file}" ]] || return 0
+    if jq --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
+          '.uptime = ($smoke[0].uptime // null)' \
+          "${results_file}" > "${results_file}.tmp"; then
+        mv "${results_file}.tmp" "${results_file}"
+    else
+        rm -f "${results_file}.tmp"
+        log "WARNING: failed to refresh uptime in results.json"
+    fi
+}
+
+# --------------------------------------------------------------------------
 # 4. Publish static JSON files for the dashboard
 # --------------------------------------------------------------------------
 ensure_cleanup_metrics_file() {
@@ -346,11 +401,14 @@ publish_dashboard_files() {
     # Write into the persistent results volume so files survive container restarts.
     # /dashboard/results.json and /dashboard/history.json are symlinks pointing here.
 
-    # results.json: combined summary + cleanup for the current-run card view
+    [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
+
+    # results.json: combined summary + cleanup + smoke uptime for the current-run card view
     jq -n \
         --slurpfile summary "${SUMMARY_FILE}" \
         --slurpfile cleanup "${cleanup_file}" \
-        '{summary: $summary[0], cleanup: $cleanup[0]}' \
+        --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
+        '{summary: $summary[0], cleanup: $cleanup[0], uptime: ($smoke[0].uptime // null)}' \
         > "${RESULTS_DIR}/results.json.tmp" && mv "${RESULTS_DIR}/results.json.tmp" "${RESULTS_DIR}/results.json"
 
     # history.json: all retained per-run summary files for the timeline
@@ -532,6 +590,8 @@ main() {
             '{timestamp: $ts, error: $err, error_detail: $detail, services: {}}' \
             > "${RUN_DIR}/summary.json.tmp" && mv "${RUN_DIR}/summary.json.tmp" "${RUN_DIR}/summary.json"
         cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
+        # Count the aborted run against smoke-test uptime.
+        record_smoke_result
         exit 1
     }
 
@@ -554,6 +614,9 @@ EOF
 
     # Build summary
     build_summary
+
+    # Record the run outcome in the rolling uptime ledger
+    record_smoke_result
 
     # Auto-clear incident-type announcements when the run is unambiguously
     # all-green. The deployment_setup_failed path above (lines 508-515)

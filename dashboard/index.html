@@ -9,7 +9,7 @@
         content="Read-only dashboard for OpenStack Rally test results with 7-day historical timeline">
     <link id="favicon" rel="icon" type="image/svg+xml" href="themes/default/favicon.svg?v=20260504a">
     <link rel="stylesheet" href="themes/default/tokens.css?v=20260504a">
-    <link rel="stylesheet" href="style.css?v=20260504a">
+    <link rel="stylesheet" href="style.css?v=20260603a">
     <link rel="stylesheet" href="themes/custom/tokens.css?v=20260504a" onerror="this.remove()">
     <link rel="stylesheet" href="themes/custom/overrides.css?v=20260504a" onerror="this.remove()">
     <script src="vendor/chart.umd.min.js"></script>
@@ -51,7 +51,10 @@
     <section class="timeline-section">
         <div class="section-header">
             <h2>7-Day Status Timeline</h2>
-            <span class="section-badge" id="timelineCount">0 runs</span>
+            <div class="section-badges">
+                <span class="section-badge" id="smokeUptimeBadge" style="display:none;"></span>
+                <span class="section-badge" id="timelineCount">0 runs</span>
+            </div>
         </div>
         <div class="timeline-container" id="timeline">
             <div class="timeline-loading">Loading history...</div>
@@ -69,7 +72,10 @@
     <section class="timeline-section">
         <div class="section-header">
             <h2>API Health Checks</h2>
-            <span class="section-badge" id="healthTimelineCount">0 checks</span>
+            <div class="section-badges">
+                <span class="section-badge" id="apiUptimeBadge" style="display:none;"></span>
+                <span class="section-badge" id="healthTimelineCount">0 checks</span>
+            </div>
         </div>
         <div class="timeline-container htl-container" id="healthTimeline">
             <div class="timeline-loading">Loading health data...</div>
@@ -155,7 +161,7 @@
         <p>Rally OpenStack Monitor &middot; Auto-refresh every 5m &middot; Read-only dashboard</p>
     </footer>
 
-    <script src="app.js?v=20260504a"></script>
+    <script src="app.js?v=20260603a"></script>
 </body>
 
 </html>

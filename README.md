@@ -10,6 +10,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Orphan Detection & Cleanup** — Detects resources left behind by failed Rally cleanups (both `s_rally_*` and `c_rally_*` prefixes) and provides a manual purge tool
 - **RadosGW Orphan Management** — Optional: detects orphaned Ceph RGW implicit-tenant users and automatically purges rally-owned ones after each test run (requires RGW admin API credentials)
 - **7-Day History** — Results retained with automatic pruning
+- **Uptime Percentages** — API health and smoke-test uptime over a configurable window (default 30 days), shown as dashboard badges
 - **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
 
 ## Dashboard Customization
@@ -153,6 +154,7 @@ All settings are controlled via environment variables in `.env`.
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full Rally test runs |
 | `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight API health checks |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning |
+| `UPTIME_WINDOW_DAYS` | `30` | Window in days for the dashboard uptime percentages |
 | `RALLY_NOVA_FLAVOR` | `m1.tiny` | Flavor name for Nova scenarios |
 | `RALLY_NOVA_IMAGE` | `cirros-0.6.2-x86_64-disk` | Image name for Nova scenarios |
 | `RALLY_NEUTRON_NETWORK_CIDR` | `10.99.0.0/24` | CIDR for Neutron test networks |

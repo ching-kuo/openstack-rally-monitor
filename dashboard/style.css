@@ -224,6 +224,14 @@ section {
     border-color: rgba(239, 68, 68, 0.3);
 }
 
+/* Groups multiple badges on the right side of a section header; without this
+   wrapper the header's space-between would spread them apart. */
+.section-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
 /* --- 7-Day Timeline --- */
 .timeline-container {
     display: flex;
