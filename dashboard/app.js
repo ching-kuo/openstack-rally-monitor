@@ -176,16 +176,27 @@ function formatTimestamp(ts) {
 }
 
 // Build a neutral, data-driven span label from a list of records carrying a
-// `.timestamp`. Returns "" when fewer than one parseable timestamp exists so
-// the (empty) subhead stays hidden via CSS `:empty`. The dashboard cannot know
-// RALLY_RESULTS_RETENTION_DAYS, so this reports the actually-covered window
-// rather than hardcoding "7-Day".
+// `.timestamp`. Returns "" when fewer than two parseable timestamps exist (a
+// single data point has no span to describe — "Last hour" for one run would
+// be misleading) so the empty subhead stays hidden via CSS `:empty`. The
+// dashboard cannot know RALLY_RESULTS_RETENTION_DAYS, so this reports the
+// actually-covered window rather than hardcoding "7-Day".
 function formatCoveredSpan(records) {
-  const times = (records || [])
-    .map((r) => parseTimestampMs(r && r.timestamp))
-    .filter((ms) => Number.isFinite(ms));
-  if (times.length === 0) return "";
-  const span = Math.max(...times) - Math.min(...times);
+  // Single pass min/max instead of Math.max(...times): the health history can
+  // hold thousands of entries and argument-spreading that many values risks a
+  // RangeError on large UPTIME_WINDOW_DAYS configurations.
+  let earliest = Infinity;
+  let latest = -Infinity;
+  let count = 0;
+  for (const r of records || []) {
+    const ms = parseTimestampMs(r && r.timestamp);
+    if (!Number.isFinite(ms)) continue;
+    count += 1;
+    if (ms < earliest) earliest = ms;
+    if (ms > latest) latest = ms;
+  }
+  if (count < 2) return "";
+  const span = latest - earliest;
   const days = Math.round(span / 86_400_000);
   if (days >= 1) return `Last ${days} day${days === 1 ? "" : "s"}`;
   const hours = Math.round(span / 3_600_000);
@@ -464,15 +475,13 @@ function renderRunState(state) {
   const chip = document.getElementById("runStateChip");
   if (!chip) return;
 
+  // Parse once via the shared helper (it accepts both ISO 8601 and the compact
+  // rally form, so a future started_at format change cannot break this).
+  // Unparseable started_at fails safe by NOT showing a forever-chip.
+  const startedMs =
+    state && state.state === "running" ? parseTimestampMs(state.started_at) : NaN;
   const isRunning =
-    state &&
-    state.state === "running" &&
-    (() => {
-      const startedMs = Date.parse(state.started_at);
-      // Unparseable started_at: fail safe by NOT showing a forever-chip.
-      if (!Number.isFinite(startedMs)) return false;
-      return Date.now() - startedMs < RUN_STATE_STALE_MS;
-    })();
+    Number.isFinite(startedMs) && Date.now() - startedMs < RUN_STATE_STALE_MS;
 
   if (!isRunning) {
     chip.style.display = "none";
@@ -484,14 +493,11 @@ function renderRunState(state) {
   const dot = document.createElement("span");
   dot.className = "run-state-dot";
   const text = document.createElement("span");
-  // formatTimestamp returns a locale datetime; show just the clock time.
-  const startedMs = Date.parse(state.started_at);
-  const startedLabel = Number.isFinite(startedMs)
-    ? new Date(startedMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-    : "";
-  text.textContent = startedLabel
-    ? `Test run in progress · started ${startedLabel}`
-    : "Test run in progress";
+  const startedLabel = new Date(startedMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  text.textContent = `Test run in progress · started ${startedLabel}`;
   chip.appendChild(dot);
   chip.appendChild(text);
   chip.style.display = "";

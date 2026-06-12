@@ -80,10 +80,11 @@ unset _RALLY_UID _RESULTS_UID
 # parse_rally_services in run_tests.sh and api_health_check.py; keep the three in
 # sync. An unset/empty value (or one that normalizes to nothing) falls back to
 # the same default. Seed-only-if-missing semantics are preserved.
+DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
     jq -n \
-        --arg raw "${RALLY_SERVICES:-keystone,nova,neutron,glance,cinder,swift}" \
-        --arg default "keystone,nova,neutron,glance,cinder,swift" \
+        --arg raw "${RALLY_SERVICES:-${DEFAULT_RALLY_SERVICES}}" \
+        --arg default "${DEFAULT_RALLY_SERVICES}" \
         '
         def normalize($s):
             ($s | split(",") | map(ascii_downcase | gsub("\\s"; "")) | map(select(. != ""))

@@ -121,9 +121,11 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
         super().end_headers()
 
     def do_GET(self):
-        # Reset to strict on every request: handler instances are reused across
-        # keep-alive requests on one connection, so a prior report response must
-        # not leak its relaxed CSP onto a subsequent dashboard asset.
+        # Reset to strict on every request. (With the default HTTP/1.0 protocol
+        # each request gets a fresh handler instance, so this is defensive: it
+        # keeps the policy selection request-local even if the server is ever
+        # switched to keep-alive/HTTP1.1, where a prior report response could
+        # otherwise leak its relaxed CSP onto a subsequent dashboard asset.)
         self._security_headers = SECURITY_HEADERS
         path = self.path.split("?", 1)[0].split("#", 1)[0]
         path = unquote(path)
@@ -202,6 +204,12 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_error(self, code):
+        # Error responses always carry the strict header set, even when the
+        # failure happens after the runs/ branch selected the relaxed report
+        # CSP (e.g. a read error on a report file). Errors are text/plain and
+        # nosniff'd so the CSP is moot in practice, but never advertise the
+        # relaxed policy on anything except an actually-served report.
+        self._security_headers = SECURITY_HEADERS
         reason = self.responses.get(code, ("Error",))[0]
         body = f"{code} {reason}\n".encode("utf-8")
         self.send_response(code)

@@ -28,19 +28,32 @@ flock -n 200 || { log "Another health check is already in progress, exiting."; e
 # stdout and exits 0 even when services are down (producing the report IS the
 # success); a nonzero exit means an internal error (e.g. openstacksdk missing),
 # in which case we must still publish an all-down document so monitoring never
-# silently stops.
-if python3 "${SCRIPT_DIR}/api_health_check.py" > "${HEALTH_FILE}.tmp" 2>>/dev/null; then
+# silently stops. The output is validated with `jq empty` before publishing so
+# stdout pollution (a stray banner from a dependency) can never replace
+# health.json with an unparseable document — consumers (the history filter,
+# the exporter, the dashboard) all assume valid JSON.
+if python3 "${SCRIPT_DIR}/api_health_check.py" > "${HEALTH_FILE}.tmp" 2>>/dev/null \
+        && jq empty "${HEALTH_FILE}.tmp" 2>/dev/null; then
     mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
 else
-    log "ERROR: api_health_check.py failed; writing all-down health document."
+    log "ERROR: api_health_check.py failed or emitted invalid JSON; writing all-down health document."
     rm -f "${HEALTH_FILE}.tmp"
-    jq -n --arg ts "${TIMESTAMP}" '
+    # The all-down set honors RALLY_SERVICES like the checker itself (keystone
+    # always present, mirroring api_health_check.py::parse_rally_services), so
+    # a trimmed deployment never gains phantom down services that would depress
+    # API uptime and create stale Prometheus label series. Normalization here
+    # is the simple subset that matters for this error path (split, strip
+    # whitespace, lowercase, drop empties); object construction dedupes keys.
+    jq -n --arg ts "${TIMESTAMP}" \
+          --arg raw "${RALLY_SERVICES:-}" \
+          --arg default "keystone,nova,neutron,glance,cinder,swift" '
         ($ts) as $t
+        | (if ($raw | gsub("[\\s,]"; "") | length) > 0 then $raw else $default end) as $list
         | {
             timestamp: $t,
             overall: "down",
             services: (
-                ["keystone", "nova", "neutron", "glance", "cinder", "swift"]
+                ["keystone"] + ($list | split(",") | map(gsub("\\s"; "") | ascii_downcase) | map(select(length > 0)))
                 | map({(.): {status: "down", latency_ms: 0, checked_at: $t}})
                 | add
             )
