@@ -343,3 +343,54 @@ def test_unreadable_summary_records_failed_run(tmp_path):
     # read_ledger parsing the file also proves it is still valid JSON
     ledger = read_ledger(tmp_path)
     assert ledger["runs"][0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Health fallback filter (the exact jq program health_check.sh runs via -f
+# when api_health_check.py fails -- the all-down document)
+# ---------------------------------------------------------------------------
+
+FALLBACK_FILTER = Path(__file__).resolve().parent / "health_fallback_filter.jq"
+DEFAULT_SERVICES = "keystone,nova,neutron,glance,cinder,swift"
+
+
+def run_fallback_filter(raw, ts="2026-06-12T00:00:00Z"):
+    """Apply health_fallback_filter.jq the same way health_check.sh does."""
+    result = subprocess.run(
+        [
+            "jq", "-n",
+            "-f", str(FALLBACK_FILTER),
+            "--arg", "ts", ts,
+            "--arg", "raw", raw,
+            "--arg", "default", DEFAULT_SERVICES,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_fallback_empty_raw_uses_default_set():
+    doc = run_fallback_filter("")
+    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
+    assert doc["overall"] == "down"
+    assert all(v["status"] == "down" and v["latency_ms"] == 0 for v in doc["services"].values())
+
+
+def test_fallback_all_invalid_raw_falls_back_to_default_set():
+    # Regression: the allowlist must filter BEFORE the raw-vs-default choice;
+    # an all-invalid RALLY_SERVICES previously produced a keystone-only doc.
+    doc = run_fallback_filter("../etc, b/c, ;rm")
+    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
+
+
+def test_fallback_mixed_raw_keeps_only_allowlisted_tokens():
+    doc = run_fallback_filter(" Nova , ../x, SWIFT , nova ")
+    assert list(doc["services"]) == ["keystone", "nova", "swift"]
+
+
+def test_fallback_keystone_always_present_and_first():
+    doc = run_fallback_filter("glance")
+    assert list(doc["services"]) == ["keystone", "glance"]

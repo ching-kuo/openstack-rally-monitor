@@ -39,29 +39,16 @@ else
     log "ERROR: api_health_check.py failed or emitted invalid JSON; writing all-down health document."
     rm -f "${HEALTH_FILE}.tmp"
     # The all-down set honors RALLY_SERVICES like the checker itself (keystone
-    # always present, mirroring api_health_check.py::parse_rally_services and
-    # run_tests.sh::parse_rally_services -- keep the three in sync), so a
-    # trimmed deployment never gains phantom down services that would depress
-    # API uptime and create stale Prometheus label series. Normalization here
-    # is the subset that matters for this error path (split, strip whitespace,
-    # lowercase, drop empties, then drop any token failing the ^[a-z0-9_-]+$
-    # allowlist -- path-traversal hardening, same as the other two parsers);
-    # object construction dedupes keys.
-    jq -n --arg ts "${TIMESTAMP}" \
+    # always present), so a trimmed deployment never gains phantom down
+    # services that would depress API uptime and create stale Prometheus label
+    # series. The shipped filter file is used (rather than an inline program)
+    # so tests exercise exactly this code path; normalization rules and the
+    # keep-in-sync contract are documented in health_fallback_filter.jq.
+    jq -n -f "${SCRIPT_DIR}/health_fallback_filter.jq" \
+          --arg ts "${TIMESTAMP}" \
           --arg raw "${RALLY_SERVICES:-}" \
-          --arg default "keystone,nova,neutron,glance,cinder,swift" '
-        ($ts) as $t
-        | (if ($raw | gsub("[\\s,]"; "") | length) > 0 then $raw else $default end) as $list
-        | {
-            timestamp: $t,
-            overall: "down",
-            services: (
-                ["keystone"] + ($list | split(",") | map(gsub("\\s"; "") | ascii_downcase)
-                    | map(select(length > 0 and test("^[a-z0-9_-]+$"))))
-                | map({(.): {status: "down", latency_ms: 0, checked_at: $t}})
-                | add
-            )
-        }' > "${HEALTH_FILE}.tmp" && mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
+          --arg default "keystone,nova,neutron,glance,cinder,swift" \
+        > "${HEALTH_FILE}.tmp" && mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
 fi
 
 # Log per-service status from the produced JSON so the log stays as informative
