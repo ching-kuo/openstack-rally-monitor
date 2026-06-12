@@ -252,3 +252,29 @@ groups:
             checks). This is the fastest available outage signal — investigate
             the service endpoint before waiting on the next Rally run.
           runbook: "docker exec rally-monitor tail -f /rally/logs/health-check.log"
+
+      # -----------------------------------------------------------------------
+      # API SIGNAL LOST - Warning: overall reachability is 0
+      # rally_api_overall_up fails closed: it is 0 on a real outage AND when the
+      # health pipeline is broken/stale (corrupt or missing health.json), in
+      # which case the per-service rally_api_up series are absent and cannot
+      # fire RallyApiDown. This catch-all covers both a sustained overall
+      # outage and a silently-broken health pipeline. Per-service RallyApiDown
+      # stays the page-worthy critical; this stays a warning.
+      # -----------------------------------------------------------------------
+      - alert: RallyApiSignalLost
+        expr: rally_api_overall_up == 0
+        for: 60m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "OpenStack API overall reachability is down or signal lost"
+          description: |
+            rally_api_overall_up has been 0 for over 60 minutes. This means
+            either a sustained overall API outage OR a broken/stale health
+            pipeline (corrupt or missing health.json), in which case the
+            per-service rally_api_up series are absent and RallyApiDown cannot
+            fire. Check the health-check log and that health.json is being
+            written.
+          runbook: "docker exec rally-monitor tail -f /rally/logs/health-check.log"

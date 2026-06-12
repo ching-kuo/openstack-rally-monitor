@@ -174,16 +174,18 @@ rally_api_latency_milliseconds = Gauge(
 rally_api_overall_up = Gauge(
     "rally_api_overall_up",
     (
-        "Whether the overall API health check reported reachable (1) or down "
-        '(0). "up" and "degraded" both map to 1 (degraded means every service '
-        "answered, just slowly — see rally_api_latency_milliseconds). "
-        'When overall is "unknown" or missing — e.g. the seed health.json on '
-        "a fresh volume before the first health check — this gauge is not "
-        "updated (no sentinel value is written). Because it is an unlabeled "
-        "gauge, prometheus_client still emits its current value (0.0 before "
-        "the first real signal), so 'unknown' reads the same as 'down' here; "
-        "prefer per-service rally_api_up for granular, label-scoped alerting "
-        "(those series are genuinely absent until a service is first checked)."
+        "Whether the most recent API health data reports overall reachability "
+        '(1) or not (0). "up" and "degraded" both map to 1 (degraded means '
+        "every service answered, just slowly — see "
+        "rally_api_latency_milliseconds). Everything else maps to 0 and the "
+        'gauge FAILS CLOSED: an explicit "down", an "unknown"/missing overall '
+        "(e.g. the seed health.json on a fresh volume, or a corrupt/missing "
+        "file), and any unrecognized value all set 0. Semantics: 1 = healthy "
+        "signal; 0 = down OR no valid signal. This pairs with per-service "
+        "rally_api_up (genuinely absent until a service is first checked, so "
+        "absent series cannot fire `== 0`): when the health pipeline breaks, "
+        "those per-service series vanish and only this gauge can still signal "
+        "the loss. RallyApiSignalLost alerts on this 0 state."
     ),
     registry=registry,
 )
@@ -468,18 +470,21 @@ def _apply_health_metrics(health: dict) -> None:
             if isinstance(latency, (int, float)) and not isinstance(latency, bool):
                 rally_api_latency_milliseconds.labels(service=service).set(latency)
 
-    # Overall: set 1/0 only for an explicit up/down/degraded. "up" and
-    # "degraded" both map to 1 (reachable); "down" maps to 0. For
-    # "unknown"/missing (e.g. the seed file) we write no sentinel — the gauge
-    # keeps its prior value (0.0 before any real signal). See the gauge
-    # docstring: per-service rally_api_up is the genuinely-absent-until-checked
-    # signal for alerting.
+    # Overall: "up" and "degraded" both map to 1 (reachable); everything else
+    # maps to 0 (fail closed). An explicit "down", an "unknown"/missing overall
+    # (e.g. the seed file), or any unrecognized value all set 0. This is
+    # deliberate: per-service rally_api_up labels are cleared above and only
+    # re-set for services present in a valid health.json, so a corrupt or
+    # missing file leaves NO per-service series to fire `== 0` alerts. If this
+    # unlabeled gauge stayed at its prior 1 on bad data, a broken health
+    # pipeline would read as "all healthy". Failing closed means "1 = the most
+    # recent health data reports overall reachability; 0 = down OR no valid
+    # signal" — RallyApiSignalLost in rally_alerts.yml covers the 0 case.
     overall = health.get("overall")
     if overall in ("up", "degraded"):
         rally_api_overall_up.set(1)
-    elif overall == "down":
+    else:
         rally_api_overall_up.set(0)
-    # else: unknown/missing — intentionally do not set (see gauge docstring).
 
 
 # Operator-announcement types. Enum-only: never derive labels from body/id text.

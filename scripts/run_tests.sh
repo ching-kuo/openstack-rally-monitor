@@ -23,9 +23,13 @@ RUN_LOG="${RUN_DIR}/run.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # The monitored service set is configurable via RALLY_SERVICES (comma-separated).
-# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, order
-# preserved); the same parsing rules are mirrored in api_health_check.py's
-# parse_rally_services -- keep the two in sync. A configured service with no
+# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, then
+# drop any token not matching the ^[a-z0-9_-]+$ allowlist, order preserved);
+# the same parsing rules are mirrored in api_health_check.py's
+# parse_rally_services and health_check.sh's all-down jq fallback -- keep the
+# three in sync. The allowlist is path-traversal hardening: service names index
+# rally/scenarios/<name>.yaml and runs/<ts>/<name>.html, so a token like
+# "../etc" must never survive. A configured service with no
 # rally/scenarios/<name>.yaml still logs a SKIP in run_service_tests (the
 # operator's signal for a typo'd name); build_summary then reports it "skipped".
 DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
@@ -33,12 +37,13 @@ DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
 parse_rally_services() {
     # Echo the normalized service list, one per line, preserving operator order.
     # Reads $1 (the raw RALLY_SERVICES string). Falls back to the default when
-    # the input is unset/empty or normalizes to nothing.
+    # the input is unset/empty or normalizes to nothing (including when every
+    # token is dropped by the allowlist).
     local raw="${1:-}"
     [[ -n "${raw}" ]] || raw="${DEFAULT_RALLY_SERVICES}"
     local out
     out=$(printf '%s' "${raw}" | tr ',' '\n' | tr '[:upper:]' '[:lower:]' \
-        | awk '{ gsub(/[[:space:]]/, ""); if ($0 != "" && !seen[$0]++) print }')
+        | awk '{ gsub(/[[:space:]]/, ""); if ($0 ~ /^[a-z0-9_-]+$/ && !seen[$0]++) print }')
     [[ -n "${out}" ]] || out=$(printf '%s' "${DEFAULT_RALLY_SERVICES}" | tr ',' '\n')
     printf '%s\n' "${out}"
 }
@@ -401,8 +406,11 @@ record_smoke_result() {
         return 0
     fi
 
-    # Keep the published uptime in sync even on paths that exit before
-    # publish_dashboard_files() runs (e.g. deployment setup failure).
+    # Keep the published uptime in sync directly. The deployment-failure path
+    # now calls publish_dashboard_files() right after this (so results.json is
+    # rewritten there too), but this standalone sync is retained so a direct
+    # `record_smoke_result` invocation -- and any future early-exit path -- still
+    # refreshes an existing results.json without depending on a later publish.
     local results_file="${RESULTS_DIR}/results.json"
     [[ -f "${results_file}" ]] || return 0
     if jq --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
@@ -692,6 +700,13 @@ main() {
         cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
         # Count the aborted run against smoke-test uptime.
         record_smoke_result
+        # Publish so results.json/history.json reflect the failure instead of
+        # showing the last green run. getRunStatus in the dashboard treats the
+        # empty-services + .error shape as failed (it no longer renders
+        # "All Healthy"), so a full publish here is correct and honest. The
+        # failure summary written to ${RUN_DIR}/summary.json above is picked up
+        # by history.json's find, so the run also shows as a failed timeline cell.
+        publish_dashboard_files
         # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is
         # set and the status actually changed). Never let it affect the run.
         /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
@@ -727,9 +742,9 @@ EOF
     /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
 
     # Auto-clear incident-type announcements when the run is unambiguously
-    # all-green. The deployment_setup_failed path above (lines 508-515)
-    # already exits 1 before reaching here, so the empty-services guard in
-    # ALL_GREEN_PREDICATE inside announce.sh primarily protects direct
+    # all-green. The deployment_setup_failed path in setup_deployment's failure
+    # branch already exits 1 before reaching here, so the empty-services guard
+    # in ALL_GREEN_PREDICATE inside announce.sh primarily protects direct
     # `docker exec` invocations against a stale latest_summary.json — not the
     # normal cron flow. It also stays load-bearing if a future refactor
     # removes the early exit.

@@ -150,8 +150,9 @@ def test_window_days_is_configurable(tmp_path):
 
 
 def test_existing_results_json_uptime_is_refreshed(tmp_path):
-    # A deployment failure exits before publish_dashboard_files(), so
-    # record_smoke_result() itself must sync .uptime into results.json.
+    # record_smoke_result() syncs .uptime directly into an existing
+    # results.json (belt-and-suspenders alongside the publish that the
+    # deployment-failure path now also runs; standalone callers rely on this).
     (tmp_path / "results.json").write_text(
         json.dumps({"summary": {}, "cleanup": {}, "uptime": None})
     )
@@ -168,6 +169,45 @@ def test_missing_results_json_is_not_created(tmp_path):
     record(tmp_path, make_summary({"keystone": "passed"}), timestamp=recent_ts(0))
 
     assert not (tmp_path / "results.json").exists()
+
+
+def publish(tmp_path, summary, timestamp="20260603T000000Z"):
+    """Source run_tests.sh and run publish_dashboard_files against tmp_path.
+
+    Mirrors the deployment-failure path: latest_summary.json holds the failure
+    shape, smoke ledger and cleanup metrics are auto-seeded by the function.
+    """
+    (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
+    return subprocess.run(
+        [
+            BASH,
+            "-c",
+            f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" publish_dashboard_files',
+        ],
+        env={
+            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+            "RESULTS_DIR": str(tmp_path),
+            "UPTIME_WINDOW_DAYS": "30",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_deployment_failure_path_publishes_error_shape(tmp_path):
+    # The deployment-failure path calls publish_dashboard_files after
+    # record_smoke_result, so results.json must carry the failure summary
+    # (empty services + .error) instead of a stale green run. The dashboard's
+    # getRunStatus treats this shape as failed (covered by the node assertion
+    # in test_dashboard_getrunstatus.py).
+    summary = make_summary({}, error="deployment_setup_failed")
+    result = publish(tmp_path, summary, timestamp=recent_ts(0))
+
+    assert result.returncode == 0, result.stderr
+    results = json.loads((tmp_path / "results.json").read_text())
+    assert results["summary"]["error"] == "deployment_setup_failed"
+    assert results["summary"]["services"] == {}
 
 
 # ---------------------------------------------------------------------------

@@ -400,6 +400,44 @@ def test_parse_rally_services_custom_default():
 
 
 # ---------------------------------------------------------------------------
+# Service-name allowlist (path-traversal hardening) -- mirrored in
+# run_tests.sh and health_check.sh; keep the three in sync.
+# ---------------------------------------------------------------------------
+def test_parse_rally_services_drops_path_traversal_token(capsys):
+    # "../health" fails ^[a-z0-9_-]+$ and is dropped (with a stderr warning);
+    # valid neighbours survive. keystone is always hoisted first.
+    assert hc.parse_rally_services("nova,../health,glance") == (
+        "keystone",
+        "nova",
+        "glance",
+    )
+    assert "dropping invalid service name" in capsys.readouterr().err
+
+
+def test_parse_rally_services_drops_shell_metachar_token():
+    # "nova;rm" contains ';' -> dropped entirely (it is one token, not a split).
+    assert hc.parse_rally_services("nova;rm,glance") == ("keystone", "glance")
+
+
+def test_parse_rally_services_internal_space_token_kept_after_strip():
+    # "no va" strips to "nova" before the allowlist check -> kept.
+    assert hc.parse_rally_services("no va") == ("keystone", "nova")
+
+
+def test_parse_rally_services_mixed_valid_and_invalid():
+    assert hc.parse_rally_services("nova,../etc,glance") == (
+        "keystone",
+        "nova",
+        "glance",
+    )
+
+
+def test_parse_rally_services_all_invalid_falls_back_to_default():
+    # Every token dropped -> fall back to default (keystone-prepended six).
+    assert hc.parse_rally_services("../a,b/c,../../d") == hc.DEFAULT_RALLY_SERVICES
+
+
+# ---------------------------------------------------------------------------
 # run_checks honours the configured service subset
 # ---------------------------------------------------------------------------
 def test_run_checks_only_checks_configured_services():

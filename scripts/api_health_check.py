@@ -26,6 +26,7 @@ function so this module stays importable in environments without the SDK.
 """
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -49,13 +50,22 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_SERVICE_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+
+
 def parse_rally_services(raw, default=DEFAULT_RALLY_SERVICES) -> tuple:
     """Parse RALLY_SERVICES into a normalized, ordered tuple of service names.
 
-    Normalization mirrors run_tests.sh's parse_rally_services (keep the two in
-    sync): split on commas, lowercase, strip ALL whitespace, drop empty
-    segments, dedupe preserving first-seen order. An unset/empty value (or one
-    that normalizes to nothing) falls back to ``default``.
+    Normalization mirrors run_tests.sh's parse_rally_services and
+    health_check.sh's all-down jq fallback (keep the three in sync): split on
+    commas, lowercase, strip ALL whitespace, drop empty segments, dedupe
+    preserving first-seen order, then drop any token not matching the
+    ``^[a-z0-9_-]+$`` allowlist. The allowlist is path-traversal hardening --
+    service names index scenario/report filenames downstream, so a token like
+    "../etc" must never survive. Dropped tokens are warned to stderr (matching
+    the unregistered-service warning convention). An unset/empty value (or one
+    that normalizes to nothing, including when every token is dropped by the
+    allowlist) falls back to ``default``.
 
     keystone is ALWAYS included in the effective set and placed first: the
     health check must authenticate regardless (the openstacksdk session), and
@@ -71,9 +81,17 @@ def parse_rally_services(raw, default=DEFAULT_RALLY_SERVICES) -> tuple:
         seen = set()
         for token in str(raw).split(","):
             name = "".join(token.split()).lower()
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
+            if not name or name in seen:
+                continue
+            if not _SERVICE_NAME_RE.match(name):
+                print(
+                    f"api_health_check: dropping invalid service name "
+                    f"'{name}' (allowlist ^[a-z0-9_-]+$)",
+                    file=sys.stderr,
+                )
+                continue
+            seen.add(name)
+            names.append(name)
         if not names:
             names = list(default)
 

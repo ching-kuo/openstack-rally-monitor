@@ -482,6 +482,38 @@ def test_parse_services_preserves_operator_order() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Service-name allowlist (path-traversal hardening) -- mirrored in
+# api_health_check.py and health_check.sh; keep the three in sync.
+# ---------------------------------------------------------------------------
+def test_parse_services_drops_path_traversal_token() -> None:
+    # "../health" contains '/' and '.', neither in ^[a-z0-9_-]+$, so it is
+    # dropped; the valid neighbours survive.
+    assert parse_rally_services("nova,../health,glance") == ["nova", "glance"]
+
+
+def test_parse_services_drops_shell_metachar_token() -> None:
+    # A ';' (command-injection shape) fails the allowlist.
+    assert parse_rally_services("nova;rm,glance") == ["glance"]
+
+
+def test_parse_services_internal_space_token_kept_after_strip() -> None:
+    # "no va" strips to "nova" (valid) -- interior whitespace removal happens
+    # before the allowlist check, so this stays a legitimate service.
+    assert parse_rally_services("no va") == ["nova"]
+
+
+def test_parse_services_mixed_valid_and_invalid() -> None:
+    # Invalid middle token dropped, valid ones kept in order.
+    assert parse_rally_services("nova,../etc,glance") == ["nova", "glance"]
+
+
+def test_parse_services_all_invalid_falls_back_to_default() -> None:
+    # When every token is dropped by the allowlist the result is empty and must
+    # fall back to the six-service default, not yield an empty SERVICES array.
+    assert parse_rally_services("../a,b/c,../../d") == DEFAULT_SERVICES.split(",")
+
+
+# ---------------------------------------------------------------------------
 # Configured subset flows through build_summary
 # ---------------------------------------------------------------------------
 

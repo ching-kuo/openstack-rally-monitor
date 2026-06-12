@@ -245,7 +245,13 @@ function withAlpha(color, alpha) {
 }
 
 function getRunStatus(runData) {
-  const services = runData.services || {};
+  const services = (runData && runData.services) || {};
+  // A run with a top-level error (e.g. deployment_setup_failed) or with no
+  // service data at all is a failed run, not "All Healthy". The empty-services
+  // failure summary {timestamp, services:{}, error:...} would otherwise pass
+  // the `every(...passed)` vacuous-truth check below and render green.
+  if (runData && runData.error) return "failed";
+  if (Object.keys(services).length === 0) return "failed";
   const statuses = Object.values(services).map((s) => s.status);
   if (statuses.some((s) => s === "failed")) return "failed";
   if (statuses.every((s) => s === "passed")) return "passed";
@@ -531,12 +537,18 @@ function renderTimeline(history) {
     const failedSvcs = Object.entries(run.services || {})
       .filter(([, v]) => v.status === "failed")
       .map(([k]) => escapeHtml(k));
-    const tooltipDetail =
-      status === "failed"
-        ? `Failed: ${failedSvcs.join(", ")}`
-        : Object.keys(run.services || {}).length === 0
-          ? "No service data"
-          : "All services passed";
+    let tooltipDetail;
+    if (run.error) {
+      // Deployment-failure shape: surface the error verbatim instead of the
+      // misleading "No service data" (which read as benign).
+      tooltipDetail = `Error: ${escapeHtml(run.error)}`;
+    } else if (status === "failed" && failedSvcs.length > 0) {
+      tooltipDetail = `Failed: ${failedSvcs.join(", ")}`;
+    } else if (status === "failed") {
+      tooltipDetail = "No service data";
+    } else {
+      tooltipDetail = "All services passed";
+    }
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
@@ -938,8 +950,11 @@ function renderCharts(history) {
   );
   if (runs.length < 2) return;
 
-  // Derive service list from the first run that has data
-  const services = Object.keys(runs[0].services || {});
+  // Derive the service list from the union of all runs (matching the
+  // health-latency chart), not just the oldest retained run -- so a service
+  // added via RALLY_SERVICES appears immediately instead of waiting for the
+  // older runs to age out of retention.
+  const services = orderedServiceUnion(runs);
   const labels = runs.map((r) => {
     const t = formatTimestamp(r.timestamp);
     return t.length > 16 ? t.substring(0, 16) : t;

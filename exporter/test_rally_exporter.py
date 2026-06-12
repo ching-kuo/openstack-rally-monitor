@@ -134,10 +134,9 @@ def reset_module_state():
     exporter.rally_rgw_orphaned_buckets.set(0)
     exporter.rally_rgw_unknown_owner_orphans.set(0)
     exporter.rally_rgw_scan_ok.set(1)
-    # rally_api_overall_up is unlabeled: .clear() is unsupported, and the value
-    # cannot be truly un-emitted. Reset to 0.0 so the "unknown/missing overall"
-    # tests assert the real achievable contract (no 1/0 sentinel is written for
-    # unknown; the gauge keeps its prior value, which here is the reset 0.0).
+    # rally_api_overall_up is unlabeled: .clear() is unsupported, so reset to a
+    # known baseline between tests. The gauge now FAILS CLOSED -- unknown/missing
+    # overall sets 0 -- and several tests pre-set it to 1 to prove the flip.
     exporter.rally_api_overall_up.set(0)
     yield
 
@@ -492,26 +491,41 @@ class TestHealthMetrics:
         exporter.update_metrics()
         assert "rally_api_overall_up 1.0" in metrics_output()
 
-    def test_overall_unknown_does_not_write_sentinel(self, results_dir):
-        """A seed/unknown overall must not be set to 1/0 — the gauge is left
-        untouched. (Unlabeled gauges always emit a sample, so true absence is
-        impossible; we instead assert the prior value is preserved, proving
-        _apply_health_metrics skipped it.)"""
+    def test_overall_unknown_fails_closed_to_zero(self, results_dir):
+        """A seed/unknown overall FAILS CLOSED to 0, even after a prior healthy
+        signal. Otherwise a corrupt/missing health.json would leave this gauge
+        stuck at 1 while the per-service rally_api_up series are cleared (absent
+        series cannot fire `== 0` alerts), so a broken pipeline would read as
+        all-healthy."""
         exporter.rally_api_overall_up.set(1)  # simulate a prior "up" signal
         (results_dir / "health.json").write_text(
             json.dumps(make_health(overall="unknown"))
         )
         exporter.update_metrics()
-        # Untouched: still 1.0 from before, never overwritten to 0 on unknown.
-        assert "rally_api_overall_up 1.0" in metrics_output()
+        assert "rally_api_overall_up 0.0" in metrics_output()
 
-    def test_overall_missing_does_not_write_sentinel(self, results_dir):
+    def test_overall_missing_fails_closed_to_zero(self, results_dir):
         exporter.rally_api_overall_up.set(1)
         (results_dir / "health.json").write_text(
             json.dumps({"timestamp": "2024-01-01T12:00:00Z", "services": {}})
         )
         exporter.update_metrics()
+        assert "rally_api_overall_up 0.0" in metrics_output()
+
+    def test_overall_healthy_then_corrupt_flips_to_zero(self, results_dir):
+        """Regression: a healthy scrape (overall up -> 1) followed by a
+        corrupt/missing-overall health.json must flip the gauge to 0, not leave
+        it stuck at 1. This is the exact stale-signal bug the fail-closed change
+        fixes."""
+        (results_dir / "health.json").write_text(json.dumps(make_health(overall="up")))
+        exporter.update_metrics()
         assert "rally_api_overall_up 1.0" in metrics_output()
+        # Now the file loses a valid overall (e.g. truncated/corrupt write).
+        (results_dir / "health.json").write_text(
+            json.dumps({"timestamp": "2024-01-01T12:05:00Z", "services": {}})
+        )
+        exporter.update_metrics()
+        assert "rally_api_overall_up 0.0" in metrics_output()
 
     def test_health_updates_when_summary_invalid(self, results_dir):
         """Health metrics apply even with no/invalid summary (own update cycle)."""
@@ -538,11 +552,13 @@ class TestHealthMetrics:
         assert 'rally_api_up{service="nova"}' not in output
         assert 'rally_api_up{service="keystone"} 1.0' in output
 
-    def test_missing_health_file_does_not_set_overall(self, results_dir):
-        """With no health.json the default (unknown) leaves overall untouched."""
+    def test_missing_health_file_fails_closed_to_zero(self, results_dir):
+        """With no health.json, load_health returns overall 'unknown', which now
+        fails closed to 0 (was the stale-at-1 bug): a missing health pipeline
+        must not read as healthy."""
         exporter.rally_api_overall_up.set(1)
         exporter.update_metrics()
-        assert "rally_api_overall_up 1.0" in metrics_output()
+        assert "rally_api_overall_up 0.0" in metrics_output()
 
 
 # ---------------------------------------------------------------------------
