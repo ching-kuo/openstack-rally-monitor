@@ -1,0 +1,32 @@
+# Dependabot keeps the now-pinned dependencies current as reviewable PRs that
+# run the CI test job (build-push.yml), instead of versions drifting silently
+# on rebuilds. See docker/requirements-rally.txt for why the OpenStack
+# toolchain is pinned in the first place.
+version: 2
+updates:
+  # Exporter runtime + test deps (flask, prometheus-client, gunicorn, pytest).
+  - package-ecosystem: "pip"
+    directory: "/exporter"
+    schedule:
+      interval: "weekly"
+
+  # OpenStack toolchain pins (rally-openstack, rally, python-openstackclient)
+  # in docker/requirements-rally.txt. patch_rally.py patches Rally internals,
+  # so these bumps must land as reviewed PRs, never as a transparent rebuild.
+  - package-ecosystem: "pip"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+
+  # Base image (python:3.13-slim) in docker/Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+
+  # GitHub Actions pinned in .github/workflows/ (checkout, setup-python,
+  # docker/* actions).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

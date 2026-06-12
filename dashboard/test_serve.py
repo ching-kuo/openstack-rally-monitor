@@ -298,6 +298,16 @@ class TestThemeAllowlist:
 # Security headers
 # ---------------------------------------------------------------------------
 
+def _parse_csp(value):
+    """Parse a Content-Security-Policy header into {directive: [tokens]}."""
+    directives = {}
+    for part in value.split(";"):
+        tokens = part.split()
+        if tokens:
+            directives[tokens[0]] = tokens[1:]
+    return directives
+
+
 class TestSecurityHeaders:
     @pytest.mark.parametrize(
         ("header", "expected_value"),
@@ -314,6 +324,24 @@ class TestSecurityHeaders:
         assert header in headers
         if expected_value is not None:
             assert headers[header] == expected_value
+
+    def test_csp_script_src_has_no_unsafe_inline(self, server):
+        """Regression: script-src must not permit inline scripts. index.html
+        ships zero inline <script> blocks and zero inline event handlers, so
+        'unsafe-inline' was dropped from script-src. style-src must KEEP it
+        because app.js writes inline style="" attributes via innerHTML."""
+        base, dashboard_dir, _ = server
+        (dashboard_dir / "index.html").write_text("<html></html>")
+        _, headers, _ = get(base, "/")
+        csp = _parse_csp(headers["content-security-policy"])
+
+        assert csp.get("script-src") == ["'self'"]
+        assert "'unsafe-inline'" not in csp.get("script-src", [])
+        # style-src intentionally retains 'unsafe-inline'.
+        assert "'unsafe-inline'" in csp.get("style-src", [])
+        assert "'self'" in csp.get("style-src", [])
+        # The fallback directive also stays locked to same-origin.
+        assert csp.get("default-src") == ["'self'"]
 
 
 # ---------------------------------------------------------------------------

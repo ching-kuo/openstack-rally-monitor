@@ -204,6 +204,28 @@ section {
     color: var(--color-text-primary);
 }
 
+/* Heading + data-driven covered-span subhead, grouped so the section header's
+   space-between keeps the title block on the left and the badges on the right.
+   The span text (e.g. "Last 6 days · 36 runs") is filled by app.js from the
+   first/last run timestamps because the dashboard does not know
+   RALLY_RESULTS_RETENTION_DAYS and must not hardcode "7-Day". */
+.section-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.section-subhead {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    font-weight: 400;
+}
+
+.section-subhead:empty {
+    display: none;
+}
+
 .section-badge {
     font-size: 0.7rem;
     font-weight: 600;
@@ -280,9 +302,34 @@ section {
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.3);
 }
 
+/* Non-color signal for failure (WCAG 1.4.1), extending the announcement
+   banner's "[TYPE] label so color is not the sole signal" principle to the
+   timeline. A small ✕ centered in the cell; the run timeline's cells are wide
+   enough (min 2px, flex-grown) to carry a glyph. The health-timeline cells
+   (.htl-cell) are physically too narrow (~2px) for a glyph and are
+   deliberately left without one. The glyph never overflows narrow cells. */
+.timeline-cell.failed::after {
+    content: '\2715';
+    /* ✕ MULTIPLICATION X */
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    color: rgba(255, 255, 255, 0.85);
+    pointer-events: none;
+    overflow: hidden;
+}
+
+/* Pending: distinct shade plus dashed outline; reduced opacity makes it
+   further distinguishable from passed/failed without relying on hue alone. */
 .timeline-cell.pending {
     background: rgba(100, 116, 139, 0.3);
     border: 1px dashed rgba(100, 116, 139, 0.4);
+    opacity: 0.7;
 }
 
 /* Selected cell ring (click-to-inspect historical run) */

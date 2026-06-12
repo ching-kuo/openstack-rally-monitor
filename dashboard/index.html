@@ -6,12 +6,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rally OpenStack Monitor</title>
     <meta name="description"
-        content="Read-only dashboard for OpenStack Rally test results with 7-day historical timeline">
+        content="Read-only dashboard for OpenStack Rally test results with a historical run-status timeline">
     <link id="favicon" rel="icon" type="image/svg+xml" href="themes/default/favicon.svg?v=20260504a">
     <link rel="stylesheet" href="themes/default/tokens.css?v=20260504a">
     <link rel="stylesheet" href="style.css?v=20260603a">
-    <link rel="stylesheet" href="themes/custom/tokens.css?v=20260504a" onerror="this.remove()">
-    <link rel="stylesheet" href="themes/custom/overrides.css?v=20260504a" onerror="this.remove()">
+    <!-- Optional custom-theme stylesheets; absent installs 404 and fall through
+         to the defaults above. Dangling <link>s are pruned by app.js
+         (pruneFailedThemeLinks) rather than an inline onerror= handler, so the
+         CSP can drop 'unsafe-inline' from script-src. -->
+    <link rel="stylesheet" class="custom-theme-css" href="themes/custom/tokens.css?v=20260504a">
+    <link rel="stylesheet" class="custom-theme-css" href="themes/custom/overrides.css?v=20260504a">
     <script src="vendor/chart.umd.min.js"></script>
 </head>
 
@@ -46,11 +50,17 @@
         aria-label="Operator announcement" style="display:none;"></div>
 
     <!-- ================================================================== -->
-    <!-- 7-Day Status Timeline -->
+    <!-- Run Status Timeline -->
     <!-- ================================================================== -->
     <section class="timeline-section">
         <div class="section-header">
-            <h2>7-Day Status Timeline</h2>
+            <div class="section-heading">
+                <h2>Run Status Timeline</h2>
+                <!-- Covered span is filled by app.js from the first/last run
+                     timestamps; the dashboard does not know
+                     RALLY_RESULTS_RETENTION_DAYS so it must not hardcode "7-Day". -->
+                <span class="section-subhead" id="timelineSpan"></span>
+            </div>
             <div class="section-badges">
                 <span class="section-badge" id="smokeUptimeBadge" style="display:none;"></span>
                 <span class="section-badge" id="timelineCount">0 runs</span>
@@ -71,7 +81,10 @@
     <!-- ================================================================== -->
     <section class="timeline-section">
         <div class="section-header">
-            <h2>API Health Checks</h2>
+            <div class="section-heading">
+                <h2>API Health Checks</h2>
+                <span class="section-subhead" id="healthTimelineSpan"></span>
+            </div>
             <div class="section-badges">
                 <span class="section-badge" id="apiUptimeBadge" style="display:none;"></span>
                 <span class="section-badge" id="healthTimelineCount">0 checks</span>

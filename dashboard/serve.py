@@ -6,7 +6,7 @@ Usage: python serve.py [port]
 import mimetypes
 import os
 import sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
@@ -38,8 +38,14 @@ SECURITY_HEADERS = [
     ("X-Content-Type-Options", "nosniff"),
     ("X-XSS-Protection", "1; mode=block"),
     (
+        # script-src has no 'unsafe-inline': index.html ships zero inline
+        # <script> blocks and zero inline event-handler attributes (the former
+        # themes/custom <link onerror=...> handlers were moved into app.js). JS
+        # runs only from same-origin files (app.js, vendor/). style-src KEEPS
+        # 'unsafe-inline' because app.js writes inline style="" attributes via
+        # innerHTML; CSP has no per-attribute hashing for those.
         "Content-Security-Policy",
-        "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
         "font-src 'self'; connect-src 'self'",
     ),
@@ -140,6 +146,6 @@ if __name__ == "__main__":
         print("Invalid port", file=sys.stderr)
         sys.exit(1)
 
-    server = HTTPServer(("0.0.0.0", port), SecureStaticHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", port), SecureStaticHandler)
     print(f"Serving {SERVE_ROOT} on port {port}", flush=True)
     server.serve_forever()

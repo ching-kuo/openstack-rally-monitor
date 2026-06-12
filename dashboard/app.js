@@ -2,7 +2,7 @@
  * Rally OpenStack Monitor - Dashboard Logic
  * ===========================================
  * Fetches results from the exporter API, renders service cards,
- * 7-day status timeline, trend charts, and cleanup status.
+ * run-status timeline, trend charts, and cleanup status.
  * Auto-refreshes every 5 minutes.
  */
 
@@ -28,6 +28,36 @@ const SERVICE_DESCRIPTIONS = {
   cinder: "Block Storage",
   swift: "Object Storage",
 };
+
+// Visual ordering for the standard six services; any service not listed here
+// (e.g. a cloud running Octavia) is appended in first-seen order. Used to keep
+// chart series/colors stable across refreshes while staying data-driven.
+const PREFERRED_SERVICE_ORDER = [
+  "keystone",
+  "nova",
+  "neutron",
+  "glance",
+  "cinder",
+  "swift",
+];
+
+// Build a stable, ordered union of service names appearing across `items`
+// (each item exposes a `.services` object). The preferred six come first in
+// their canonical order; unknown services follow in the order first observed.
+// This keeps colors consistent run-to-run instead of hardcoding the six names.
+function orderedServiceUnion(items) {
+  const seen = new Set();
+  for (const item of items) {
+    for (const name of Object.keys((item && item.services) || {})) {
+      seen.add(name);
+    }
+  }
+  const ordered = PREFERRED_SERVICE_ORDER.filter((name) => seen.has(name));
+  for (const name of seen) {
+    if (!ordered.includes(name)) ordered.push(name);
+  }
+  return ordered;
+}
 
 let durationChart = null;
 let healthLatencyChart = null;
@@ -111,19 +141,48 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function formatTimestamp(ts) {
-  if (!ts || ts === "waiting_for_first_run" || ts === "none")
-    return "Waiting for first run...";
-  // Compact format: 20260220T143021Z
+// Parse a run/check timestamp into epoch milliseconds, accepting both the
+// compact rally form (20260220T143021Z) and ISO 8601. Returns NaN for the
+// placeholder/unparseable values so callers can skip them.
+function parseTimestampMs(ts) {
+  if (!ts || ts === "waiting_for_first_run" || ts === "none") return NaN;
   const compact = ts.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
   if (compact) {
     const [, y, mo, d, h, mi, s] = compact;
-    return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)).toLocaleString();
+    return Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
   }
-  // ISO format: 2026-02-24T10:00:00Z
-  const isoDate = new Date(ts);
-  if (!isNaN(isoDate)) return isoDate.toLocaleString();
+  return Date.parse(ts);
+}
+
+function formatTimestamp(ts) {
+  if (!ts || ts === "waiting_for_first_run" || ts === "none")
+    return "Waiting for first run...";
+  const ms = parseTimestampMs(ts);
+  if (Number.isFinite(ms)) return new Date(ms).toLocaleString();
   return ts;
+}
+
+// Build a neutral, data-driven span label from a list of records carrying a
+// `.timestamp`. Returns "" when fewer than one parseable timestamp exists so
+// the (empty) subhead stays hidden via CSS `:empty`. The dashboard cannot know
+// RALLY_RESULTS_RETENTION_DAYS, so this reports the actually-covered window
+// rather than hardcoding "7-Day".
+function formatCoveredSpan(records) {
+  const times = (records || [])
+    .map((r) => parseTimestampMs(r && r.timestamp))
+    .filter((ms) => Number.isFinite(ms));
+  if (times.length === 0) return "";
+  const span = Math.max(...times) - Math.min(...times);
+  const days = Math.round(span / 86_400_000);
+  if (days >= 1) return `Last ${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.round(span / 3_600_000);
+  if (hours >= 1) return `Last ${hours} hour${hours === 1 ? "" : "s"}`;
+  return "Last hour";
+}
+
+function setSpanLabel(id, records) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = formatCoveredSpan(records);
 }
 
 function formatDuration(seconds) {
@@ -182,6 +241,14 @@ const TYPE_LABELS = {
 // Active = currently displayable. effective_from in the future or expires_at
 // in the past hides the record on the client even if the CLI has not yet
 // pruned it. Incidents have neither bound and stay active until cleared.
+// KEEP IN SYNC with rally_exporter.py::_is_announcement_active — both encode
+// the same active-ness semantics (the repo uses this convention for
+// ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
+//   - unknown type                      -> not active
+//   - effective_from parseable & future -> not active
+//   - expires_at parseable & <= now     -> not active
+//   - records missing both bounds       -> active until cleared
+// Unparseable bounds are ignored (Number.isFinite guard), matching Python.
 function isAnnouncementActive(rec, nowMs) {
   if (!TYPE_LABELS[rec.type]) return false;
   if (rec.effective_from) {
@@ -357,7 +424,7 @@ function updateHeader(summary, health) {
 }
 
 // ---------------------------------------------------------------------------
-// 7-Day Timeline
+// Run Status Timeline
 // ---------------------------------------------------------------------------
 function renderTimeline(history) {
   const container = document.getElementById("timeline");
@@ -365,6 +432,7 @@ function renderTimeline(history) {
 
   const runs = history.runs || [];
   countBadge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
+  setSpanLabel("timelineSpan", runs);
 
   if (runs.length === 0) {
     container.innerHTML =
@@ -472,9 +540,32 @@ function renderUptimeBadge(id, uptime) {
   if (!badge) return;
   if (!uptime || typeof uptime.percent !== "number") {
     badge.style.display = "none";
+    badge.removeAttribute("title");
     return;
   }
   badge.textContent = `${uptime.percent}% uptime / ${uptime.window_days}d`;
+
+  // Hover tooltip with the underlying counts. The two uptime objects use
+  // different field names — smoke uptime: runs_passed/runs_total; API uptime:
+  // checks_up/checks_total — so detect whichever pair is present.
+  let up;
+  let total;
+  let noun;
+  if (typeof uptime.runs_total === "number") {
+    up = uptime.runs_passed;
+    total = uptime.runs_total;
+    noun = "runs";
+  } else if (typeof uptime.checks_total === "number") {
+    up = uptime.checks_up;
+    total = uptime.checks_total;
+    noun = "checks";
+  }
+  if (typeof total === "number") {
+    badge.title =
+      `${up} of ${total} ${noun} healthy over the last ${uptime.window_days} days`;
+  } else {
+    badge.removeAttribute("title");
+  }
   badge.style.display = "";
 }
 
@@ -487,6 +578,7 @@ function renderHealthTimeline(healthHistory) {
 
   const allChecks = (healthHistory && healthHistory.checks) || [];
   let checks = allChecks;
+  setSpanLabel("healthTimelineSpan", allChecks);
 
   // Trim checks to the number that can physically fit in the container.
   // Each cell is at least 2px wide with a 2px gap between cells.
@@ -695,6 +787,26 @@ async function resolveThemeAssets() {
   );
 }
 
+// Remove the optional custom-theme <link> tags when their files are absent.
+// Replaces the former inline onerror="this.remove()" handlers, which had to
+// go so the CSP could drop 'unsafe-inline' from script-src. A dangling link
+// is already inert (the 404 is text/plain and nosniff blocks it as CSS), so
+// this is cleanup, not correctness — probed with the same fetch pattern as
+// resolveThemeAssets because the link error event may fire before app.js runs.
+async function pruneFailedThemeLinks() {
+  const links = document.querySelectorAll("link.custom-theme-css");
+  await Promise.all(
+    Array.from(links).map(async (link) => {
+      try {
+        const response = await fetch(link.getAttribute("href"), { cache: "no-store" });
+        if (!response.ok) link.remove();
+      } catch (err) {
+        link.remove();
+      }
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
@@ -782,7 +894,11 @@ function renderHealthChart(healthHistory) {
     .slice(-HEALTH_CHART_MAX_POINTS);
   if (checks.length < 2) return;
 
-  const services = ["keystone", "nova", "neutron", "glance", "cinder", "swift"];
+  // Derive the plotted service list from the data (ordered union across the
+  // plotted checks) instead of hardcoding the six standard services, so clouds
+  // with a different service set chart correctly. Ordering is stable across
+  // refreshes via PREFERRED_SERVICE_ORDER.
+  const services = orderedServiceUnion(checks);
   const labels = checks.map((c) => {
     const t = formatTimestamp(c.timestamp);
     return t.length > 16 ? t.substring(0, 16) : t;
@@ -946,7 +1062,7 @@ async function refresh() {
 
 // Initial load
 async function startDashboard() {
-  await Promise.all([resolveThemeAssets(), refresh()]);
+  await Promise.all([resolveThemeAssets(), pruneFailedThemeLinks(), refresh()]);
   setInterval(refresh, REFRESH_INTERVAL);
 }
 
