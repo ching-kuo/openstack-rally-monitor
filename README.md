@@ -152,7 +152,7 @@ All settings are controlled via environment variables in `.env`.
 | `OS_USER_DOMAIN_NAME` | `Default` | User domain |
 | `OS_PROJECT_DOMAIN_NAME` | `Default` | Project domain |
 | `OS_REGION_NAME` | `RegionOne` | Region |
-| `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Comma-separated set of services to monitor. Trim to match your cloud (e.g. drop `swift` on a deployment without object storage). Parsed defensively (trimmed, lowercased, deduped, order-preserving); unknown names are skipped with a log line. `keystone` is always health-checked (the session authenticates against it) |
+| `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Comma-separated set of services to monitor. Trim to match your cloud (e.g. drop `swift` on a deployment without object storage). Parsed defensively (trimmed, lowercased, deduped, order-preserving); names must match `^[a-z0-9_-]+$` (lowercase letters, digits, `_`, `-`) — any token failing the allowlist is dropped, and if every token is dropped the default set is used. Unknown but valid names are skipped with a log line. `keystone` is always health-checked (the session authenticates against it) |
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full Rally test runs |
 | `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight API health checks |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency in ms above which a reachable service is reported `degraded`. Degraded counts as up for uptime/`rally_api_up`; the slowness shows in `rally_api_latency_milliseconds` |
@@ -193,7 +193,7 @@ All metrics are exposed on `:9101/metrics`. Alongside the existing `rally_task_*
 |--------|--------|---------|
 | `rally_api_up` | `service` | API health check reachable (1) or down (0). `degraded` (slow but reachable) counts as **up** — this gauge measures reachability, not speed |
 | `rally_api_latency_milliseconds` | `service` | Latency of the last health check. This is where a `degraded` service is visible — alert here for latency-based warnings |
-| `rally_api_overall_up` | — | Overall API health: `up`/`degraded` → 1, `down` → 0 (`unknown`/missing leaves the gauge unchanged) |
+| `rally_api_overall_up` | — | Overall API health, **fail-closed**: `up`/`degraded` → 1; everything else → 0 — `down`, `unknown`/missing overall (e.g. the seed `health.json` on a fresh volume, or a corrupt/missing file), and any unrecognized value. Semantics: `1` = the most recent health data reports overall reachability; `0` = down OR no valid signal. When the health pipeline breaks, the per-service `rally_api_up` series vanish (so they cannot fire `== 0`) and only this gauge can still signal the loss — see `RallyApiSignalLost` |
 | `rally_announcement_active` | `type` | Count of currently-active announcements per type; all three labels (`incident`, `maintenance`, `scheduled`) are always emitted (0 when none) |
 | `rally_maintenance_mode` | — | 1 when any `maintenance`-type announcement is active, else 0 (drives the optional alert inhibition below) |
 
@@ -215,10 +215,11 @@ Defined in `prometheus/rally_alerts.yml`.
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
 | `RallyApiDown` | critical | A service's lightweight API health check has reported down for >20 min |
+| `RallyApiSignalLost` | warning | `rally_api_overall_up == 0` for >60 min — a sustained overall outage OR a broken/stale health pipeline (corrupt or missing `health.json`, whose absent per-service series cannot fire `RallyApiDown`) |
 | `RallyStaleResults` | warning | No new results in >2 hours |
 | `RallyOverallFailure` | critical | One or more services failing |
 
-`RallyApiDown` fires on `rally_api_up == 0` with `for: 20m` (two consecutive 15-minute health checks), making it the fastest available outage signal — far ahead of the ~4-hour Rally cadence. A `degraded` (slow-but-reachable) service keeps `rally_api_up == 1`, so alert on `rally_api_latency_milliseconds` if you want a latency-based warning.
+`RallyApiDown` fires on `rally_api_up == 0` with `for: 20m` (two consecutive 15-minute health checks), making it the fastest available outage signal — far ahead of the ~4-hour Rally cadence. A `degraded` (slow-but-reachable) service keeps `rally_api_up == 1`, so alert on `rally_api_latency_milliseconds` if you want a latency-based warning. `RallyApiSignalLost` (warning, `for: 60m`) is the fail-closed companion: `rally_api_overall_up` is `0` on a real overall outage AND when the health pipeline itself breaks (corrupt or missing `health.json`). In the broken-pipeline case the per-service `rally_api_up` series are absent and cannot fire `RallyApiDown`, so this catch-all is the only signal that survives a blind exporter — `RallyApiDown` stays the page-worthy critical, `RallyApiSignalLost` stays a warning.
 
 ### Maintenance inhibition (opt-in)
 
@@ -366,6 +367,8 @@ docker exec rally-monitor tail -f /rally/logs/health-check.log
 `.github/workflows/build-push.yml` runs in two stages. A `test` job first runs the full pytest suite (`exporter/`, `dashboard/`, `scripts/`) on Python 3.13 — matching the `python:3.13-slim` runtime — and the `build-push` job declares `needs: test`, so a failing suite blocks the image build and publication entirely. Images are pushed to GitHub Container Registry (`ghcr.io/<owner>/<repo>`) on push to `main`, on `v*` tags, and via manual dispatch; pull requests build only (no push).
 
 Dependencies are pinned to exact versions for reproducible images — `docker/requirements-rally.txt` (the OpenStack toolchain: `rally-openstack`, `rally`, `python-openstackclient`), `exporter/requirements.txt`, and `exporter/requirements-test.txt`. `.github/dependabot.yml` opens weekly PRs to bump them (pip for `/exporter` and `/docker`, the docker base image, and GitHub Actions), each of which runs through the test gate above — so version drift is always a reviewed, tested change rather than something that happens silently on a rebuild.
+
+To run the suite locally (`python -m pytest exporter/ dashboard/ scripts/`), **bash >= 4 must be on `PATH`** — the script-suite tests resolve bash via `shutil.which("bash")` and the scripts use `mapfile` (a bash 4 builtin). macOS ships bash 3.2 at `/bin/bash`, so `brew install bash` and ensure it precedes `/bin/bash` on `PATH`.
 
 ## Project Structure
 
