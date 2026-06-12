@@ -110,14 +110,19 @@ class FakeClock:
 FIXED_NOW = "2026-06-12T00:00:00Z"
 
 
-def run(conn, *, step_ms=0, warn_ms=hc.DEFAULT_WARN_MS, now=FIXED_NOW):
-    """Drive run_checks with a deterministic clock and timestamp."""
+def run(conn, *, step_ms=0, warn_ms=hc.DEFAULT_WARN_MS, now=FIXED_NOW, services=None):
+    """Drive run_checks with a deterministic clock and timestamp.
+
+    ``services`` (the effective monitored set) defaults to None so run_checks
+    uses its own full-known-set default; pass a tuple to exercise a configured
+    subset.
+    """
     clock = FakeClock(step_ms)
     # Monkeypatch time.monotonic for the duration of the call.
     orig = hc.time.monotonic
     hc.time.monotonic = clock
     try:
-        return hc.run_checks(conn, now_fn=lambda: now, warn_ms=warn_ms)
+        return hc.run_checks(conn, now_fn=lambda: now, warn_ms=warn_ms, services=services)
     finally:
         hc.time.monotonic = orig
 
@@ -321,3 +326,140 @@ def test_main_honours_health_latency_warn_ms_env(monkeypatch, capsys):
     doc = json.loads(capsys.readouterr().out)
     assert doc["overall"] == "degraded"
     assert all(s["status"] == "degraded" for s in doc["services"].values())
+
+
+def test_main_honours_rally_services_env(monkeypatch, capsys):
+    # RALLY_SERVICES trims the monitored set; main() must parse it and only
+    # check the configured (registered) services, always including keystone.
+    monkeypatch.setenv("RALLY_SERVICES", "nova,cinder")
+    monkeypatch.setattr(hc, "build_connection", lambda: FakeConnection())
+
+    rc = hc.main([])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert set(doc["services"]) == {"keystone", "nova", "cinder"}
+
+
+# ---------------------------------------------------------------------------
+# parse_rally_services
+# ---------------------------------------------------------------------------
+def test_parse_rally_services_default_when_unset():
+    # An unset value (None) falls back to the documented six-service default,
+    # keystone first.
+    assert hc.parse_rally_services(None) == hc.DEFAULT_RALLY_SERVICES
+    assert hc.parse_rally_services(None)[0] == "keystone"
+
+
+def test_parse_rally_services_empty_and_blank_fall_back_to_default():
+    # Empty string, whitespace-only, and comma/whitespace-only all normalize to
+    # nothing -> default. keystone is then still present (always-included).
+    for raw in ("", "   ", ",", " , , ", ",,,"):
+        result = hc.parse_rally_services(raw)
+        # keystone-always means at minimum the keystone-prepended default set.
+        assert result == hc.DEFAULT_RALLY_SERVICES, raw
+
+
+def test_parse_rally_services_trims_lowercases_and_dedupes_preserving_order():
+    # Mixed case, surrounding/interior whitespace, empty segments, and a
+    # duplicate. Order is first-seen; keystone is forced first.
+    raw = "  Nova , KEYSTONE , nova ,, Cinder , GLANCE "
+    result = hc.parse_rally_services(raw)
+    # keystone hoisted to front; remaining preserve first-seen order, deduped.
+    assert result == ("keystone", "nova", "cinder", "glance")
+
+
+def test_parse_rally_services_strips_internal_whitespace():
+    # Whitespace INSIDE a token (not just around it) is stripped, matching the
+    # bash awk gsub(/[[:space:]]/, "") behaviour.
+    assert hc.parse_rally_services("no va, cind er") == ("keystone", "nova", "cinder")
+
+
+def test_parse_rally_services_always_includes_keystone_first():
+    # keystone is included and placed first even when absent from the input...
+    result = hc.parse_rally_services("nova,neutron")
+    assert result[0] == "keystone"
+    assert result == ("keystone", "nova", "neutron")
+    # ...and when listed (anywhere) it is deduped, not duplicated.
+    result = hc.parse_rally_services("nova,keystone,neutron")
+    assert result == ("keystone", "nova", "neutron")
+    assert result.count("keystone") == 1
+    # ...and when listed but not first, it still ends up first.
+    result = hc.parse_rally_services("nova,neutron,keystone")
+    assert result[0] == "keystone"
+
+
+def test_parse_rally_services_keeps_unregistered_names():
+    # Parsing does not know about the checker registry -- it keeps unknown names
+    # (e.g. octavia); run_checks is where unregistered names are dropped. The
+    # operator order is preserved (keystone still hoisted).
+    assert hc.parse_rally_services("octavia,nova") == ("keystone", "octavia", "nova")
+
+
+def test_parse_rally_services_custom_default():
+    assert hc.parse_rally_services(None, default=("keystone", "nova")) == ("keystone", "nova")
+
+
+# ---------------------------------------------------------------------------
+# run_checks honours the configured service subset
+# ---------------------------------------------------------------------------
+def test_run_checks_only_checks_configured_services():
+    # A trimmed set: only keystone + nova are checked; the other dependents are
+    # absent from the output entirely (not reported as some placeholder status).
+    doc = run(FakeConnection(), step_ms=10, services=("keystone", "nova"))
+    assert set(doc["services"]) == {"keystone", "nova"}
+    assert doc["services"]["keystone"]["status"] == "up"
+    assert doc["services"]["nova"]["status"] == "up"
+
+
+def test_run_checks_preserves_configured_order_keystone_first():
+    # Output key order follows the configured (effective) order: keystone is
+    # always emitted first, then the configured dependents in order.
+    doc = run(FakeConnection(), step_ms=10, services=("keystone", "cinder", "nova"))
+    assert list(doc["services"].keys()) == ["keystone", "cinder", "nova"]
+
+
+def test_run_checks_skips_unregistered_service_with_stderr_warning(capsys):
+    # A configured service with NO registered checker (octavia) is skipped and
+    # warned about on stderr -- it must NOT appear in the output document, and
+    # must NOT affect overall (which stays up with everything else fast).
+    doc = run(
+        FakeConnection(),
+        step_ms=10,
+        services=("keystone", "nova", "octavia"),
+    )
+    assert "octavia" not in doc["services"]
+    assert set(doc["services"]) == {"keystone", "nova"}
+    assert doc["overall"] == "up"
+    err = capsys.readouterr().err
+    assert "octavia" in err
+    assert "no registered checker" in err
+
+
+def test_run_checks_keystone_always_present_even_if_not_in_dependents():
+    # Even a degenerate effective set that omits keystone (defensive: callers
+    # should never do this since parse_rally_services hoists it) still checks
+    # auth -- run_checks always times authorize() and emits keystone.
+    doc = run(FakeConnection(), step_ms=10, services=("nova",))
+    assert "keystone" in doc["services"]
+    assert doc["services"]["keystone"]["status"] == "up"
+
+
+def test_run_checks_unregistered_only_still_reports_keystone(capsys):
+    # If every configured dependent is unregistered, the document still carries
+    # keystone (the auth check) and nothing else; the unknown name is warned.
+    doc = run(FakeConnection(), step_ms=10, services=("keystone", "heat"))
+    assert set(doc["services"]) == {"keystone"}
+    assert doc["overall"] == "up"
+    assert "heat" in capsys.readouterr().err
+
+
+def test_run_checks_subset_down_when_configured_service_fails():
+    # Down propagation still works within a trimmed set.
+    doc = run(
+        FakeConnection({"cinder": boom}),
+        step_ms=10,
+        services=("keystone", "cinder"),
+    )
+    assert doc["services"]["cinder"]["status"] == "down"
+    assert doc["overall"] == "down"
+    assert "nova" not in doc["services"]  # not configured

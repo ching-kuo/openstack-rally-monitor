@@ -22,7 +22,28 @@ UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
 RUN_LOG="${RUN_DIR}/run.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift")
+# The monitored service set is configurable via RALLY_SERVICES (comma-separated).
+# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, order
+# preserved); the same parsing rules are mirrored in api_health_check.py's
+# parse_rally_services -- keep the two in sync. A configured service with no
+# rally/scenarios/<name>.yaml still logs a SKIP in run_service_tests (the
+# operator's signal for a typo'd name); build_summary then reports it "skipped".
+DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
+
+parse_rally_services() {
+    # Echo the normalized service list, one per line, preserving operator order.
+    # Reads $1 (the raw RALLY_SERVICES string). Falls back to the default when
+    # the input is unset/empty or normalizes to nothing.
+    local raw="${1:-}"
+    [[ -n "${raw}" ]] || raw="${DEFAULT_RALLY_SERVICES}"
+    local out
+    out=$(printf '%s' "${raw}" | tr ',' '\n' | tr '[:upper:]' '[:lower:]' \
+        | awk '{ gsub(/[[:space:]]/, ""); if ($0 != "" && !seen[$0]++) print }')
+    [[ -n "${out}" ]] || out=$(printf '%s' "${DEFAULT_RALLY_SERVICES}" | tr ',' '\n')
+    printf '%s\n' "${out}"
+}
+
+mapfile -t SERVICES < <(parse_rally_services "${RALLY_SERVICES:-}")
 
 log() {
     local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
@@ -44,6 +65,7 @@ log_environment() {
     log "  OS_USERNAME=${OS_USERNAME:-<not set>}"
     log "  OS_PASSWORD=$(if [[ -n "${OS_PASSWORD:-}" ]]; then echo '***SET***'; else echo '<not set>'; fi)"
     log "  OS_PROJECT_NAME=${OS_PROJECT_NAME:-<not set>}"
+    log "  RALLY_SERVICES=${SERVICES[*]}"
     log "  OS_USER_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-<not set>}"
     log "  OS_PROJECT_DOMAIN_NAME=${OS_PROJECT_DOMAIN_NAME:-<not set>}"
     log "  OS_REGION_NAME=${OS_REGION_NAME:-<not set>}"

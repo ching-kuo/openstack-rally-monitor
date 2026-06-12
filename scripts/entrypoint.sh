@@ -72,21 +72,33 @@ if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RAL
 fi
 unset _RALLY_UID _RESULTS_UID
 
-# Create a seed summary if none exists (so dashboard works on first boot)
+# Create a seed summary if none exists (so dashboard works on first boot).
+# Generate the pending cards from RALLY_SERVICES rather than a hardcoded six so a
+# trimmed deployment (e.g. a Swift-less cloud) doesn't show a phantom pending
+# card forever. The normalization here -- split on commas, lowercase, strip ALL
+# whitespace, drop empty segments, dedupe preserving first-seen order -- mirrors
+# parse_rally_services in run_tests.sh and api_health_check.py; keep the three in
+# sync. An unset/empty value (or one that normalizes to nothing) falls back to
+# the same default. Seed-only-if-missing semantics are preserved.
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
-    cat > "${RESULTS_DIR}/latest_summary.json" <<'EOF_SUMMARY'
-{
-    "timestamp": "waiting_for_first_run",
-    "services": {
-        "keystone": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "nova": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "neutron": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "glance": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "cinder": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "swift": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []}
-    }
-}
-EOF_SUMMARY
+    jq -n \
+        --arg raw "${RALLY_SERVICES:-keystone,nova,neutron,glance,cinder,swift}" \
+        --arg default "keystone,nova,neutron,glance,cinder,swift" \
+        '
+        def normalize($s):
+            ($s | split(",") | map(ascii_downcase | gsub("\\s"; "")) | map(select(. != ""))
+             | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end));
+        (normalize($raw)) as $parsed
+        | (if ($parsed | length) > 0 then $parsed else normalize($default) end) as $services
+        | {
+            timestamp: "waiting_for_first_run",
+            services: ($services
+                | map({(.): {status: "pending", duration: 0, total_iterations: 0,
+                             failed_iterations: 0, sla_passed: true, scenarios: []}})
+                | add)
+          }' \
+        > "${RESULTS_DIR}/latest_summary.json.tmp" \
+        && mv "${RESULTS_DIR}/latest_summary.json.tmp" "${RESULTS_DIR}/latest_summary.json"
     log "Created seed summary"
 fi
 
@@ -215,7 +227,7 @@ RALLY_ENV_VARS=(
     OS_IDENTITY_API_VERSION OS_REGION_NAME
     OS_CACERT OS_CERT OS_KEY OS_INSECURE
     OS_AUTH_TYPE OS_ENDPOINT_TYPE OS_INTERFACE
-    RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS
+    RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS RALLY_SERVICES
     RALLY_NOVA_FLAVOR RALLY_NOVA_IMAGE RALLY_NEUTRON_NETWORK_CIDR RALLY_DEBUG
     RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION
     RALLY_CONFIG_DIR
