@@ -690,18 +690,19 @@ function renderHealthTimeline(healthHistory) {
     const cell = document.createElement("div");
     cell.className = `htl-cell ${status}`;
 
-    const downSvcs = Object.entries(check.services || {})
-      .filter(([, v]) => v.status === "down")
-      .map(([k]) => escapeHtml(k));
-    // For degraded checks, list the slow services with their latencies so the
-    // tooltip reads e.g. "Degraded: nova (6200ms)".
-    const slowSvcs = Object.entries(check.services || {})
-      .filter(([, v]) => v.status === "degraded")
-      .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
+    const svcEntries = Object.entries(check.services || {});
     let detail;
     if (status === "down") {
+      const downSvcs = svcEntries
+        .filter(([, v]) => v.status === "down")
+        .map(([k]) => escapeHtml(k));
       detail = `Down: ${downSvcs.join(", ")}`;
     } else if (status === "degraded") {
+      // List the slow services with their latencies so the tooltip reads e.g.
+      // "Degraded: nova (6200ms)".
+      const slowSvcs = svcEntries
+        .filter(([, v]) => v.status === "degraded")
+        .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
       detail = `Degraded: ${slowSvcs.join(", ")}`;
     } else {
       detail = "All services up";

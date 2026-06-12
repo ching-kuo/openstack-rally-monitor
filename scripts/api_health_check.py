@@ -218,34 +218,28 @@ def run_checks(conn, now_fn=None, warn_ms: int = DEFAULT_WARN_MS, services=None)
         auth_ok = False
     keystone_ms = int(round((time.monotonic() - t0) * 1000))
 
-    if not auth_ok:
+    if auth_ok:
+        results["keystone"] = _result(
+            _classify(keystone_ms, warn_ms), keystone_ms, checked_at
+        )
+        # --- dependent services: one timed read-only GET each --------------
+        for name in dependents:
+            checked_at = now_fn()
+            t0 = time.monotonic()
+            try:
+                probes[name]()
+                reachable = True
+            except Exception:  # noqa: BLE001 - any error means the service is down
+                reachable = False
+            ms = int(round((time.monotonic() - t0) * 1000))
+            status = _classify(ms, warn_ms) if reachable else "down"
+            results[name] = _result(status, ms, checked_at)
+    else:
         # Without a token the dependent services are unreachable. Report them
         # all down with latency 0 (never attempted) so overall is "down".
         results["keystone"] = _result("down", keystone_ms, checked_at)
         for name in dependents:
             results[name] = _result("down", 0, now_fn())
-        return {
-            "timestamp": now_fn(),
-            "overall": _overall(results),
-            "services": results,
-        }
-
-    results["keystone"] = _result(
-        _classify(keystone_ms, warn_ms), keystone_ms, checked_at
-    )
-
-    # --- dependent services: one timed read-only GET each ------------------
-    for name in dependents:
-        checked_at = now_fn()
-        t0 = time.monotonic()
-        try:
-            probes[name]()
-            ms = int(round((time.monotonic() - t0) * 1000))
-            status = _classify(ms, warn_ms)
-        except Exception:  # noqa: BLE001 - any error means the service is down
-            ms = int(round((time.monotonic() - t0) * 1000))
-            status = "down"
-        results[name] = _result(status, ms, checked_at)
 
     return {
         "timestamp": now_fn(),
