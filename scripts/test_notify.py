@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 SCRIPT = Path(__file__).resolve().parent / "notify.sh"
 
@@ -69,7 +73,7 @@ def run_notify(
     if extra_env:
         env.update(extra_env)
     return subprocess.run(
-        ["/bin/bash", str(SCRIPT), status],
+        [BASH, str(SCRIPT), status],
         capture_output=True,
         text=True,
         env=env,

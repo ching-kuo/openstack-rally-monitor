@@ -10,8 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 import pytest
 
@@ -37,7 +41,7 @@ def run_cli(
     env = os.environ.copy()
     env["RESULTS_DIR"] = str(tmp_path)
     result = subprocess.run(
-        ["/bin/bash", str(SCRIPT), *argv],
+        [BASH, str(SCRIPT), *argv],
         capture_output=True,
         text=True,
         env=env,
@@ -523,7 +527,7 @@ class TestRobustness:
         env["RESULTS_DIR"] = str(tmp_path)
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
-            ["/bin/bash", str(SCRIPT), "post", "--type", "incident", "--body", "second"],
+            [BASH, str(SCRIPT), "post", "--type", "incident", "--body", "second"],
             capture_output=True, text=True, env=env, check=False,
         )
         assert result.returncode != 0

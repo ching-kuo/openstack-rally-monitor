@@ -16,8 +16,12 @@ Mirrors the harness pattern in test_uptime_ledger.py::record.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 import pytest
 
@@ -117,7 +121,7 @@ def build_summary(tmp_path: Path, service_files: dict[str, object]):
     )
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && {overrides} build_summary',
         ],
@@ -421,7 +425,7 @@ def parse_rally_services(raw: str | None) -> list[str]:
     arg = "" if raw is None else raw
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             # Quote the argument exactly as given so whitespace/empties survive.
             f'source "{SCRIPT}" && parse_rally_services "$1"',
@@ -500,7 +504,7 @@ def test_build_summary_honours_trimmed_rally_services(tmp_path: Path) -> None:
     )
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && {overrides} build_summary',
         ],

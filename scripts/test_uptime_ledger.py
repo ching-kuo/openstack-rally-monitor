@@ -2,9 +2,13 @@
 and the health-history filter (health_history_filter.jq) used by
 health_check.sh."""
 import json
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 HEALTH_FILTER = Path(__file__).resolve().parent / "health_history_filter.jq"
@@ -25,7 +29,7 @@ def record(tmp_path, summary, timestamp="20260603T000000Z", window_days=30):
     (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" record_smoke_result',
         ],
@@ -282,7 +286,7 @@ def test_unreadable_summary_records_failed_run(tmp_path):
     (tmp_path / "latest_summary.json").write_text("not json")
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && TIMESTAMP="{recent_ts(0)}" record_smoke_result',
         ],
