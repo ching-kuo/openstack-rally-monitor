@@ -35,6 +35,9 @@
             </div>
         </div>
         <div class="header-right">
+            <!-- Pulsing chip shown by app.js (renderRunState) only while a Rally
+                 run is in progress; hidden when idle. -->
+            <div class="run-state-chip" id="runStateChip" role="status" style="display:none;"></div>
             <div class="health-badge" id="healthBadge">
                 <span class="health-dot"></span>
                 <span class="health-text">Loading...</span>

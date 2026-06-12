@@ -129,6 +129,19 @@ async function fetchAnnouncements() {
   }
 }
 
+// Run-progress state for the "test run in progress" chip. Failure-tolerant: a
+// missing/dangling symlink (404 before the first run) or corrupt file returns
+// null, which renderRunState() treats as idle (chip hidden).
+async function fetchRunState() {
+  try {
+    const res = await fetch("/run_state.json", { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
@@ -438,6 +451,52 @@ function updateHeader(summary, health) {
   lastRun.textContent = `Last run: ${formatTimestamp(summary.timestamp)}`;
 }
 
+// A "running" state older than this is treated as idle. entrypoint.sh resets
+// run_state.json to idle on every boot, so a stale "running" can only arise on
+// a long-lived container whose run was SIGKILL'd without firing run_tests.sh's
+// EXIT trap (e.g. OOM-kill). Without this guard the chip would pulse forever.
+const RUN_STATE_STALE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// Shows a small pulsing header chip while a Rally run is in progress, e.g.
+// "Test run in progress · started 12:04". Hidden when idle, missing, corrupt,
+// or stale (see RUN_STATE_STALE_MS).
+function renderRunState(state) {
+  const chip = document.getElementById("runStateChip");
+  if (!chip) return;
+
+  const isRunning =
+    state &&
+    state.state === "running" &&
+    (() => {
+      const startedMs = Date.parse(state.started_at);
+      // Unparseable started_at: fail safe by NOT showing a forever-chip.
+      if (!Number.isFinite(startedMs)) return false;
+      return Date.now() - startedMs < RUN_STATE_STALE_MS;
+    })();
+
+  if (!isRunning) {
+    chip.style.display = "none";
+    chip.replaceChildren();
+    return;
+  }
+
+  chip.replaceChildren();
+  const dot = document.createElement("span");
+  dot.className = "run-state-dot";
+  const text = document.createElement("span");
+  // formatTimestamp returns a locale datetime; show just the clock time.
+  const startedMs = Date.parse(state.started_at);
+  const startedLabel = Number.isFinite(startedMs)
+    ? new Date(startedMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+  text.textContent = startedLabel
+    ? `Test run in progress · started ${startedLabel}`
+    : "Test run in progress";
+  chip.appendChild(dot);
+  chip.appendChild(text);
+  chip.style.display = "";
+}
+
 // ---------------------------------------------------------------------------
 // Run Status Timeline
 // ---------------------------------------------------------------------------
@@ -658,12 +717,17 @@ function renderHealthTimeline(healthHistory) {
 function renderServiceCards(summary, history, health) {
   const grid = document.getElementById("servicesGrid");
   const services = summary.services || {};
+  // The run timestamp threads into openModal so the modal's "Full Rally report"
+  // link targets the correct run directory: the live latest summary when in the
+  // live view, or the pinned historical run's own timestamp when one is selected
+  // (renderServiceCards is called with that run as `summary` in both cases).
+  const runTimestamp = summary.timestamp;
 
   grid.innerHTML = "";
   for (const [name, data] of Object.entries(services)) {
     const card = document.createElement("div");
     card.className = `service-card status-${data.status}`;
-    card.onclick = () => openModal(name, data);
+    card.onclick = () => openModal(name, data, runTimestamp);
 
     // Build mini timeline from history
     const miniTimeline = (history.runs || []).map((run) => {
@@ -729,7 +793,12 @@ function renderServiceCards(summary, history, health) {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
-function openModal(serviceName, data) {
+// Matches the compact rally run timestamp (also the run-directory name). Used
+// to gate the "Full Rally report" link: seed/placeholder timestamps like
+// "waiting_for_first_run" have no run directory, so no link is shown for them.
+const RUN_TIMESTAMP_RE = /^\d{8}T\d{6}Z$/;
+
+function openModal(serviceName, data, runTimestamp) {
   const overlay = document.getElementById("modalOverlay");
   const title = document.getElementById("modalTitle");
   const body = document.getElementById("modalBody");
@@ -762,9 +831,25 @@ function openModal(serviceName, data) {
                     <span class="status-chip ${s.sla ? "passed" : "failed"}">${s.sla ? "SLA OK" : "SLA FAIL"}</span>
                 </div>
             </div>
+            ${
+              s.first_error
+                ? `<div class="scenario-error">${escapeHtml(s.first_error)}</div>`
+                : ""
+            }
         `,
       )
       .join("");
+  }
+
+  // Link to the full self-contained Rally HTML report for the currently-viewed
+  // run. The target may 404 after retention pruning removes the run directory;
+  // that's acceptable — it opens in a new tab (rel=noopener) and we deliberately
+  // do not pre-check. Only shown for a real run timestamp (not the seed value).
+  if (RUN_TIMESTAMP_RE.test(runTimestamp || "")) {
+    const href = `runs/${encodeURIComponent(runTimestamp)}/${encodeURIComponent(serviceName)}.html`;
+    body.innerHTML +=
+      `<a class="report-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">` +
+      `Full Rally report ↗</a>`;
   }
 
   overlay.classList.add("active");
@@ -1034,16 +1119,24 @@ function renderCleanup(cleanup) {
 // Main Refresh Loop
 // ---------------------------------------------------------------------------
 async function refresh() {
-  const [resultsData, historyData, healthData, healthHistoryData, announcementState] =
-    await Promise.all([
-      fetchResults(),
-      fetchHistory(),
-      fetchHealth(),
-      fetchHealthHistory(),
-      fetchAnnouncements(),
-    ]);
+  const [
+    resultsData,
+    historyData,
+    healthData,
+    healthHistoryData,
+    announcementState,
+    runState,
+  ] = await Promise.all([
+    fetchResults(),
+    fetchHistory(),
+    fetchHealth(),
+    fetchHealthHistory(),
+    fetchAnnouncements(),
+    fetchRunState(),
+  ]);
 
   renderAnnouncements(announcementState);
+  renderRunState(runState);
 
   // Cache for use by historical selection and card re-renders
   if (historyData) cachedHistory = historyData;

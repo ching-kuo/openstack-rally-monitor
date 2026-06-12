@@ -192,6 +192,34 @@ footer {
     }
 }
 
+/* "Test run in progress" chip. Shown next to the health badge only while a
+   Rally run is running; reuses the badge pill shape and the brand-secondary
+   token, with a gently pulsing dot to read as live activity (mirrors the
+   .live-dot treatment on the service cards). */
+.run-state-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.9rem;
+    border-radius: 100px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-brand-secondary);
+    background: var(--surface-glass);
+    border: 1px solid var(--border-glass);
+    white-space: nowrap;
+}
+
+.run-state-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-brand-secondary);
+    box-shadow: 0 0 8px var(--color-brand-secondary);
+    animation: dot-pulse 1.4s ease-in-out infinite;
+}
+
 .last-run {
     font-size: 0.75rem;
     color: var(--color-text-muted);
@@ -820,6 +848,37 @@ section {
 .scenario-stat-label {
     font-size: 0.6rem;
     color: var(--color-text-muted);
+}
+
+/* First failed-iteration error excerpt, rendered (escaped) beneath its scenario
+   row. Monospace so a truncated stack/message reads clearly; failure-tinted
+   background using the existing failure token. */
+.scenario-error {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--color-failure);
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.75rem;
+    margin: -0.25rem 0 0.5rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* Link to the full self-contained Rally HTML report (opens in a new tab). */
+.report-link {
+    display: inline-block;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--color-brand-secondary);
+    text-decoration: none;
+}
+
+.report-link:hover {
+    text-decoration: underline;
 }
 
 /* --- Operator Announcement Banner --- */

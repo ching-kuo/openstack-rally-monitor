@@ -15,6 +15,7 @@ PROVENANCE_RETENTION_DAYS="${PROVENANCE_RETENTION_DAYS:-90}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
+RUN_STATE_FILE="${RESULTS_DIR}/run_state.json"
 RALLY_PROJECT_LEDGER_FILE="${RESULTS_DIR}/rally_project_ids.log"
 SMOKE_HISTORY_FILE="${RESULTS_DIR}/smoke_history.json"
 UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
@@ -272,13 +273,21 @@ build_summary() {
                 # Parse Rally JSON results
                 svc_status="passed"
 
-                # Extract per-scenario metrics using Rally's actual JSON structure
+                # Extract per-scenario metrics using Rally's actual JSON structure.
+                # first_error: the message of the first failed iteration, so the
+                # dashboard modal can show WHY a scenario failed without a shell
+                # in. Rally iteration errors are arrays [type, message, traceback];
+                # take .error[1] (message) and fall back to .error[0] defensively
+                # (older/edge shapes may carry a single element). Truncated to 300
+                # chars server-side so summaries stay small. Empty string for a
+                # passing scenario (the dashboard hides the line when empty).
                 scenarios_detail=$(jq -c '
                     [.[] | {
                         name: .key.name,
                         duration: .full_duration,
                         iterations: (if (.result | length) > 0 then (.result | length) else (.key.kw.runner.times // 0) end),
                         failures: ([.result[]? | select(.error | length > 0)] | length),
+                        first_error: (([.result[]? | select(.error | length > 0)][0].error // []) | (.[1] // .[0] // "") | tostring | .[0:300]),
                         sla: (([.sla[] | select(.success == true)] | length) == ([.sla[]] | length))
                     }]
                 ' "${result_file}" 2>/dev/null) || scenarios_detail="[]"
@@ -586,6 +595,36 @@ auto_purge_rgw() {
 }
 
 # --------------------------------------------------------------------------
+# Run-progress state (run_state.json)
+# --------------------------------------------------------------------------
+# Surfaces "a Rally run is in progress" to the dashboard (a small pulsing chip)
+# so the multi-minute run doesn't look like a stale/hung dashboard. Written
+# atomically (tmp+mv) like every other file-drop. Only ever touched by the
+# process that HOLDS the flock: write_run_state_running is called immediately
+# after flock succeeds, and the EXIT trap is installed only after that, so the
+# flock-contention path (early `exit 0` before we own the lock) never writes
+# idle and clobbers the winning run's "running" state.
+write_run_state_running() {
+    printf '{"state":"running","started_at":"%s","timestamp":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIMESTAMP}" \
+        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
+        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+}
+
+# EXIT-trap handler: flips state back to idle on normal exit, the
+# deployment_setup_failed `exit 1`, and signals. Best-effort and never fails the
+# run (the trap fires during shutdown). Safe to clobber here because we only
+# reach the trap-install point while holding the flock.
+write_run_state_idle() {
+    printf '{"state":"idle","finished_at":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
+        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+}
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
@@ -596,6 +635,13 @@ main() {
     exec 200>"${LOCKFILE}"
     flock -n 200 || { log "Another run is already in progress, exiting."; exit 0; }
     RUN_START_EPOCH=$(date +%s)
+
+    # We now own the flock. Mark the run in progress, THEN install the EXIT trap
+    # that resets to idle -- in this order so the early `exit 0` above (lock
+    # contention, before we owned the lock) cannot trip the trap and overwrite
+    # the other process's "running" state.
+    write_run_state_running
+    trap write_run_state_idle EXIT
 
     mkdir -p "${RUN_DIR}"
 

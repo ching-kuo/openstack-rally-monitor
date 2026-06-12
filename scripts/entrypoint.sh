@@ -141,6 +141,17 @@ if [[ ! -f "${RESULTS_DIR}/health_history.json" ]]; then
     log "Created seed health_history.json"
 fi
 
+# Reset run-progress state to idle on EVERY boot (not just when missing). A run
+# that was SIGKILL'd by a container stop/crash would have left state="running"
+# in the persistent volume; nothing else would clear it, so the dashboard would
+# show a phantom "Test run in progress" forever. The running run is necessarily
+# dead after a restart, so idle is always correct here. run_tests.sh flips it
+# back to "running" under its flock when a real run starts.
+echo '{"state":"idle","finished_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' \
+    > "${RESULTS_DIR}/run_state.json.tmp" \
+    && mv "${RESULTS_DIR}/run_state.json.tmp" "${RESULTS_DIR}/run_state.json"
+log "Reset run_state.json to idle"
+
 # Symlink JSON data files into /dashboard so the HTTP server can serve them.
 # Recreated on every startup since /dashboard is ephemeral (not a volume).
 ln -sf "${RESULTS_DIR}/results.json"            /dashboard/results.json
@@ -151,6 +162,15 @@ ln -sf "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
 # appears lazily on the first announce.sh post. serve.py's target.exists()
 # check 404s on the dangling symlink until then.
 ln -sf "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
+# Run-progress state, seeded to idle just above. Same lazy/atomic pattern.
+ln -sf "${RESULTS_DIR}/run_state.json"          /dashboard/run_state.json
+# Expose per-run directories so the dashboard can link to the generated Rally
+# HTML reports (/dashboard/runs/<TIMESTAMP>/<service>.html). serve.py gates this
+# behind a strict regex + RESULTS_ROOT containment, so the symlink only widens
+# what that allowlist branch explicitly permits. The source tree ships no
+# dashboard/runs, so this is a plain symlink; `-n` keeps a re-run from nesting a
+# link inside a pre-existing one.
+ln -sfn "${RESULTS_DIR}"                        /dashboard/runs
 # `ln -sfn` cannot overwrite an existing directory, so if the image was built
 # with a preview `dashboard/themes/custom/` staged in the source tree (e.g.
 # operator-side scaffolding), the symlink would silently turn into a child

@@ -170,6 +170,9 @@ def test_passing_scenario_reports_passed(tmp_path: Path) -> None:
     assert detail["iterations"] == 3
     assert detail["failures"] == 0
     assert detail["sla"] is True
+    # A passing scenario carries an empty first_error (the dashboard hides the
+    # error line when this is empty).
+    assert detail["first_error"] == ""
 
 
 def test_multiple_scenarios_aggregate(tmp_path: Path) -> None:
@@ -202,6 +205,61 @@ def test_failed_iterations_mark_service_failed(tmp_path: Path) -> None:
     # SLA can still be reported true; the failure count alone fails the service.
     assert cinder["sla_passed"] is True
     assert cinder["scenarios"][0]["failures"] == 2
+    # first_error surfaces the MESSAGE element (.error[1]) of the first failed
+    # iteration so the dashboard modal can show WHY it failed. The fixture's
+    # error array is [type, message, traceback].
+    assert cinder["scenarios"][0]["first_error"] == "human readable failure message"
+
+
+# ---------------------------------------------------------------------------
+# first_error extraction (the failure-cause excerpt the modal renders)
+# ---------------------------------------------------------------------------
+
+def test_first_error_uses_first_failed_iteration_message(tmp_path: Path) -> None:
+    """When several iterations fail, first_error is the message of the FIRST
+    one (index 0 of the failed subset), not a later one."""
+    scn = scenario("NovaServers.boot", iterations=3, errors=0)
+    # Hand-craft three iterations: pass, fail("first boom"), fail("second boom").
+    scn["result"] = [
+        {"duration": 1.0, "timestamp": 1.0, "error": []},
+        {"duration": 1.0, "timestamp": 1.0,
+         "error": ["TimeoutException", "first boom", "trace A"]},
+        {"duration": 1.0, "timestamp": 1.0,
+         "error": ["ValueError", "second boom", "trace B"]},
+    ]
+    summary = build_summary(tmp_path, {"nova": [scn]})
+    nova = svc(summary, "nova")
+    assert nova["scenarios"][0]["failures"] == 2
+    assert nova["scenarios"][0]["first_error"] == "first boom"
+
+
+def test_first_error_falls_back_to_type_when_message_missing(tmp_path: Path) -> None:
+    """Older/edge Rally error shapes may carry a single element. The jq takes
+    .error[1] then falls back to .error[0] so the excerpt is never empty for a
+    genuinely failed iteration."""
+    scn = scenario("CinderVolumes.create", iterations=1, errors=0)
+    scn["result"] = [
+        {"duration": 1.0, "timestamp": 1.0, "error": ["LoneErrorString"]},
+    ]
+    summary = build_summary(tmp_path, {"cinder": [scn]})
+    cinder = svc(summary, "cinder")
+    assert cinder["scenarios"][0]["failures"] == 1
+    assert cinder["scenarios"][0]["first_error"] == "LoneErrorString"
+
+
+def test_first_error_truncated_to_300_chars(tmp_path: Path) -> None:
+    """Long failure messages are truncated server-side so summaries stay small;
+    the dashboard relies on this bound rather than truncating client-side."""
+    long_msg = "E" * 500
+    scn = scenario("GlanceImages.create", iterations=1, errors=0)
+    scn["result"] = [
+        {"duration": 1.0, "timestamp": 1.0,
+         "error": ["BigException", long_msg, "trace"]},
+    ]
+    summary = build_summary(tmp_path, {"glance": [scn]})
+    first_error = svc(summary, "glance")["scenarios"][0]["first_error"]
+    assert len(first_error) == 300
+    assert first_error == "E" * 300
 
 
 # ---------------------------------------------------------------------------
