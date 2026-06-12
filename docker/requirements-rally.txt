@@ -1,0 +1,20 @@
+# OpenStack toolchain — pinned to exact versions for reproducible images.
+#
+# Why pinned (and not floating like a typical `pip install rally-openstack`):
+#   * scripts/patch_rally.py monkey-patches Rally's internal password-generation
+#     policy at build time. It targets specific module internals, so a silent
+#     upstream version bump can move the code it patches out from under it.
+#   * The scenario YAMLs in rally/scenarios/ reference plugin names that
+#     upstream rally-openstack has renamed/removed across releases.
+#   * Two builds of the same commit must produce the same image (the vendored
+#     JS/font assets are already SHA-256-pinned; the OpenStack toolchain was the
+#     last floating dependency surface).
+# Version drift must therefore be deliberate — Dependabot opens it as a
+# reviewable PR that runs the test job, instead of changing on every rebuild.
+#
+# rally is an explicit transitive contract of rally-openstack 3.0.0
+# (Requires-Dist: rally>=4.1.0); pinned here so patch_rally.py and the scenario
+# plugin names stay matched to a known Rally release.
+rally-openstack==3.0.0
+rally==5.0.1
+python-openstackclient==10.1.0

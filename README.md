@@ -4,14 +4,15 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 
 ## Features
 
-- **6 Core Services Tested** — Keystone, Nova, Neutron, Glance, Cinder, Swift
-- **Lightweight Health Checks** — Read-only API probes every 15 minutes between heavy test runs
-- **Prometheus Metrics** — Full metrics exposure for test results, SLA compliance, and orphaned resources
+- **Configurable Service Set** — Keystone, Nova, Neutron, Glance, Cinder, and Swift by default; trim the monitored set per cloud with `RALLY_SERVICES`
+- **Lightweight Health Checks** — Read-only API probes every 15 minutes between heavy test runs, via a single authenticated session (one token per cycle); a slow-but-reachable service is reported as `degraded`
+- **Prometheus Metrics** — Full metrics exposure for test results, SLA compliance, orphaned resources, per-service API availability/latency, and maintenance state
 - **Orphan Detection & Cleanup** — Detects resources left behind by failed Rally cleanups (both `s_rally_*` and `c_rally_*` prefixes) and provides a manual purge tool
 - **RadosGW Orphan Management** — Optional: detects orphaned Ceph RGW implicit-tenant users and automatically purges rally-owned ones after each test run (requires RGW admin API credentials)
+- **Webhook Notifications** — Optional outbound webhook on smoke-status transitions (`passed`↔`failed`), with generic / Slack / Discord payload formats
 - **7-Day History** — Results retained with automatic pruning
 - **Uptime Percentages** — API health and smoke-test uptime over a configurable window (default 30 days), shown as dashboard badges
-- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, and auto-refresh
+- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to the full Rally HTML report, and a live "test run in progress" indicator
 
 ## Dashboard Customization
 
@@ -151,9 +152,12 @@ All settings are controlled via environment variables in `.env`.
 | `OS_USER_DOMAIN_NAME` | `Default` | User domain |
 | `OS_PROJECT_DOMAIN_NAME` | `Default` | Project domain |
 | `OS_REGION_NAME` | `RegionOne` | Region |
+| `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Comma-separated set of services to monitor. Trim to match your cloud (e.g. drop `swift` on a deployment without object storage). Parsed defensively (trimmed, lowercased, deduped, order-preserving); names must match `^[a-z0-9_-]+$` (lowercase letters, digits, `_`, `-`) — any token failing the allowlist is dropped, and if every token is dropped the default set is used. Unknown but valid names are skipped with a log line. `keystone` is always health-checked (the session authenticates against it) |
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full Rally test runs |
 | `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight API health checks |
+| `HEALTH_LATENCY_WARN_MS` | `5000` | Latency in ms above which a reachable service is reported `degraded`. Degraded counts as up for uptime/`rally_api_up`; the slowness shows in `rally_api_latency_milliseconds` |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning |
+| `PROVENANCE_RETENTION_DAYS` | `90` | Days to keep `rally_project_ids.log` (the RGW auto-purge authorization ledger). Deliberately decoupled from `RALLY_RESULTS_RETENTION_DAYS` |
 | `UPTIME_WINDOW_DAYS` | `30` | Window in days for the dashboard uptime percentages |
 | `RALLY_NOVA_FLAVOR` | `m1.tiny` | Flavor name for Nova scenarios |
 | `RALLY_NOVA_IMAGE` | `cirros-0.6.2-x86_64-disk` | Image name for Nova scenarios |
@@ -162,12 +166,15 @@ All settings are controlled via environment variables in `.env`.
 | `RGW_ACCESS_KEY` | — | S3 access key for RGW admin user (`buckets=*;users=*` caps) |
 | `RGW_SECRET_KEY` | — | S3 secret key for RGW admin user |
 | `RGW_REGION` | — | Explicit SigV4 region for RGW (omit if not required) |
+| `NOTIFY_WEBHOOK_URL` | — | Webhook URL for smoke-status transition notifications (enables the feature). Treated as a secret — may embed a token and lands in `/rally/rally_env` (mode 0640) |
+| `NOTIFY_FORMAT` | `generic` | Webhook payload shape: `generic` (raw JSON), `slack` (`{"text": …}`), or `discord` (`{"content": …}`) |
+| `NOTIFY_DASHBOARD_URL` | — | Optional dashboard URL embedded in the notification payload / chat message |
 | `EXPORTER_PORT` | `9101` | Prometheus exporter port |
 | `DASHBOARD_PORT` | `8080` | Dashboard port |
 
 ## Scenarios
 
-Each service has a dedicated YAML scenario in `rally/scenarios/`.
+Each service has a dedicated YAML scenario in `rally/scenarios/`. The monitored set is configurable via `RALLY_SERVICES` (default: all six below); a configured name without a matching `rally/scenarios/<name>.yaml` is skipped with a `SKIP` log line rather than failing the run.
 
 | Service | Tests |
 |---------|-------|
@@ -177,6 +184,20 @@ Each service has a dedicated YAML scenario in `rally/scenarios/`.
 | **Glance** | Create/delete/list images |
 | **Cinder** | Create/delete/list volumes; cloning; snapshots; QoS policy management |
 | **Swift** | Container/object CRUD; object listing and download |
+
+## Prometheus Metrics
+
+All metrics are exposed on `:9101/metrics`. Alongside the existing `rally_task_*`, `rally_service_status`, `rally_*_orphaned_resources`, `rally_rgw_*`, and `rally_data_valid` gauges, the API health check and announcement state add:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `rally_api_up` | `service` | API health check reachable (1) or down (0). `degraded` (slow but reachable) counts as **up** — this gauge measures reachability, not speed |
+| `rally_api_latency_milliseconds` | `service` | Latency of the last health check. This is where a `degraded` service is visible — alert here for latency-based warnings |
+| `rally_api_overall_up` | — | Overall API health, **fail-closed**: `up`/`degraded` → 1; everything else → 0 — `down`, `unknown`/missing overall (e.g. the seed `health.json` on a fresh volume, or a corrupt/missing file), and any unrecognized value. Semantics: `1` = the most recent health data reports overall reachability; `0` = down OR no valid signal. When the health pipeline breaks, the per-service `rally_api_up` series vanish (so they cannot fire `== 0`) and only this gauge can still signal the loss — see `RallyApiSignalLost` |
+| `rally_announcement_active` | `type` | Count of currently-active announcements per type; all three labels (`incident`, `maintenance`, `scheduled`) are always emitted (0 when none) |
+| `rally_maintenance_mode` | — | 1 when any `maintenance`-type announcement is active, else 0 (drives the optional alert inhibition below) |
+
+Uptime is intentionally **dashboard-only** — derive it Prometheus-side with `avg_over_time(rally_api_up[30d])` rather than scraping a dedicated gauge.
 
 ## Alert Rules
 
@@ -193,8 +214,18 @@ Defined in `prometheus/rally_alerts.yml`.
 | `RallyTestFailure` | warning | A scenario failed |
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
+| `RallyApiDown` | critical | A service's lightweight API health check has reported down for >20 min |
+| `RallyApiSignalLost` | warning | `rally_api_overall_up == 0` for >60 min — a sustained overall outage OR a broken/stale health pipeline (corrupt or missing `health.json`, whose absent per-service series cannot fire `RallyApiDown`) |
 | `RallyStaleResults` | warning | No new results in >2 hours |
 | `RallyOverallFailure` | critical | One or more services failing |
+
+`RallyApiDown` fires on `rally_api_up == 0` with `for: 20m` (two consecutive 15-minute health checks), making it the fastest available outage signal — far ahead of the ~4-hour Rally cadence. A `degraded` (slow-but-reachable) service keeps `rally_api_up == 1`, so alert on `rally_api_latency_milliseconds` if you want a latency-based warning. `RallyApiSignalLost` (warning, `for: 60m`) is the fail-closed companion: `rally_api_overall_up` is `0` on a real overall outage AND when the health pipeline itself breaks (corrupt or missing `health.json`). In the broken-pipeline case the per-service `rally_api_up` series are absent and cannot fire `RallyApiDown`, so this catch-all is the only signal that survives a blind exporter — `RallyApiDown` stays the page-worthy critical, `RallyApiSignalLost` stays a warning.
+
+### Maintenance inhibition (opt-in)
+
+`RallyTestFailure`, `RallyServiceDown`, and `RallySLABreach` ship with commented-out maintenance-inhibition variants. Uncomment the `… unless on() rally_maintenance_mode == 1` form of each `expr` to suppress these flappy alerts while an operator has posted a `maintenance`-type announcement, so a single `announce.sh post --type maintenance` silences both the dashboard banner and the alerts during a planned window. `rally_maintenance_mode` is unlabeled, so the `unless` needs `on()` to match the empty label set.
+
+> **Health-check latency baseline caveat:** as of this version the health check uses a single authenticated openstacksdk session instead of six per-service CLI invocations, so `rally_api_latency_milliseconds` now measures the API round-trip rather than ~1–3 s of CLI startup + token issuance. Latency values **step down** at upgrade — re-baseline any latency alerts tuned against the previous CLI-based numbers.
 
 ### Orphan severity rationale
 
@@ -278,6 +309,33 @@ docker exec -u rally rally-monitor /scripts/announce.sh clear <id>
 
 State lives at `/results/announcement-state.json`. The dashboard picks up changes on its existing 5-minute refresh cycle — no new HTTP endpoint is introduced.
 
+## Webhook Notifications
+
+Set `NOTIFY_WEBHOOK_URL` to fire an outbound webhook whenever the smoke-test status **transitions** (`passed`→`failed` or `failed`→`passed`). Transition-only semantics mean steady-state runs are silent — you are paged when the cloud breaks and again when it recovers, not on every run. The feature is **off by default**: with the URL unset the test runner makes no outbound HTTP calls.
+
+Add the variables to your `.env` (consumed by `docker compose`):
+
+```bash
+# Slack incoming webhook example
+NOTIFY_WEBHOOK_URL=https://hooks.slack.com/services/T000/B000/XXXXXXXX
+NOTIFY_FORMAT=slack
+NOTIFY_DASHBOARD_URL=https://rally.example.com
+```
+
+`NOTIFY_FORMAT` selects the payload shape:
+
+| Format | Body |
+|--------|------|
+| `generic` (default) | Raw JSON: `{event, status, previous_status, timestamp, failed_services, error, dashboard_url?}` |
+| `slack` | `{"text": "<human-readable line>"}` |
+| `discord` | `{"content": "<human-readable line>"}` |
+
+Notes:
+
+- A missing notification state file (`/results/.last_notified_status`) baselines to `passed`, so a first-ever failed run notifies while a first-ever green run stays quiet.
+- The state is updated **only on a successful send** (HTTP 2xx). A failed POST leaves the prior status intact, so the next run retries the transition.
+- `NOTIFY_WEBHOOK_URL` may embed a token. Like `OS_PASSWORD` it lands in `/rally/rally_env` (mode 0640) so cron jobs can read it — treat it as a secret. The URL is never written to the logs.
+
 ## Useful Commands
 
 ```bash
@@ -303,6 +361,14 @@ docker exec rally-monitor tail -f /rally/logs/health-check.log
 ```
 
 > **Orphan prefixes:** `s_rally_*` resources are created by scenario plugins and cleaned up during the test. `c_rally_*` resources are created by context plugins (projects, users, networks) and cleaned up after the task completes. Both are detected by `cleanup_monitor.sh` and removable via `purge_orphans.sh`, but reported at different severities — see the alert table above.
+
+## Continuous Integration
+
+`.github/workflows/build-push.yml` runs in two stages. A `test` job first runs the full pytest suite (`exporter/`, `dashboard/`, `scripts/`) on Python 3.13 — matching the `python:3.13-slim` runtime — and the `build-push` job declares `needs: test`, so a failing suite blocks the image build and publication entirely. Images are pushed to GitHub Container Registry (`ghcr.io/<owner>/<repo>`) on push to `main`, on `v*` tags, and via manual dispatch; pull requests build only (no push).
+
+Dependencies are pinned to exact versions for reproducible images — `docker/requirements-rally.txt` (the OpenStack toolchain: `rally-openstack`, `rally`, `python-openstackclient`), `exporter/requirements.txt`, and `exporter/requirements-test.txt`. `.github/dependabot.yml` opens weekly PRs to bump them (pip for `/exporter` and `/docker`, the docker base image, and GitHub Actions), each of which runs through the test gate above — so version drift is always a reviewed, tested change rather than something that happens silently on a rebuild.
+
+To run the suite locally (`python -m pytest exporter/ dashboard/ scripts/`), **bash >= 4 must be on `PATH`** — the script-suite tests resolve bash via `shutil.which("bash")` and the scripts use `mapfile` (a bash 4 builtin). macOS ships bash 3.2 at `/bin/bash`, so `brew install bash` and ensure it precedes `/bin/bash` on `PATH`.
 
 ## Project Structure
 

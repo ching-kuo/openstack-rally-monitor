@@ -21,12 +21,16 @@ RUN useradd -r -u 1500 -s /bin/false -d /rally -g 0 rally
 # Install system deps and Python packages in a single layer.
 # Build-only packages (gcc, libffi-dev, libssl-dev, python3-dev) are removed
 # after pip install so they don't persist in the final image.
+# Both requirements files pin exact versions (==) so the image is reproducible
+# per-commit; requirements-rally.txt explains why the OpenStack toolchain in
+# particular must stay pinned (patch_rally.py + scenario plugin names).
 COPY exporter/requirements.txt /tmp/requirements.txt
+COPY docker/requirements-rally.txt /tmp/requirements-rally.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libffi-dev libssl-dev python3-dev \
         curl jq cron bash logrotate && \
     pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install --no-cache-dir rally-openstack python-openstackclient && \
+    pip install --no-cache-dir -r /tmp/requirements-rally.txt && \
     apt-get remove --purge -y gcc libffi-dev libssl-dev python3-dev && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*

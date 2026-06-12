@@ -146,6 +146,67 @@ rally_run_duration_seconds = Gauge(
     registry=registry,
 )
 
+rally_api_up = Gauge(
+    "rally_api_up",
+    (
+        "Whether the API health check for a service reported reachable (1) or "
+        'down (0). "degraded" (the service answered but exceeded '
+        "HEALTH_LATENCY_WARN_MS) counts as up (1) — this gauge measures "
+        "reachability, not speed. Slowness shows up in "
+        "rally_api_latency_milliseconds, not here."
+    ),
+    ["service"],
+    registry=registry,
+)
+
+rally_api_latency_milliseconds = Gauge(
+    "rally_api_latency_milliseconds",
+    (
+        "Latency in milliseconds of the last API health check for a service. "
+        "This is where a degraded (slow-but-reachable) service is visible; "
+        "rally_api_up stays 1 for degraded, so alert on this gauge for "
+        "latency-based warnings."
+    ),
+    ["service"],
+    registry=registry,
+)
+
+rally_api_overall_up = Gauge(
+    "rally_api_overall_up",
+    (
+        "Whether the most recent API health data reports overall reachability "
+        '(1) or not (0). "up" and "degraded" both map to 1 (degraded means '
+        "every service answered, just slowly — see "
+        "rally_api_latency_milliseconds). Everything else maps to 0 and the "
+        'gauge FAILS CLOSED: an explicit "down", an "unknown"/missing overall '
+        "(e.g. the seed health.json on a fresh volume, or a corrupt/missing "
+        "file), and any unrecognized value all set 0. Semantics: 1 = healthy "
+        "signal; 0 = down OR no valid signal. This pairs with per-service "
+        "rally_api_up (genuinely absent until a service is first checked, so "
+        "absent series cannot fire `== 0`): when the health pipeline breaks, "
+        "those per-service series vanish and only this gauge can still signal "
+        "the loss. RallyApiSignalLost alerts on this 0 state."
+    ),
+    registry=registry,
+)
+
+rally_announcement_active = Gauge(
+    "rally_announcement_active",
+    (
+        "Number of currently-active operator announcements of each type. "
+        "All three type labels (incident, maintenance, scheduled) are emitted "
+        "every scrape, 0 when none, so the series never appear or disappear."
+    ),
+    ["type"],
+    registry=registry,
+)
+
+rally_maintenance_mode = Gauge(
+    "rally_maintenance_mode",
+    "Whether any maintenance-type announcement is currently active (1) or not (0)",
+    registry=registry,
+)
+
 rally_exporter_errors_total = Counter(
     "rally_exporter_errors_total",
     "Total number of errors reading or parsing result files",
@@ -176,10 +237,19 @@ _cleanup_mtime: float = -1.0
 _cleanup_data: dict = {}
 _cleanup_cache_time: float = 0.0
 
+_health_mtime: float = -1.0
+_health_data: dict = {}
+_health_cache_time: float = 0.0
+
+_announce_mtime: float = -1.0
+_announce_data: dict = {}
+_announce_cache_time: float = 0.0
+
 # Tracks the timestamp of the last summary we processed into labeled metrics.
 # Only when this changes do we clear and rebuild per-service/scenario gauges.
 _last_processed_ts: str = ""
 _last_applied_cleanup: dict = {}
+_last_applied_health: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -243,6 +313,55 @@ def load_cleanup_metrics() -> dict:
     _cleanup_data = data
     return data
 
+
+def load_health() -> dict:
+    """Load API health-check JSON file, using mtime-based caching.
+
+    health.json is written by scripts/health_check.sh on its own ~15-minute
+    cadence, independent of the Rally summary. The entrypoint always seeds it,
+    so a missing/corrupt file is treated like the other always-present files:
+    the error counter is incremented and a benign default is returned.
+    """
+    global _health_mtime, _health_data, _health_cache_time
+    data, _health_mtime, _health_cache_time = _load_cached_json(
+        "health.json",
+        _health_mtime,
+        _health_data,
+        _health_cache_time,
+    )
+    if data is None:
+        return {"overall": "unknown", "services": {}}
+    _health_data = data
+    return data
+
+
+def load_announcements() -> dict:
+    """Load operator announcement state, using mtime-based caching.
+
+    Unlike the always-seeded summary/cleanup/health files,
+    announcement-state.json legitimately does not exist until the first
+    `announce.sh post`. A missing file is therefore the normal pre-first-post
+    state and must NOT increment rally_exporter_errors_total — it returns the
+    empty default silently. Corrupt JSON (or other read errors) on an existing
+    file still increments the counter via _load_cached_json.
+    """
+    global _announce_mtime, _announce_data, _announce_cache_time
+    path = os.path.join(RESULTS_DIR, "announcement-state.json")
+    if not os.path.exists(path):
+        # Absence is expected pre-first-post; do not count it as an error.
+        _announce_mtime = -1.0
+        _announce_data = {}
+        return {"announcements": []}
+    data, _announce_mtime, _announce_cache_time = _load_cached_json(
+        "announcement-state.json",
+        _announce_mtime,
+        _announce_data,
+        _announce_cache_time,
+    )
+    if data is None:
+        return {"announcements": []}
+    _announce_data = data
+    return data
 
 
 def parse_timestamp(ts: str) -> float:
@@ -318,6 +437,129 @@ def _apply_cleanup_metrics(cleanup: dict) -> None:
     rally_rgw_scan_ok.set(0 if rgw_scan_status == "error" else 1)
 
 
+def _apply_health_metrics(health: dict) -> None:
+    """Apply API health-check metrics from health.json.
+
+    Called on every scrape regardless of whether the Rally summary changed,
+    because health.json updates on its own ~15-minute cycle (written by
+    health_check.sh). Mirrors _apply_cleanup_metrics: identity-check to skip
+    redundant work, then clear-before-set so a service that drops out of a
+    later health.json does not leave a stale labeled series behind.
+    """
+    global _last_applied_health
+    if health is _last_applied_health:
+        return
+    _last_applied_health = health
+
+    # health.json is a full snapshot; clear prior per-service labels first so
+    # stale services do not linger when the file shrinks or goes missing.
+    rally_api_up.clear()
+    rally_api_latency_milliseconds.clear()
+
+    services = health.get("services", {})
+    if isinstance(services, dict):
+        for service, info in services.items():
+            if not isinstance(info, dict):
+                continue
+            status = info.get("status")
+            # "degraded" (reachable but slow) counts as up: this gauge measures
+            # reachability. Only an explicit "down" is 0. Slowness is visible in
+            # rally_api_latency_milliseconds below.
+            rally_api_up.labels(service=service).set(0 if status == "down" else 1)
+            latency = info.get("latency_ms")
+            if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+                rally_api_latency_milliseconds.labels(service=service).set(latency)
+
+    # Overall: "up" and "degraded" both map to 1 (reachable); everything else
+    # maps to 0 (fail closed). An explicit "down", an "unknown"/missing overall
+    # (e.g. the seed file), or any unrecognized value all set 0. This is
+    # deliberate: per-service rally_api_up labels are cleared above and only
+    # re-set for services present in a valid health.json, so a corrupt or
+    # missing file leaves NO per-service series to fire `== 0` alerts. If this
+    # unlabeled gauge stayed at its prior 1 on bad data, a broken health
+    # pipeline would read as "all healthy". Failing closed means "1 = the most
+    # recent health data reports overall reachability; 0 = down OR no valid
+    # signal" — RallyApiSignalLost in rally_alerts.yml covers the 0 case.
+    overall = health.get("overall")
+    if overall in ("up", "degraded"):
+        rally_api_overall_up.set(1)
+    else:
+        rally_api_overall_up.set(0)
+
+
+# Operator-announcement types. Enum-only: never derive labels from body/id text.
+# Mirrors TYPE_LABELS in dashboard/app.js and VALID_TYPES_RE in announce.sh.
+_ANNOUNCEMENT_TYPES = ("incident", "maintenance", "scheduled")
+
+
+def _parse_iso8601_ms(value) -> float:
+    """Parse an ISO 8601 UTC timestamp to epoch milliseconds.
+
+    Returns float("nan") when the value is missing or unparseable, matching the
+    JS side where Date.parse(...) yields NaN and Number.isFinite(NaN) is false.
+    """
+    if not isinstance(value, str):
+        return float("nan")
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return float("nan")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp() * 1000.0
+
+
+def _is_announcement_active(rec: dict, now_ms: float) -> bool:
+    """Return whether an announcement record is currently active.
+
+    KEEP IN SYNC with dashboard/app.js::isAnnouncementActive — both encode the
+    same active-ness semantics (the repo uses this convention for
+    ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
+      - unknown type            -> not active
+      - effective_from in the future (parseable) -> not active
+      - expires_at at/<= now (parseable)         -> not active
+      - records missing both bounds (incidents)  -> active until cleared
+    Unparseable bounds are ignored (treated as absent), matching the JS
+    Number.isFinite guard.
+    """
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("type") not in _ANNOUNCEMENT_TYPES:
+        return False
+    start_ms = _parse_iso8601_ms(rec.get("effective_from"))
+    if start_ms == start_ms and start_ms > now_ms:  # not-NaN and future
+        return False
+    end_ms = _parse_iso8601_ms(rec.get("expires_at"))
+    if end_ms == end_ms and end_ms <= now_ms:  # not-NaN and past/now
+        return False
+    return True
+
+
+def _apply_announcement_metrics(state: dict) -> None:
+    """Apply maintenance/announcement gauges from announcement-state.json.
+
+    Emits all three type labels every scrape (0 when none) so series never
+    appear or disappear, and sets rally_maintenance_mode to 1 iff any
+    maintenance record is currently active. Label cardinality is enum-only;
+    body/id text never becomes a label.
+    """
+    counts = {t: 0 for t in _ANNOUNCEMENT_TYPES}
+    now_ms = time.time() * 1000.0
+
+    announcements = state.get("announcements", []) if isinstance(state, dict) else []
+    if isinstance(announcements, list):
+        for rec in announcements:
+            if _is_announcement_active(rec, now_ms):
+                counts[rec["type"]] += 1
+
+    for atype in _ANNOUNCEMENT_TYPES:
+        rally_announcement_active.labels(type=atype).set(counts[atype])
+    rally_maintenance_mode.set(1 if counts["maintenance"] > 0 else 0)
+
+
 def update_metrics():
     """Read latest results and update all Prometheus metrics.
 
@@ -335,16 +577,21 @@ def update_metrics():
 
     summary = load_latest_summary()
     cleanup = load_cleanup_metrics()
+    health = load_health()
+    announcements = load_announcements()
 
     services = summary.get("services", {})
     current_ts = summary.get("timestamp", "")
     is_valid = bool(services) and current_ts not in ("none", "waiting_for_first_run", "")
 
-    # Cleanup metrics are always applied — they come from a separate file
-    # with its own update cycle (written after each run by cleanup_monitor.sh).
-    # Apply them before the validity check so orphan signals remain current
-    # even when the summary file is missing or stale.
+    # Cleanup, health, and announcement metrics are always applied — each comes
+    # from a separate file with its own independent update cycle (cleanup and
+    # health refresh on the health-check/run cadences, announcements whenever an
+    # operator runs announce.sh). Apply them before the validity check so these
+    # signals stay current even when the Rally summary is missing or stale.
     _apply_cleanup_metrics(cleanup)
+    _apply_health_metrics(health)
+    _apply_announcement_metrics(announcements)
 
     if not is_valid:
         # No usable data: signal invalidity without disturbing labeled metrics.

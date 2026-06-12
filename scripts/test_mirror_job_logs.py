@@ -1,6 +1,10 @@
 """Regression tests for cron log mirroring."""
+import shutil
 import subprocess
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 
 SCRIPT = Path(__file__).resolve().parent / "mirror_job_logs.sh"
@@ -9,7 +13,7 @@ SCRIPT = Path(__file__).resolve().parent / "mirror_job_logs.sh"
 def run_mirror(tmp_path, argv):
     """Run mirror_job_logs.sh with arbitrary argv."""
     result = subprocess.run(
-        ["/bin/bash", str(SCRIPT), *argv],
+        [BASH, str(SCRIPT), *argv],
         capture_output=True,
         text=True,
         check=False,
@@ -22,7 +26,7 @@ def run_wrapper(tmp_path, command):
     log_file = tmp_path / "job.log"
     result = run_mirror(
         tmp_path,
-        [str(log_file), "/bin/bash", "-lc", command],
+        [str(log_file), BASH, "-lc", command],
     )
     return result, log_file
 

@@ -2,7 +2,7 @@
  * Rally OpenStack Monitor - Dashboard Logic
  * ===========================================
  * Fetches results from the exporter API, renders service cards,
- * 7-day status timeline, trend charts, and cleanup status.
+ * run-status timeline, trend charts, and cleanup status.
  * Auto-refreshes every 5 minutes.
  */
 
@@ -28,6 +28,36 @@ const SERVICE_DESCRIPTIONS = {
   cinder: "Block Storage",
   swift: "Object Storage",
 };
+
+// Visual ordering for the standard six services; any service not listed here
+// (e.g. a cloud running Octavia) is appended in first-seen order. Used to keep
+// chart series/colors stable across refreshes while staying data-driven.
+const PREFERRED_SERVICE_ORDER = [
+  "keystone",
+  "nova",
+  "neutron",
+  "glance",
+  "cinder",
+  "swift",
+];
+
+// Build a stable, ordered union of service names appearing across `items`
+// (each item exposes a `.services` object). The preferred six come first in
+// their canonical order; unknown services follow in the order first observed.
+// This keeps colors consistent run-to-run instead of hardcoding the six names.
+function orderedServiceUnion(items) {
+  const seen = new Set();
+  for (const item of items) {
+    for (const name of Object.keys((item && item.services) || {})) {
+      seen.add(name);
+    }
+  }
+  const ordered = PREFERRED_SERVICE_ORDER.filter((name) => seen.has(name));
+  for (const name of seen) {
+    if (!ordered.includes(name)) ordered.push(name);
+  }
+  return ordered;
+}
 
 let durationChart = null;
 let healthLatencyChart = null;
@@ -99,6 +129,19 @@ async function fetchAnnouncements() {
   }
 }
 
+// Run-progress state for the "test run in progress" chip. Failure-tolerant: a
+// missing/dangling symlink (404 before the first run) or corrupt file returns
+// null, which renderRunState() treats as idle (chip hidden).
+async function fetchRunState() {
+  try {
+    const res = await fetch("/run_state.json", { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
@@ -111,19 +154,59 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-function formatTimestamp(ts) {
-  if (!ts || ts === "waiting_for_first_run" || ts === "none")
-    return "Waiting for first run...";
-  // Compact format: 20260220T143021Z
+// Parse a run/check timestamp into epoch milliseconds, accepting both the
+// compact rally form (20260220T143021Z) and ISO 8601. Returns NaN for the
+// placeholder/unparseable values so callers can skip them.
+function parseTimestampMs(ts) {
+  if (!ts || ts === "waiting_for_first_run" || ts === "none") return NaN;
   const compact = ts.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
   if (compact) {
     const [, y, mo, d, h, mi, s] = compact;
-    return new Date(Date.UTC(+y, +mo - 1, +d, +h, +mi, +s)).toLocaleString();
+    return Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
   }
-  // ISO format: 2026-02-24T10:00:00Z
-  const isoDate = new Date(ts);
-  if (!isNaN(isoDate)) return isoDate.toLocaleString();
+  return Date.parse(ts);
+}
+
+function formatTimestamp(ts) {
+  if (!ts || ts === "waiting_for_first_run" || ts === "none")
+    return "Waiting for first run...";
+  const ms = parseTimestampMs(ts);
+  if (Number.isFinite(ms)) return new Date(ms).toLocaleString();
   return ts;
+}
+
+// Build a neutral, data-driven span label from a list of records carrying a
+// `.timestamp`. Returns "" when fewer than two parseable timestamps exist (a
+// single data point has no span to describe — "Last hour" for one run would
+// be misleading) so the empty subhead stays hidden via CSS `:empty`. The
+// dashboard cannot know RALLY_RESULTS_RETENTION_DAYS, so this reports the
+// actually-covered window rather than hardcoding "7-Day".
+function formatCoveredSpan(records) {
+  // Single pass min/max instead of Math.max(...times): the health history can
+  // hold thousands of entries and argument-spreading that many values risks a
+  // RangeError on large UPTIME_WINDOW_DAYS configurations.
+  let earliest = Infinity;
+  let latest = -Infinity;
+  let count = 0;
+  for (const r of records || []) {
+    const ms = parseTimestampMs(r && r.timestamp);
+    if (!Number.isFinite(ms)) continue;
+    count += 1;
+    if (ms < earliest) earliest = ms;
+    if (ms > latest) latest = ms;
+  }
+  if (count < 2) return "";
+  const span = latest - earliest;
+  const days = Math.round(span / 86_400_000);
+  if (days >= 1) return `Last ${days} day${days === 1 ? "" : "s"}`;
+  const hours = Math.round(span / 3_600_000);
+  if (hours >= 1) return `Last ${hours} hour${hours === 1 ? "" : "s"}`;
+  return "Last hour";
+}
+
+function setSpanLabel(id, records) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = formatCoveredSpan(records);
 }
 
 function formatDuration(seconds) {
@@ -162,7 +245,13 @@ function withAlpha(color, alpha) {
 }
 
 function getRunStatus(runData) {
-  const services = runData.services || {};
+  const services = (runData && runData.services) || {};
+  // A run with a top-level error (e.g. deployment_setup_failed) or with no
+  // service data at all is a failed run, not "All Healthy". The empty-services
+  // failure summary {timestamp, services:{}, error:...} would otherwise pass
+  // the `every(...passed)` vacuous-truth check below and render green.
+  if (runData && runData.error) return "failed";
+  if (Object.keys(services).length === 0) return "failed";
   const statuses = Object.values(services).map((s) => s.status);
   if (statuses.some((s) => s === "failed")) return "failed";
   if (statuses.every((s) => s === "passed")) return "passed";
@@ -182,6 +271,14 @@ const TYPE_LABELS = {
 // Active = currently displayable. effective_from in the future or expires_at
 // in the past hides the record on the client even if the CLI has not yet
 // pruned it. Incidents have neither bound and stay active until cleared.
+// KEEP IN SYNC with rally_exporter.py::_is_announcement_active — both encode
+// the same active-ness semantics (the repo uses this convention for
+// ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
+//   - unknown type                      -> not active
+//   - effective_from parseable & future -> not active
+//   - expires_at parseable & <= now     -> not active
+//   - records missing both bounds       -> active until cleared
+// Unparseable bounds are ignored (Number.isFinite guard), matching Python.
 function isAnnouncementActive(rec, nowMs) {
   if (!TYPE_LABELS[rec.type]) return false;
   if (rec.effective_from) {
@@ -340,24 +437,80 @@ function updateHeader(summary, health) {
 
   const rallyStatus = getRunStatus(summary);
   const apiDown = health && health.overall === "down";
+  // Degraded = reachable but at least one service slow. It loses to a full API
+  // outage (apiDown) and to a Rally failure, but otherwise surfaces an amber
+  // header state instead of the green "All Healthy".
+  const apiDegraded = health && health.overall === "degraded";
 
-  // API health failure takes precedence over Rally run result
-  const status = apiDown ? "failed" : rallyStatus;
+  // API health failure takes precedence over the Rally run result.
+  let badgeClass;
+  let label;
+  if (apiDown) {
+    badgeClass = "unhealthy";
+    label = "API Issues Detected";
+  } else if (rallyStatus === "failed") {
+    badgeClass = "unhealthy";
+    label = "Issues Detected";
+  } else if (apiDegraded) {
+    badgeClass = "degraded";
+    label = "API Degraded";
+  } else if (rallyStatus === "passed") {
+    badgeClass = "healthy";
+    label = "All Healthy";
+  } else {
+    badgeClass = "";
+    label = "Pending";
+  }
 
-  badge.className = `health-badge ${status === "passed" ? "healthy" : status === "failed" ? "unhealthy" : ""}`;
-  text.textContent = apiDown
-    ? "API Issues Detected"
-    : status === "passed"
-      ? "All Healthy"
-      : status === "failed"
-        ? "Issues Detected"
-        : "Pending";
+  badge.className = `health-badge ${badgeClass}`;
+  text.textContent = label;
 
   lastRun.textContent = `Last run: ${formatTimestamp(summary.timestamp)}`;
 }
 
+// A "running" state older than this is treated as idle. entrypoint.sh resets
+// run_state.json to idle on every boot, so a stale "running" can only arise on
+// a long-lived container whose run was SIGKILL'd without firing run_tests.sh's
+// EXIT trap (e.g. OOM-kill). Without this guard the chip would pulse forever.
+const RUN_STATE_STALE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// Shows a small pulsing header chip while a Rally run is in progress, e.g.
+// "Test run in progress · started 12:04". Hidden when idle, missing, corrupt,
+// or stale (see RUN_STATE_STALE_MS).
+function renderRunState(state) {
+  const chip = document.getElementById("runStateChip");
+  if (!chip) return;
+
+  // Parse once via the shared helper (it accepts both ISO 8601 and the compact
+  // rally form, so a future started_at format change cannot break this).
+  // Unparseable started_at fails safe by NOT showing a forever-chip.
+  const startedMs =
+    state && state.state === "running" ? parseTimestampMs(state.started_at) : NaN;
+  const isRunning =
+    Number.isFinite(startedMs) && Date.now() - startedMs < RUN_STATE_STALE_MS;
+
+  if (!isRunning) {
+    chip.style.display = "none";
+    chip.replaceChildren();
+    return;
+  }
+
+  chip.replaceChildren();
+  const dot = document.createElement("span");
+  dot.className = "run-state-dot";
+  const text = document.createElement("span");
+  const startedLabel = new Date(startedMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  text.textContent = `Test run in progress · started ${startedLabel}`;
+  chip.appendChild(dot);
+  chip.appendChild(text);
+  chip.style.display = "";
+}
+
 // ---------------------------------------------------------------------------
-// 7-Day Timeline
+// Run Status Timeline
 // ---------------------------------------------------------------------------
 function renderTimeline(history) {
   const container = document.getElementById("timeline");
@@ -365,6 +518,7 @@ function renderTimeline(history) {
 
   const runs = history.runs || [];
   countBadge.textContent = `${runs.length} run${runs.length !== 1 ? "s" : ""}`;
+  setSpanLabel("timelineSpan", runs);
 
   if (runs.length === 0) {
     container.innerHTML =
@@ -383,12 +537,18 @@ function renderTimeline(history) {
     const failedSvcs = Object.entries(run.services || {})
       .filter(([, v]) => v.status === "failed")
       .map(([k]) => escapeHtml(k));
-    const tooltipDetail =
-      status === "failed"
-        ? `Failed: ${failedSvcs.join(", ")}`
-        : Object.keys(run.services || {}).length === 0
-          ? "No service data"
-          : "All services passed";
+    let tooltipDetail;
+    if (run.error) {
+      // Deployment-failure shape: surface the error verbatim instead of the
+      // misleading "No service data" (which read as benign).
+      tooltipDetail = `Error: ${escapeHtml(run.error)}`;
+    } else if (status === "failed" && failedSvcs.length > 0) {
+      tooltipDetail = `Failed: ${failedSvcs.join(", ")}`;
+    } else if (status === "failed") {
+      tooltipDetail = "No service data";
+    } else {
+      tooltipDetail = "All services passed";
+    }
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
@@ -472,9 +632,32 @@ function renderUptimeBadge(id, uptime) {
   if (!badge) return;
   if (!uptime || typeof uptime.percent !== "number") {
     badge.style.display = "none";
+    badge.removeAttribute("title");
     return;
   }
   badge.textContent = `${uptime.percent}% uptime / ${uptime.window_days}d`;
+
+  // Hover tooltip with the underlying counts. The two uptime objects use
+  // different field names — smoke uptime: runs_passed/runs_total; API uptime:
+  // checks_up/checks_total — so detect whichever pair is present.
+  let up;
+  let total;
+  let noun;
+  if (typeof uptime.runs_total === "number") {
+    up = uptime.runs_passed;
+    total = uptime.runs_total;
+    noun = "runs";
+  } else if (typeof uptime.checks_total === "number") {
+    up = uptime.checks_up;
+    total = uptime.checks_total;
+    noun = "checks";
+  }
+  if (typeof total === "number") {
+    badge.title =
+      `${up} of ${total} ${noun} healthy over the last ${uptime.window_days} days`;
+  } else {
+    badge.removeAttribute("title");
+  }
   badge.style.display = "";
 }
 
@@ -487,6 +670,7 @@ function renderHealthTimeline(healthHistory) {
 
   const allChecks = (healthHistory && healthHistory.checks) || [];
   let checks = allChecks;
+  setSpanLabel("healthTimelineSpan", allChecks);
 
   // Trim checks to the number that can physically fit in the container.
   // Each cell is at least 2px wide with a 2px gap between cells.
@@ -518,11 +702,23 @@ function renderHealthTimeline(healthHistory) {
     const cell = document.createElement("div");
     cell.className = `htl-cell ${status}`;
 
-    const downSvcs = Object.entries(check.services || {})
-      .filter(([, v]) => v.status === "down")
-      .map(([k]) => escapeHtml(k));
-    const detail =
-      status === "down" ? `Down: ${downSvcs.join(", ")}` : "All services up";
+    const svcEntries = Object.entries(check.services || {});
+    let detail;
+    if (status === "down") {
+      const downSvcs = svcEntries
+        .filter(([, v]) => v.status === "down")
+        .map(([k]) => escapeHtml(k));
+      detail = `Down: ${downSvcs.join(", ")}`;
+    } else if (status === "degraded") {
+      // List the slow services with their latencies so the tooltip reads e.g.
+      // "Degraded: nova (6200ms)".
+      const slowSvcs = svcEntries
+        .filter(([, v]) => v.status === "degraded")
+        .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
+      detail = `Degraded: ${slowSvcs.join(", ")}`;
+    } else {
+      detail = "All services up";
+    }
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
@@ -540,12 +736,17 @@ function renderHealthTimeline(healthHistory) {
 function renderServiceCards(summary, history, health) {
   const grid = document.getElementById("servicesGrid");
   const services = summary.services || {};
+  // The run timestamp threads into openModal so the modal's "Full Rally report"
+  // link targets the correct run directory: the live latest summary when in the
+  // live view, or the pinned historical run's own timestamp when one is selected
+  // (renderServiceCards is called with that run as `summary` in both cases).
+  const runTimestamp = summary.timestamp;
 
   grid.innerHTML = "";
   for (const [name, data] of Object.entries(services)) {
     const card = document.createElement("div");
     card.className = `service-card status-${data.status}`;
-    card.onclick = () => openModal(name, data);
+    card.onclick = () => openModal(name, data, runTimestamp);
 
     // Build mini timeline from history
     const miniTimeline = (history.runs || []).map((run) => {
@@ -557,12 +758,15 @@ function renderServiceCards(summary, history, health) {
     const svcHealth = health && health.services && health.services[name];
     const liveStatus = svcHealth ? svcHealth.status : "unknown";
     const liveLatency = svcHealth ? `${svcHealth.latency_ms}ms` : "";
+    // "degraded" = reachable but slow: keep it subtle ("API slow · 6200ms").
     const liveLabel =
       liveStatus === "up"
         ? `API live${liveLatency ? " · " + liveLatency : ""}`
-        : liveStatus === "down"
-          ? "API down"
-          : "API …";
+        : liveStatus === "degraded"
+          ? `API slow${liveLatency ? " · " + liveLatency : ""}`
+          : liveStatus === "down"
+            ? "API down"
+            : "API …";
 
     card.innerHTML = `
             <div class="card-header">
@@ -608,7 +812,12 @@ function renderServiceCards(summary, history, health) {
 // ---------------------------------------------------------------------------
 // Modal
 // ---------------------------------------------------------------------------
-function openModal(serviceName, data) {
+// Matches the compact rally run timestamp (also the run-directory name). Used
+// to gate the "Full Rally report" link: seed/placeholder timestamps like
+// "waiting_for_first_run" have no run directory, so no link is shown for them.
+const RUN_TIMESTAMP_RE = /^\d{8}T\d{6}Z$/;
+
+function openModal(serviceName, data, runTimestamp) {
   const overlay = document.getElementById("modalOverlay");
   const title = document.getElementById("modalTitle");
   const body = document.getElementById("modalBody");
@@ -641,9 +850,25 @@ function openModal(serviceName, data) {
                     <span class="status-chip ${s.sla ? "passed" : "failed"}">${s.sla ? "SLA OK" : "SLA FAIL"}</span>
                 </div>
             </div>
+            ${
+              s.first_error
+                ? `<div class="scenario-error">${escapeHtml(s.first_error)}</div>`
+                : ""
+            }
         `,
       )
       .join("");
+  }
+
+  // Link to the full self-contained Rally HTML report for the currently-viewed
+  // run. The target may 404 after retention pruning removes the run directory;
+  // that's acceptable — it opens in a new tab (rel=noopener) and we deliberately
+  // do not pre-check. Only shown for a real run timestamp (not the seed value).
+  if (RUN_TIMESTAMP_RE.test(runTimestamp || "")) {
+    const href = `runs/${encodeURIComponent(runTimestamp)}/${encodeURIComponent(serviceName)}.html`;
+    body.innerHTML +=
+      `<a class="report-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">` +
+      `Full Rally report ↗</a>`;
   }
 
   overlay.classList.add("active");
@@ -695,6 +920,26 @@ async function resolveThemeAssets() {
   );
 }
 
+// Remove the optional custom-theme <link> tags when their files are absent.
+// Replaces the former inline onerror="this.remove()" handlers, which had to
+// go so the CSP could drop 'unsafe-inline' from script-src. A dangling link
+// is already inert (the 404 is text/plain and nosniff blocks it as CSS), so
+// this is cleanup, not correctness — probed with the same fetch pattern as
+// resolveThemeAssets because the link error event may fire before app.js runs.
+async function pruneFailedThemeLinks() {
+  const links = document.querySelectorAll("link.custom-theme-css");
+  await Promise.all(
+    Array.from(links).map(async (link) => {
+      try {
+        const response = await fetch(link.getAttribute("href"), { cache: "no-store" });
+        if (!response.ok) link.remove();
+      } catch (err) {
+        link.remove();
+      }
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Charts
 // ---------------------------------------------------------------------------
@@ -705,8 +950,11 @@ function renderCharts(history) {
   );
   if (runs.length < 2) return;
 
-  // Derive service list from the first run that has data
-  const services = Object.keys(runs[0].services || {});
+  // Derive the service list from the union of all runs (matching the
+  // health-latency chart), not just the oldest retained run -- so a service
+  // added via RALLY_SERVICES appears immediately instead of waiting for the
+  // older runs to age out of retention.
+  const services = orderedServiceUnion(runs);
   const labels = runs.map((r) => {
     const t = formatTimestamp(r.timestamp);
     return t.length > 16 ? t.substring(0, 16) : t;
@@ -782,7 +1030,11 @@ function renderHealthChart(healthHistory) {
     .slice(-HEALTH_CHART_MAX_POINTS);
   if (checks.length < 2) return;
 
-  const services = ["keystone", "nova", "neutron", "glance", "cinder", "swift"];
+  // Derive the plotted service list from the data (ordered union across the
+  // plotted checks) instead of hardcoding the six standard services, so clouds
+  // with a different service set chart correctly. Ordering is stable across
+  // refreshes via PREFERRED_SERVICE_ORDER.
+  const services = orderedServiceUnion(checks);
   const labels = checks.map((c) => {
     const t = formatTimestamp(c.timestamp);
     return t.length > 16 ? t.substring(0, 16) : t;
@@ -889,16 +1141,24 @@ function renderCleanup(cleanup) {
 // Main Refresh Loop
 // ---------------------------------------------------------------------------
 async function refresh() {
-  const [resultsData, historyData, healthData, healthHistoryData, announcementState] =
-    await Promise.all([
-      fetchResults(),
-      fetchHistory(),
-      fetchHealth(),
-      fetchHealthHistory(),
-      fetchAnnouncements(),
-    ]);
+  const [
+    resultsData,
+    historyData,
+    healthData,
+    healthHistoryData,
+    announcementState,
+    runState,
+  ] = await Promise.all([
+    fetchResults(),
+    fetchHistory(),
+    fetchHealth(),
+    fetchHealthHistory(),
+    fetchAnnouncements(),
+    fetchRunState(),
+  ]);
 
   renderAnnouncements(announcementState);
+  renderRunState(runState);
 
   // Cache for use by historical selection and card re-renders
   if (historyData) cachedHistory = historyData;
@@ -946,7 +1206,7 @@ async function refresh() {
 
 // Initial load
 async function startDashboard() {
-  await Promise.all([resolveThemeAssets(), refresh()]);
+  await Promise.all([resolveThemeAssets(), pruneFailedThemeLinks(), refresh()]);
   setInterval(refresh, REFRESH_INTERVAL);
 }
 

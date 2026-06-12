@@ -2,9 +2,13 @@
 and the health-history filter (health_history_filter.jq) used by
 health_check.sh."""
 import json
+import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
+BASH = shutil.which("bash") or "/bin/bash"
 
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 HEALTH_FILTER = Path(__file__).resolve().parent / "health_history_filter.jq"
@@ -25,7 +29,7 @@ def record(tmp_path, summary, timestamp="20260603T000000Z", window_days=30):
     (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" record_smoke_result',
         ],
@@ -146,8 +150,9 @@ def test_window_days_is_configurable(tmp_path):
 
 
 def test_existing_results_json_uptime_is_refreshed(tmp_path):
-    # A deployment failure exits before publish_dashboard_files(), so
-    # record_smoke_result() itself must sync .uptime into results.json.
+    # record_smoke_result() syncs .uptime directly into an existing
+    # results.json (belt-and-suspenders alongside the publish that the
+    # deployment-failure path now also runs; standalone callers rely on this).
     (tmp_path / "results.json").write_text(
         json.dumps({"summary": {}, "cleanup": {}, "uptime": None})
     )
@@ -164,6 +169,45 @@ def test_missing_results_json_is_not_created(tmp_path):
     record(tmp_path, make_summary({"keystone": "passed"}), timestamp=recent_ts(0))
 
     assert not (tmp_path / "results.json").exists()
+
+
+def publish(tmp_path, summary, timestamp="20260603T000000Z"):
+    """Source run_tests.sh and run publish_dashboard_files against tmp_path.
+
+    Mirrors the deployment-failure path: latest_summary.json holds the failure
+    shape, smoke ledger and cleanup metrics are auto-seeded by the function.
+    """
+    (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
+    return subprocess.run(
+        [
+            BASH,
+            "-c",
+            f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" publish_dashboard_files',
+        ],
+        env={
+            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+            "RESULTS_DIR": str(tmp_path),
+            "UPTIME_WINDOW_DAYS": "30",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_deployment_failure_path_publishes_error_shape(tmp_path):
+    # The deployment-failure path calls publish_dashboard_files after
+    # record_smoke_result, so results.json must carry the failure summary
+    # (empty services + .error) instead of a stale green run. The dashboard's
+    # getRunStatus treats this shape as failed (covered by the node assertion
+    # in test_dashboard_getrunstatus.py).
+    summary = make_summary({}, error="deployment_setup_failed")
+    result = publish(tmp_path, summary, timestamp=recent_ts(0))
+
+    assert result.returncode == 0, result.stderr
+    results = json.loads((tmp_path / "results.json").read_text())
+    assert results["summary"]["error"] == "deployment_setup_failed"
+    assert results["summary"]["services"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +261,34 @@ def test_health_filter_appends_and_computes_uptime(tmp_path):
     }
 
 
+def test_health_filter_counts_degraded_as_up(tmp_path):
+    # Uptime measures reachability: a "degraded" check (reachable but slow)
+    # counts as up. Here 2 of 3 are reachable (up + degraded), 1 is down.
+    history = {
+        "checks": [
+            {"timestamp": iso_ts(2), "overall": "down"},
+            {"timestamp": iso_ts(1), "overall": "degraded"},
+        ]
+    }
+    current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
+    out = run_health_filter(tmp_path, history, current)
+
+    assert out["uptime"]["checks_total"] == 3
+    assert out["uptime"]["checks_up"] == 2  # up + degraded, not the down
+    assert out["uptime"]["percent"] == 66.67
+
+
+def test_health_filter_all_degraded_is_full_uptime(tmp_path):
+    # Every check degraded -> 100% uptime (the API was always reachable).
+    history = {"checks": [{"timestamp": iso_ts(1), "overall": "degraded"}]}
+    current = {"timestamp": iso_ts(0), "overall": "degraded", "services": {}}
+    out = run_health_filter(tmp_path, history, current)
+
+    assert out["uptime"]["checks_total"] == 2
+    assert out["uptime"]["checks_up"] == 2
+    assert out["uptime"]["percent"] == 100
+
+
 def test_health_filter_excludes_checks_outside_window(tmp_path):
     history = {"checks": [{"timestamp": iso_ts(45), "overall": "down"}]}
     current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
@@ -254,7 +326,7 @@ def test_unreadable_summary_records_failed_run(tmp_path):
     (tmp_path / "latest_summary.json").write_text("not json")
     result = subprocess.run(
         [
-            "/bin/bash",
+            BASH,
             "-c",
             f'source "{SCRIPT}" && TIMESTAMP="{recent_ts(0)}" record_smoke_result',
         ],
@@ -271,3 +343,54 @@ def test_unreadable_summary_records_failed_run(tmp_path):
     # read_ledger parsing the file also proves it is still valid JSON
     ledger = read_ledger(tmp_path)
     assert ledger["runs"][0]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Health fallback filter (the exact jq program health_check.sh runs via -f
+# when api_health_check.py fails -- the all-down document)
+# ---------------------------------------------------------------------------
+
+FALLBACK_FILTER = Path(__file__).resolve().parent / "health_fallback_filter.jq"
+DEFAULT_SERVICES = "keystone,nova,neutron,glance,cinder,swift"
+
+
+def run_fallback_filter(raw, ts="2026-06-12T00:00:00Z"):
+    """Apply health_fallback_filter.jq the same way health_check.sh does."""
+    result = subprocess.run(
+        [
+            "jq", "-n",
+            "-f", str(FALLBACK_FILTER),
+            "--arg", "ts", ts,
+            "--arg", "raw", raw,
+            "--arg", "default", DEFAULT_SERVICES,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_fallback_empty_raw_uses_default_set():
+    doc = run_fallback_filter("")
+    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
+    assert doc["overall"] == "down"
+    assert all(v["status"] == "down" and v["latency_ms"] == 0 for v in doc["services"].values())
+
+
+def test_fallback_all_invalid_raw_falls_back_to_default_set():
+    # Regression: the allowlist must filter BEFORE the raw-vs-default choice;
+    # an all-invalid RALLY_SERVICES previously produced a keystone-only doc.
+    doc = run_fallback_filter("../etc, b/c, ;rm")
+    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
+
+
+def test_fallback_mixed_raw_keeps_only_allowlisted_tokens():
+    doc = run_fallback_filter(" Nova , ../x, SWIFT , nova ")
+    assert list(doc["services"]) == ["keystone", "nova", "swift"]
+
+
+def test_fallback_keystone_always_present_and_first():
+    doc = run_fallback_filter("glance")
+    assert list(doc["services"]) == ["keystone", "glance"]

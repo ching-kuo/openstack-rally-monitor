@@ -115,6 +115,13 @@ groups:
       # -----------------------------------------------------------------------
       # TEST FAILURES - Warning: a Rally scenario failed
       # -----------------------------------------------------------------------
+      # Maintenance inhibition (opt-in): suppress this alert while an operator
+      # has posted a maintenance-type announcement (see scripts/announce.sh).
+      # rally_maintenance_mode has no labels, so the `unless` needs on() to
+      # match against the empty label set. Enable when planned maintenance
+      # routinely trips expected failures and you want one operator action to
+      # silence both the dashboard banner and the alert:
+      #   expr: rally_task_success == 0 and rally_data_valid == 1 unless on() rally_maintenance_mode == 1
       - alert: RallyTestFailure
         expr: rally_task_success == 0 and rally_data_valid == 1
         for: 5m
@@ -131,6 +138,11 @@ groups:
       # -----------------------------------------------------------------------
       # SERVICE DOWN - Critical: entire service is failing
       # -----------------------------------------------------------------------
+      # Maintenance inhibition (opt-in): suppress while a maintenance-type
+      # announcement is active. on() matches the unlabeled rally_maintenance_mode
+      # against this rule's label set. Enable to silence expected service-wide
+      # failures during planned maintenance windows:
+      #   expr: rally_service_status == 0 and rally_data_valid == 1 unless on() rally_maintenance_mode == 1
       - alert: RallyServiceDown
         expr: rally_service_status == 0 and rally_data_valid == 1
         for: 10m
@@ -146,6 +158,11 @@ groups:
       # -----------------------------------------------------------------------
       # SLA BREACH - Warning: SLA criteria not met
       # -----------------------------------------------------------------------
+      # Maintenance inhibition (opt-in): suppress while a maintenance-type
+      # announcement is active. on() matches the unlabeled rally_maintenance_mode
+      # against this rule's label set. Enable to avoid SLA-breach noise from
+      # degraded performance during planned maintenance:
+      #   expr: rally_task_sla_passed == 0 and rally_data_valid == 1 unless on() rally_maintenance_mode == 1
       - alert: RallySLABreach
         expr: rally_task_sla_passed == 0 and rally_data_valid == 1
         for: 5m
@@ -211,3 +228,53 @@ groups:
           description: |
             One or more OpenStack services are failing Rally tests.
             Investigate immediately to determine the scope of the issue.
+
+  - name: rally_api
+    rules:
+      # -----------------------------------------------------------------------
+      # API DOWN - Critical: a service's lightweight health check reports down
+      # Sourced from health.json (rally_api_up), which refreshes every
+      # HEALTH_CHECK_INTERVAL (default 15m) — far faster than the ~4h Rally
+      # test cadence. for: 20m requires two consecutive missed checks before
+      # firing, so a single transient failure does not page.
+      # -----------------------------------------------------------------------
+      - alert: RallyApiDown
+        expr: rally_api_up == 0
+        for: 20m
+        labels:
+          severity: critical
+          team: infra
+        annotations:
+          summary: "OpenStack API health check failing: {{ $labels.service }}"
+          description: |
+            The lightweight API health check for {{ $labels.service }} has
+            reported down for over 20 minutes (two consecutive 15-minute
+            checks). This is the fastest available outage signal — investigate
+            the service endpoint before waiting on the next Rally run.
+          runbook: "docker exec rally-monitor tail -f /rally/logs/health-check.log"
+
+      # -----------------------------------------------------------------------
+      # API SIGNAL LOST - Warning: overall reachability is 0
+      # rally_api_overall_up fails closed: it is 0 on a real outage AND when the
+      # health pipeline is broken/stale (corrupt or missing health.json), in
+      # which case the per-service rally_api_up series are absent and cannot
+      # fire RallyApiDown. This catch-all covers both a sustained overall
+      # outage and a silently-broken health pipeline. Per-service RallyApiDown
+      # stays the page-worthy critical; this stays a warning.
+      # -----------------------------------------------------------------------
+      - alert: RallyApiSignalLost
+        expr: rally_api_overall_up == 0
+        for: 60m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "OpenStack API overall reachability is down or signal lost"
+          description: |
+            rally_api_overall_up has been 0 for over 60 minutes. This means
+            either a sustained overall API outage OR a broken/stale health
+            pipeline (corrupt or missing health.json), in which case the
+            per-service rally_api_up series are absent and RallyApiDown cannot
+            fire. Check the health-check log and that health.json is being
+            written.
+          runbook: "docker exec rally-monitor tail -f /rally/logs/health-check.log"

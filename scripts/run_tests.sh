@@ -9,16 +9,46 @@ set -euo pipefail
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 RALLY_CONFIG_DIR="${RALLY_CONFIG_DIR:-/rally/config}"
 RETENTION_DAYS="${RALLY_RESULTS_RETENTION_DAYS:-7}"
+# The RGW provenance ledger is pruned on its OWN, longer window -- see
+# prune_rally_project_ledger for the rationale.
+PROVENANCE_RETENTION_DAYS="${PROVENANCE_RETENTION_DAYS:-90}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
+RUN_STATE_FILE="${RESULTS_DIR}/run_state.json"
 RALLY_PROJECT_LEDGER_FILE="${RESULTS_DIR}/rally_project_ids.log"
 SMOKE_HISTORY_FILE="${RESULTS_DIR}/smoke_history.json"
 UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
 RUN_LOG="${RUN_DIR}/run.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SERVICES=("keystone" "nova" "neutron" "glance" "cinder" "swift")
+# The monitored service set is configurable via RALLY_SERVICES (comma-separated).
+# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, then
+# drop any token not matching the ^[a-z0-9_-]+$ allowlist, order preserved);
+# the same parsing rules are mirrored in api_health_check.py's
+# parse_rally_services and health_check.sh's all-down jq fallback -- keep the
+# three in sync. The allowlist is path-traversal hardening: service names index
+# rally/scenarios/<name>.yaml and runs/<ts>/<name>.html, so a token like
+# "../etc" must never survive. A configured service with no
+# rally/scenarios/<name>.yaml still logs a SKIP in run_service_tests (the
+# operator's signal for a typo'd name); build_summary then reports it "skipped".
+DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
+
+parse_rally_services() {
+    # Echo the normalized service list, one per line, preserving operator order.
+    # Reads $1 (the raw RALLY_SERVICES string). Falls back to the default when
+    # the input is unset/empty or normalizes to nothing (including when every
+    # token is dropped by the allowlist).
+    local raw="${1:-}"
+    [[ -n "${raw}" ]] || raw="${DEFAULT_RALLY_SERVICES}"
+    local out
+    out=$(printf '%s' "${raw}" | tr ',' '\n' | tr '[:upper:]' '[:lower:]' \
+        | awk '{ gsub(/[[:space:]]/, ""); if ($0 ~ /^[a-z0-9_-]+$/ && !seen[$0]++) print }')
+    [[ -n "${out}" ]] || out=$(printf '%s' "${DEFAULT_RALLY_SERVICES}" | tr ',' '\n')
+    printf '%s\n' "${out}"
+}
+
+mapfile -t SERVICES < <(parse_rally_services "${RALLY_SERVICES:-}")
 
 log() {
     local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
@@ -40,6 +70,7 @@ log_environment() {
     log "  OS_USERNAME=${OS_USERNAME:-<not set>}"
     log "  OS_PASSWORD=$(if [[ -n "${OS_PASSWORD:-}" ]]; then echo '***SET***'; else echo '<not set>'; fi)"
     log "  OS_PROJECT_NAME=${OS_PROJECT_NAME:-<not set>}"
+    log "  RALLY_SERVICES=${SERVICES[*]}"
     log "  OS_USER_DOMAIN_NAME=${OS_USER_DOMAIN_NAME:-<not set>}"
     log "  OS_PROJECT_DOMAIN_NAME=${OS_PROJECT_DOMAIN_NAME:-<not set>}"
     log "  OS_REGION_NAME=${OS_REGION_NAME:-<not set>}"
@@ -161,6 +192,11 @@ run_service_tests() {
     log "Running ${service} scenarios..."
     local task_uuid=""
     local log_file="${RUN_DIR}/${service}.log"
+    # Tag every task with a run+service-unique marker so we can resolve its UUID
+    # by tag below. Verified supported on `rally task start` and `rally task
+    # list` in rally 5.0.1 (rally/cli/commands/task.py: --tag on start line 182,
+    # on list line 558; --tag composes with --uuids-only).
+    local task_tag="run-${TIMESTAMP}-${service}"
     local tracker_seen_file
     tracker_seen_file=$(mktemp)
     if ! list_rally_context_project_ids > "${tracker_seen_file}"; then
@@ -171,10 +207,10 @@ run_service_tests() {
     if [[ "${RALLY_DEBUG:-false}" == "true" ]]; then
         log "  DEBUG mode enabled. Full logs saving to ${log_file}"
         (
-            rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null
+            rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" --tag "${task_tag}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null
         ) &
     else
-        rally task start "${scenario_file}" --task-args-file "${task_args_file}" > "${log_file}" 2>&1 &
+        rally task start "${scenario_file}" --task-args-file "${task_args_file}" --tag "${task_tag}" > "${log_file}" 2>&1 &
     fi
 
     local task_pid=$!
@@ -205,8 +241,13 @@ run_service_tests() {
     task_uuid=$(grep -oP 'Task \K[a-f0-9-]+' "${log_file}" | head -1) || true
 
     if [[ -z "${task_uuid}" ]]; then
-        # Try to get latest task UUID
-        task_uuid=$(rally task list --uuids-only 2>/dev/null | tail -1) || true
+        # Fall back to a TAG-SCOPED lookup, not `rally task list --uuids-only |
+        # tail -1`. The bare-list fallback returns the most recent task overall,
+        # so if THIS task failed to start it would misattribute a previous (or
+        # another service's) task's results to ${service}. Scoping by our unique
+        # tag means a miss yields an empty UUID and an honest "FAILED to start"
+        # rather than a wrong-but-green result.
+        task_uuid=$(rally task list --tag "${task_tag}" --uuids-only 2>/dev/null | tail -1) || true
     fi
 
     if [[ -n "${task_uuid}" ]]; then
@@ -259,13 +300,21 @@ build_summary() {
                 # Parse Rally JSON results
                 svc_status="passed"
 
-                # Extract per-scenario metrics using Rally's actual JSON structure
+                # Extract per-scenario metrics using Rally's actual JSON structure.
+                # first_error: the message of the first failed iteration, so the
+                # dashboard modal can show WHY a scenario failed without a shell
+                # in. Rally iteration errors are arrays [type, message, traceback];
+                # take .error[1] (message) and fall back to .error[0] defensively
+                # (older/edge shapes may carry a single element). Truncated to 300
+                # chars server-side so summaries stay small. Empty string for a
+                # passing scenario (the dashboard hides the line when empty).
                 scenarios_detail=$(jq -c '
                     [.[] | {
                         name: .key.name,
                         duration: .full_duration,
                         iterations: (if (.result | length) > 0 then (.result | length) else (.key.kw.runner.times // 0) end),
                         failures: ([.result[]? | select(.error | length > 0)] | length),
+                        first_error: (([.result[]? | select(.error | length > 0)][0].error // []) | (.[1] // .[0] // "") | tostring | .[0:300]),
                         sla: (([.sla[] | select(.success == true)] | length) == ([.sla[]] | length))
                     }]
                 ' "${result_file}" 2>/dev/null) || scenarios_detail="[]"
@@ -319,12 +368,19 @@ build_summary() {
 # A run counts as "passed" only when it has services, no top-level error,
 # and every service passed -- a copy of ALL_GREEN_PREDICATE in announce.sh;
 # keep the two in sync.
+#
+# The computed pass/fail is exported in the RUN_SMOKE_STATUS global so main()
+# can hand the same value to notify.sh without re-deriving the predicate a
+# third time (notify.sh is intentionally predicate-free; it just compares the
+# status it is given against the last-notified one).
+RUN_SMOKE_STATUS="failed"
 record_smoke_result() {
     local status
     status=$(jq -r '
         if (.services | length) > 0 and ((.error // null) == null)
            and (.services | to_entries | all(.value.status == "passed"))
         then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
+    RUN_SMOKE_STATUS="${status}"
 
     [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
 
@@ -350,8 +406,11 @@ record_smoke_result() {
         return 0
     fi
 
-    # Keep the published uptime in sync even on paths that exit before
-    # publish_dashboard_files() runs (e.g. deployment setup failure).
+    # Keep the published uptime in sync directly. The deployment-failure path
+    # now calls publish_dashboard_files() right after this (so results.json is
+    # rewritten there too), but this standalone sync is retained so a direct
+    # `record_smoke_result` invocation -- and any future early-exit path -- still
+    # refreshes an existing results.json without depending on a later publish.
     local results_file="${RESULTS_DIR}/results.json"
     [[ -f "${results_file}" ]] || return 0
     if jq --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
@@ -426,6 +485,8 @@ publish_dashboard_files() {
 prune_old_results() {
     log "Pruning results older than ${RETENTION_DAYS} days..."
     find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+    # The provenance ledger is pruned on its own longer window (see below).
+    log "Pruning Rally project ledger older than ${PROVENANCE_RETENTION_DAYS} days..."
     prune_rally_project_ledger
     log "Pruning complete"
 }
@@ -433,8 +494,18 @@ prune_old_results() {
 prune_rally_project_ledger() {
     [[ -f "${RALLY_PROJECT_LEDGER_FILE}" ]] || return 0
 
+    # Prune on PROVENANCE_RETENTION_DAYS (default 90), NOT RETENTION_DAYS (7).
+    # This ledger is the SOLE authorization basis for auto_purge_rgw:
+    # rgw_classify_owner greps it, and unknown-owner orphans are never purged
+    # (fail-closed). Pruning at the 7-day run-directory window would silently
+    # degrade any RGW orphan that outlives it (container downtime, RGW creds
+    # added after the fact, repeated fail-closed scan errors) from
+    # rally_owned to unknown_owner -- RallyRgwOrphanedUsers would then fire
+    # forever until a human intervenes. Decoupled for the same reason
+    # smoke_history.json is pruned by UPTIME_WINDOW_DAYS rather than the
+    # run-directory retention window (CLAUDE.md "Uptime Tracking").
     local cutoff
-    cutoff=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
+    cutoff=$(date -u -d "${PROVENANCE_RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
         log "Skipping Rally project ledger pruning (date arithmetic unavailable)"
         return 0
     }
@@ -554,6 +625,36 @@ auto_purge_rgw() {
 }
 
 # --------------------------------------------------------------------------
+# Run-progress state (run_state.json)
+# --------------------------------------------------------------------------
+# Surfaces "a Rally run is in progress" to the dashboard (a small pulsing chip)
+# so the multi-minute run doesn't look like a stale/hung dashboard. Written
+# atomically (tmp+mv) like every other file-drop. Only ever touched by the
+# process that HOLDS the flock: write_run_state_running is called immediately
+# after flock succeeds, and the EXIT trap is installed only after that, so the
+# flock-contention path (early `exit 0` before we own the lock) never writes
+# idle and clobbers the winning run's "running" state.
+write_run_state_running() {
+    printf '{"state":"running","started_at":"%s","timestamp":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIMESTAMP}" \
+        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
+        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+}
+
+# EXIT-trap handler: flips state back to idle on normal exit, the
+# deployment_setup_failed `exit 1`, and signals. Best-effort and never fails the
+# run (the trap fires during shutdown). Safe to clobber here because we only
+# reach the trap-install point while holding the flock.
+write_run_state_idle() {
+    printf '{"state":"idle","finished_at":"%s"}\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
+        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+}
+
+# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
@@ -564,6 +665,13 @@ main() {
     exec 200>"${LOCKFILE}"
     flock -n 200 || { log "Another run is already in progress, exiting."; exit 0; }
     RUN_START_EPOCH=$(date +%s)
+
+    # We now own the flock. Mark the run in progress, THEN install the EXIT trap
+    # that resets to idle -- in this order so the early `exit 0` above (lock
+    # contention, before we owned the lock) cannot trip the trap and overwrite
+    # the other process's "running" state.
+    write_run_state_running
+    trap write_run_state_idle EXIT
 
     mkdir -p "${RUN_DIR}"
 
@@ -592,6 +700,16 @@ main() {
         cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
         # Count the aborted run against smoke-test uptime.
         record_smoke_result
+        # Publish so results.json/history.json reflect the failure instead of
+        # showing the last green run. getRunStatus in the dashboard treats the
+        # empty-services + .error shape as failed (it no longer renders
+        # "All Healthy"), so a full publish here is correct and honest. The
+        # failure summary written to ${RUN_DIR}/summary.json above is picked up
+        # by history.json's find, so the run also shows as a failed timeline cell.
+        publish_dashboard_files
+        # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is
+        # set and the status actually changed). Never let it affect the run.
+        /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
         exit 1
     }
 
@@ -618,10 +736,15 @@ EOF
     # Record the run outcome in the rolling uptime ledger
     record_smoke_result
 
+    # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is set and
+    # the status actually changed since the last notification). `|| true` so a
+    # webhook failure never affects the run result.
+    /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
+
     # Auto-clear incident-type announcements when the run is unambiguously
-    # all-green. The deployment_setup_failed path above (lines 508-515)
-    # already exits 1 before reaching here, so the empty-services guard in
-    # ALL_GREEN_PREDICATE inside announce.sh primarily protects direct
+    # all-green. The deployment_setup_failed path in setup_deployment's failure
+    # branch already exits 1 before reaching here, so the empty-services guard
+    # in ALL_GREEN_PREDICATE inside announce.sh primarily protects direct
     # `docker exec` invocations against a stale latest_summary.json — not the
     # normal cron flow. It also stays load-bearing if a future refactor
     # removes the early exit.

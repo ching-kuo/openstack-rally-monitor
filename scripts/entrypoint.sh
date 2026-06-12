@@ -72,21 +72,34 @@ if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RAL
 fi
 unset _RALLY_UID _RESULTS_UID
 
-# Create a seed summary if none exists (so dashboard works on first boot)
+# Create a seed summary if none exists (so dashboard works on first boot).
+# Generate the pending cards from RALLY_SERVICES rather than a hardcoded six so a
+# trimmed deployment (e.g. a Swift-less cloud) doesn't show a phantom pending
+# card forever. The normalization here -- split on commas, lowercase, strip ALL
+# whitespace, drop empty segments, dedupe preserving first-seen order -- mirrors
+# parse_rally_services in run_tests.sh and api_health_check.py; keep the three in
+# sync. An unset/empty value (or one that normalizes to nothing) falls back to
+# the same default. Seed-only-if-missing semantics are preserved.
+DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
-    cat > "${RESULTS_DIR}/latest_summary.json" <<'EOF_SUMMARY'
-{
-    "timestamp": "waiting_for_first_run",
-    "services": {
-        "keystone": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "nova": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "neutron": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "glance": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "cinder": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []},
-        "swift": {"status": "pending", "duration": 0, "total_iterations": 0, "failed_iterations": 0, "sla_passed": true, "scenarios": []}
-    }
-}
-EOF_SUMMARY
+    jq -n \
+        --arg raw "${RALLY_SERVICES:-${DEFAULT_RALLY_SERVICES}}" \
+        --arg default "${DEFAULT_RALLY_SERVICES}" \
+        '
+        def normalize($s):
+            ($s | split(",") | map(ascii_downcase | gsub("\\s"; "")) | map(select(. != ""))
+             | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end));
+        (normalize($raw)) as $parsed
+        | (if ($parsed | length) > 0 then $parsed else normalize($default) end) as $services
+        | {
+            timestamp: "waiting_for_first_run",
+            services: ($services
+                | map({(.): {status: "pending", duration: 0, total_iterations: 0,
+                             failed_iterations: 0, sla_passed: true, scenarios: []}})
+                | add)
+          }' \
+        > "${RESULTS_DIR}/latest_summary.json.tmp" \
+        && mv "${RESULTS_DIR}/latest_summary.json.tmp" "${RESULTS_DIR}/latest_summary.json"
     log "Created seed summary"
 fi
 
@@ -141,6 +154,17 @@ if [[ ! -f "${RESULTS_DIR}/health_history.json" ]]; then
     log "Created seed health_history.json"
 fi
 
+# Reset run-progress state to idle on EVERY boot (not just when missing). A run
+# that was SIGKILL'd by a container stop/crash would have left state="running"
+# in the persistent volume; nothing else would clear it, so the dashboard would
+# show a phantom "Test run in progress" forever. The running run is necessarily
+# dead after a restart, so idle is always correct here. run_tests.sh flips it
+# back to "running" under its flock when a real run starts.
+echo '{"state":"idle","finished_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' \
+    > "${RESULTS_DIR}/run_state.json.tmp" \
+    && mv "${RESULTS_DIR}/run_state.json.tmp" "${RESULTS_DIR}/run_state.json"
+log "Reset run_state.json to idle"
+
 # Symlink JSON data files into /dashboard so the HTTP server can serve them.
 # Recreated on every startup since /dashboard is ephemeral (not a volume).
 ln -sf "${RESULTS_DIR}/results.json"            /dashboard/results.json
@@ -151,6 +175,15 @@ ln -sf "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
 # appears lazily on the first announce.sh post. serve.py's target.exists()
 # check 404s on the dangling symlink until then.
 ln -sf "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
+# Run-progress state, seeded to idle just above. Same lazy/atomic pattern.
+ln -sf "${RESULTS_DIR}/run_state.json"          /dashboard/run_state.json
+# Expose per-run directories so the dashboard can link to the generated Rally
+# HTML reports (/dashboard/runs/<TIMESTAMP>/<service>.html). serve.py gates this
+# behind a strict regex + RESULTS_ROOT containment, so the symlink only widens
+# what that allowlist branch explicitly permits. The source tree ships no
+# dashboard/runs, so this is a plain symlink; `-n` keeps a re-run from nesting a
+# link inside a pre-existing one.
+ln -sfn "${RESULTS_DIR}"                        /dashboard/runs
 # `ln -sfn` cannot overwrite an existing directory, so if the image was built
 # with a preview `dashboard/themes/custom/` staged in the source tree (e.g.
 # operator-side scaffolding), the symlink would silently turn into a child
@@ -195,12 +228,14 @@ RALLY_ENV_VARS=(
     OS_IDENTITY_API_VERSION OS_REGION_NAME
     OS_CACERT OS_CERT OS_KEY OS_INSECURE
     OS_AUTH_TYPE OS_ENDPOINT_TYPE OS_INTERFACE
-    RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS
+    RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS RALLY_SERVICES
     RALLY_NOVA_FLAVOR RALLY_NOVA_IMAGE RALLY_NEUTRON_NETWORK_CIDR RALLY_DEBUG
     RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION
     RALLY_CONFIG_DIR
     RESULTS_DIR EXPORTER_PORT DASHBOARD_PORT HEALTH_CHECK_INTERVAL
-    UPTIME_WINDOW_DAYS
+    HEALTH_LATENCY_WARN_MS
+    UPTIME_WINDOW_DAYS PROVENANCE_RETENTION_DAYS
+    NOTIFY_WEBHOOK_URL NOTIFY_FORMAT NOTIFY_DASHBOARD_URL
 )
 {
     for k in "${RALLY_ENV_VARS[@]}"; do

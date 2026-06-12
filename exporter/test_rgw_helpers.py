@@ -286,7 +286,13 @@ def test_auto_purge_rgw_skips_user_on_bucket_failure(tmp_path):
 
 def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
     script = RUN_TESTS.read_text(encoding="utf-8")
-    main_body = script.split("# Main", 1)[1]
+    # Scope to the normal completion flow only. The deployment-failure path
+    # inside main() now also calls publish_dashboard_files (before auto_purge),
+    # so anchor on the normal-flow auto-purge call-site comment, which exists
+    # only after that failure path, to avoid matching the earlier call.
+    main_body = script.split(
+        "# Auto-purge rally-owned RGW orphans before writing cleanup metrics", 1
+    )[1]
 
     assert main_body.index("auto_purge_rgw") < main_body.index("check_cleanup")
     assert main_body.index("check_cleanup") < main_body.index("publish_dashboard_files")

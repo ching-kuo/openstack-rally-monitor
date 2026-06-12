@@ -147,6 +147,13 @@ footer {
     background: rgba(239, 68, 68, 0.08);
 }
 
+/* Degraded: the API is reachable but at least one service is slow. Amber,
+   distinct from the red unhealthy (full outage) state. */
+.health-badge.degraded {
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.08);
+}
+
 .health-dot {
     width: 8px;
     height: 8px;
@@ -167,6 +174,12 @@ footer {
     animation: dot-pulse 1s ease-in-out infinite;
 }
 
+.health-badge.degraded .health-dot {
+    background: var(--color-warning);
+    box-shadow: 0 0 8px var(--color-warning);
+    animation: dot-pulse 1.5s ease-in-out infinite;
+}
+
 @keyframes dot-pulse {
 
     0%,
@@ -177,6 +190,34 @@ footer {
     50% {
         opacity: 0.4;
     }
+}
+
+/* "Test run in progress" chip. Shown next to the health badge only while a
+   Rally run is running; reuses the badge pill shape and the brand-secondary
+   token, with a gently pulsing dot to read as live activity (mirrors the
+   .live-dot treatment on the service cards). */
+.run-state-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.9rem;
+    border-radius: 100px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-brand-secondary);
+    background: var(--surface-glass);
+    border: 1px solid var(--border-glass);
+    white-space: nowrap;
+}
+
+.run-state-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-brand-secondary);
+    box-shadow: 0 0 8px var(--color-brand-secondary);
+    animation: dot-pulse 1.4s ease-in-out infinite;
 }
 
 .last-run {
@@ -202,6 +243,28 @@ section {
     font-size: 1.1rem;
     font-weight: 600;
     color: var(--color-text-primary);
+}
+
+/* Heading + data-driven covered-span subhead, grouped so the section header's
+   space-between keeps the title block on the left and the badges on the right.
+   The span text (e.g. "Last 6 days · 36 runs") is filled by app.js from the
+   first/last run timestamps because the dashboard does not know
+   RALLY_RESULTS_RETENTION_DAYS and must not hardcode "7-Day". */
+.section-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+
+.section-subhead {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    font-weight: 400;
+}
+
+.section-subhead:empty {
+    display: none;
 }
 
 .section-badge {
@@ -280,9 +343,34 @@ section {
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.3);
 }
 
+/* Non-color signal for failure (WCAG 1.4.1), extending the announcement
+   banner's "[TYPE] label so color is not the sole signal" principle to the
+   timeline. A small ✕ centered in the cell; the run timeline's cells are wide
+   enough (min 2px, flex-grown) to carry a glyph. The health-timeline cells
+   (.htl-cell) are physically too narrow (~2px) for a glyph and are
+   deliberately left without one. The glyph never overflows narrow cells. */
+.timeline-cell.failed::after {
+    content: '\2715';
+    /* ✕ MULTIPLICATION X */
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    color: rgba(255, 255, 255, 0.85);
+    pointer-events: none;
+    overflow: hidden;
+}
+
+/* Pending: distinct shade plus dashed outline; reduced opacity makes it
+   further distinguishable from passed/failed without relying on hue alone. */
 .timeline-cell.pending {
     background: rgba(100, 116, 139, 0.3);
     border: 1px dashed rgba(100, 116, 139, 0.4);
+    opacity: 0.7;
 }
 
 /* Selected cell ring (click-to-inspect historical run) */
@@ -539,6 +627,18 @@ section {
     color: var(--color-failure);
 }
 
+/* Degraded: reachable but slow. Subtle amber so it reads as a caution, not an
+   outage. Gentle pulse to distinguish it from the steady (non-pulsing) down. */
+.live-indicator.degraded .live-dot {
+    background: var(--color-warning);
+    box-shadow: 0 0 5px rgba(245, 158, 11, 0.7);
+    animation: livepulse 2.5s ease-in-out infinite;
+}
+
+.live-indicator.degraded {
+    color: var(--color-warning);
+}
+
 .live-indicator.unknown .live-dot {
     background: var(--color-pending);
 }
@@ -748,6 +848,37 @@ section {
 .scenario-stat-label {
     font-size: 0.6rem;
     color: var(--color-text-muted);
+}
+
+/* First failed-iteration error excerpt, rendered (escaped) beneath its scenario
+   row. Monospace so a truncated stack/message reads clearly; failure-tinted
+   background using the existing failure token. */
+.scenario-error {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.4;
+    color: var(--color-failure);
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    border-radius: var(--radius-sm);
+    padding: 0.5rem 0.75rem;
+    margin: -0.25rem 0 0.5rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* Link to the full self-contained Rally HTML report (opens in a new tab). */
+.report-link {
+    display: inline-block;
+    margin-top: 0.5rem;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--color-brand-secondary);
+    text-decoration: none;
+}
+
+.report-link:hover {
+    text-decoration: underline;
 }
 
 /* --- Operator Announcement Banner --- */
@@ -1072,6 +1203,13 @@ section {
 .htl-cell.down {
     background: var(--gradient-failure);
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+
+/* Degraded: reachable but slow (a service exceeded HEALTH_LATENCY_WARN_MS).
+   Amber, between up (green) and down (red). Counts as up for uptime math. */
+.htl-cell.degraded {
+    background: var(--color-warning);
+    box-shadow: 0 0 5px rgba(245, 158, 11, 0.35);
 }
 
 .htl-cell.unknown {
