@@ -467,6 +467,31 @@ class TestHealthMetrics:
         exporter.update_metrics()
         assert "rally_api_overall_up 0.0" in metrics_output()
 
+    def test_degraded_service_counts_as_up(self, results_dir):
+        """degraded means reachable-but-slow: rally_api_up is 1 (slowness shows
+        only in rally_api_latency_milliseconds)."""
+        (results_dir / "health.json").write_text(json.dumps(make_health(
+            overall="degraded",
+            services={
+                "keystone": {"status": "up", "latency_ms": 120, "checked_at": "2024-01-01T12:00:00Z"},
+                "nova": {"status": "degraded", "latency_ms": 6200, "checked_at": "2024-01-01T12:00:00Z"},
+                "cinder": {"status": "down", "latency_ms": 30000, "checked_at": "2024-01-01T12:00:00Z"},
+            },
+        )))
+        exporter.update_metrics()
+        output = metrics_output()
+        assert 'rally_api_up{service="keystone"} 1.0' in output
+        assert 'rally_api_up{service="nova"} 1.0' in output  # degraded -> up
+        assert 'rally_api_up{service="cinder"} 0.0' in output  # down -> 0
+        # The slow service is still visible via its latency gauge.
+        assert 'rally_api_latency_milliseconds{service="nova"} 6200.0' in output
+
+    def test_overall_degraded_sets_one(self, results_dir):
+        """overall degraded -> rally_api_overall_up 1 (reachable)."""
+        (results_dir / "health.json").write_text(json.dumps(make_health(overall="degraded")))
+        exporter.update_metrics()
+        assert "rally_api_overall_up 1.0" in metrics_output()
+
     def test_overall_unknown_does_not_write_sentinel(self, results_dir):
         """A seed/unknown overall must not be set to 1/0 — the gauge is left
         untouched. (Unlabeled gauges always emit a sample, so true absence is

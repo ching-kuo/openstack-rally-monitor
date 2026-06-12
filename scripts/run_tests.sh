@@ -9,6 +9,9 @@ set -euo pipefail
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 RALLY_CONFIG_DIR="${RALLY_CONFIG_DIR:-/rally/config}"
 RETENTION_DAYS="${RALLY_RESULTS_RETENTION_DAYS:-7}"
+# The RGW provenance ledger is pruned on its OWN, longer window -- see
+# prune_rally_project_ledger for the rationale.
+PROVENANCE_RETENTION_DAYS="${PROVENANCE_RETENTION_DAYS:-90}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
@@ -161,6 +164,11 @@ run_service_tests() {
     log "Running ${service} scenarios..."
     local task_uuid=""
     local log_file="${RUN_DIR}/${service}.log"
+    # Tag every task with a run+service-unique marker so we can resolve its UUID
+    # by tag below. Verified supported on `rally task start` and `rally task
+    # list` in rally 5.0.1 (rally/cli/commands/task.py: --tag on start line 182,
+    # on list line 558; --tag composes with --uuids-only).
+    local task_tag="run-${TIMESTAMP}-${service}"
     local tracker_seen_file
     tracker_seen_file=$(mktemp)
     if ! list_rally_context_project_ids > "${tracker_seen_file}"; then
@@ -171,10 +179,10 @@ run_service_tests() {
     if [[ "${RALLY_DEBUG:-false}" == "true" ]]; then
         log "  DEBUG mode enabled. Full logs saving to ${log_file}"
         (
-            rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null
+            rally --debug task start "${scenario_file}" --task-args-file "${task_args_file}" --tag "${task_tag}" 2>&1 | tee "${log_file}" /dev/stderr >/dev/null
         ) &
     else
-        rally task start "${scenario_file}" --task-args-file "${task_args_file}" > "${log_file}" 2>&1 &
+        rally task start "${scenario_file}" --task-args-file "${task_args_file}" --tag "${task_tag}" > "${log_file}" 2>&1 &
     fi
 
     local task_pid=$!
@@ -205,8 +213,13 @@ run_service_tests() {
     task_uuid=$(grep -oP 'Task \K[a-f0-9-]+' "${log_file}" | head -1) || true
 
     if [[ -z "${task_uuid}" ]]; then
-        # Try to get latest task UUID
-        task_uuid=$(rally task list --uuids-only 2>/dev/null | tail -1) || true
+        # Fall back to a TAG-SCOPED lookup, not `rally task list --uuids-only |
+        # tail -1`. The bare-list fallback returns the most recent task overall,
+        # so if THIS task failed to start it would misattribute a previous (or
+        # another service's) task's results to ${service}. Scoping by our unique
+        # tag means a miss yields an empty UUID and an honest "FAILED to start"
+        # rather than a wrong-but-green result.
+        task_uuid=$(rally task list --tag "${task_tag}" --uuids-only 2>/dev/null | tail -1) || true
     fi
 
     if [[ -n "${task_uuid}" ]]; then
@@ -319,12 +332,19 @@ build_summary() {
 # A run counts as "passed" only when it has services, no top-level error,
 # and every service passed -- a copy of ALL_GREEN_PREDICATE in announce.sh;
 # keep the two in sync.
+#
+# The computed pass/fail is exported in the RUN_SMOKE_STATUS global so main()
+# can hand the same value to notify.sh without re-deriving the predicate a
+# third time (notify.sh is intentionally predicate-free; it just compares the
+# status it is given against the last-notified one).
+RUN_SMOKE_STATUS="failed"
 record_smoke_result() {
     local status
     status=$(jq -r '
         if (.services | length) > 0 and ((.error // null) == null)
            and (.services | to_entries | all(.value.status == "passed"))
         then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
+    RUN_SMOKE_STATUS="${status}"
 
     [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
 
@@ -426,6 +446,8 @@ publish_dashboard_files() {
 prune_old_results() {
     log "Pruning results older than ${RETENTION_DAYS} days..."
     find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+    # The provenance ledger is pruned on its own longer window (see below).
+    log "Pruning Rally project ledger older than ${PROVENANCE_RETENTION_DAYS} days..."
     prune_rally_project_ledger
     log "Pruning complete"
 }
@@ -433,8 +455,18 @@ prune_old_results() {
 prune_rally_project_ledger() {
     [[ -f "${RALLY_PROJECT_LEDGER_FILE}" ]] || return 0
 
+    # Prune on PROVENANCE_RETENTION_DAYS (default 90), NOT RETENTION_DAYS (7).
+    # This ledger is the SOLE authorization basis for auto_purge_rgw:
+    # rgw_classify_owner greps it, and unknown-owner orphans are never purged
+    # (fail-closed). Pruning at the 7-day run-directory window would silently
+    # degrade any RGW orphan that outlives it (container downtime, RGW creds
+    # added after the fact, repeated fail-closed scan errors) from
+    # rally_owned to unknown_owner -- RallyRgwOrphanedUsers would then fire
+    # forever until a human intervenes. Decoupled for the same reason
+    # smoke_history.json is pruned by UPTIME_WINDOW_DAYS rather than the
+    # run-directory retention window (CLAUDE.md "Uptime Tracking").
     local cutoff
-    cutoff=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
+    cutoff=$(date -u -d "${PROVENANCE_RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
         log "Skipping Rally project ledger pruning (date arithmetic unavailable)"
         return 0
     }
@@ -592,6 +624,9 @@ main() {
         cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
         # Count the aborted run against smoke-test uptime.
         record_smoke_result
+        # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is
+        # set and the status actually changed). Never let it affect the run.
+        /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
         exit 1
     }
 
@@ -617,6 +652,11 @@ EOF
 
     # Record the run outcome in the rolling uptime ledger
     record_smoke_result
+
+    # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is set and
+    # the status actually changed since the last notification). `|| true` so a
+    # webhook failure never affects the run result.
+    /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
 
     # Auto-clear incident-type announcements when the run is unambiguously
     # all-green. The deployment_setup_failed path above (lines 508-515)

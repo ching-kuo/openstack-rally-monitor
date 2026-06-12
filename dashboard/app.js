@@ -407,18 +407,33 @@ function updateHeader(summary, health) {
 
   const rallyStatus = getRunStatus(summary);
   const apiDown = health && health.overall === "down";
+  // Degraded = reachable but at least one service slow. It loses to a full API
+  // outage (apiDown) and to a Rally failure, but otherwise surfaces an amber
+  // header state instead of the green "All Healthy".
+  const apiDegraded = health && health.overall === "degraded";
 
-  // API health failure takes precedence over Rally run result
-  const status = apiDown ? "failed" : rallyStatus;
+  // API health failure takes precedence over the Rally run result.
+  let badgeClass;
+  let label;
+  if (apiDown) {
+    badgeClass = "unhealthy";
+    label = "API Issues Detected";
+  } else if (rallyStatus === "failed") {
+    badgeClass = "unhealthy";
+    label = "Issues Detected";
+  } else if (apiDegraded) {
+    badgeClass = "degraded";
+    label = "API Degraded";
+  } else if (rallyStatus === "passed") {
+    badgeClass = "healthy";
+    label = "All Healthy";
+  } else {
+    badgeClass = "";
+    label = "Pending";
+  }
 
-  badge.className = `health-badge ${status === "passed" ? "healthy" : status === "failed" ? "unhealthy" : ""}`;
-  text.textContent = apiDown
-    ? "API Issues Detected"
-    : status === "passed"
-      ? "All Healthy"
-      : status === "failed"
-        ? "Issues Detected"
-        : "Pending";
+  badge.className = `health-badge ${badgeClass}`;
+  text.textContent = label;
 
   lastRun.textContent = `Last run: ${formatTimestamp(summary.timestamp)}`;
 }
@@ -613,8 +628,19 @@ function renderHealthTimeline(healthHistory) {
     const downSvcs = Object.entries(check.services || {})
       .filter(([, v]) => v.status === "down")
       .map(([k]) => escapeHtml(k));
-    const detail =
-      status === "down" ? `Down: ${downSvcs.join(", ")}` : "All services up";
+    // For degraded checks, list the slow services with their latencies so the
+    // tooltip reads e.g. "Degraded: nova (6200ms)".
+    const slowSvcs = Object.entries(check.services || {})
+      .filter(([, v]) => v.status === "degraded")
+      .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
+    let detail;
+    if (status === "down") {
+      detail = `Down: ${downSvcs.join(", ")}`;
+    } else if (status === "degraded") {
+      detail = `Degraded: ${slowSvcs.join(", ")}`;
+    } else {
+      detail = "All services up";
+    }
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
@@ -649,12 +675,15 @@ function renderServiceCards(summary, history, health) {
     const svcHealth = health && health.services && health.services[name];
     const liveStatus = svcHealth ? svcHealth.status : "unknown";
     const liveLatency = svcHealth ? `${svcHealth.latency_ms}ms` : "";
+    // "degraded" = reachable but slow: keep it subtle ("API slow · 6200ms").
     const liveLabel =
       liveStatus === "up"
         ? `API live${liveLatency ? " · " + liveLatency : ""}`
-        : liveStatus === "down"
-          ? "API down"
-          : "API …";
+        : liveStatus === "degraded"
+          ? `API slow${liveLatency ? " · " + liveLatency : ""}`
+          : liveStatus === "down"
+            ? "API down"
+            : "API …";
 
     card.innerHTML = `
             <div class="card-header">

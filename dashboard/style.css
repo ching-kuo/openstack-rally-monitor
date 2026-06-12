@@ -147,6 +147,13 @@ footer {
     background: rgba(239, 68, 68, 0.08);
 }
 
+/* Degraded: the API is reachable but at least one service is slow. Amber,
+   distinct from the red unhealthy (full outage) state. */
+.health-badge.degraded {
+    border-color: rgba(245, 158, 11, 0.4);
+    background: rgba(245, 158, 11, 0.08);
+}
+
 .health-dot {
     width: 8px;
     height: 8px;
@@ -165,6 +172,12 @@ footer {
     background: var(--color-failure);
     box-shadow: 0 0 8px var(--color-failure);
     animation: dot-pulse 1s ease-in-out infinite;
+}
+
+.health-badge.degraded .health-dot {
+    background: var(--color-warning);
+    box-shadow: 0 0 8px var(--color-warning);
+    animation: dot-pulse 1.5s ease-in-out infinite;
 }
 
 @keyframes dot-pulse {
@@ -584,6 +597,18 @@ section {
 
 .live-indicator.down {
     color: var(--color-failure);
+}
+
+/* Degraded: reachable but slow. Subtle amber so it reads as a caution, not an
+   outage. Gentle pulse to distinguish it from the steady (non-pulsing) down. */
+.live-indicator.degraded .live-dot {
+    background: var(--color-warning);
+    box-shadow: 0 0 5px rgba(245, 158, 11, 0.7);
+    animation: livepulse 2.5s ease-in-out infinite;
+}
+
+.live-indicator.degraded {
+    color: var(--color-warning);
 }
 
 .live-indicator.unknown .live-dot {
@@ -1119,6 +1144,13 @@ section {
 .htl-cell.down {
     background: var(--gradient-failure);
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+
+/* Degraded: reachable but slow (a service exceeded HEALTH_LATENCY_WARN_MS).
+   Amber, between up (green) and down (red). Counts as up for uptime math. */
+.htl-cell.degraded {
+    background: var(--color-warning);
+    box-shadow: 0 0 5px rgba(245, 158, 11, 0.35);
 }
 
 .htl-cell.unknown {

@@ -148,14 +148,25 @@ rally_run_duration_seconds = Gauge(
 
 rally_api_up = Gauge(
     "rally_api_up",
-    "Whether the API health check for a service reported up (1) or down (0)",
+    (
+        "Whether the API health check for a service reported reachable (1) or "
+        'down (0). "degraded" (the service answered but exceeded '
+        "HEALTH_LATENCY_WARN_MS) counts as up (1) — this gauge measures "
+        "reachability, not speed. Slowness shows up in "
+        "rally_api_latency_milliseconds, not here."
+    ),
     ["service"],
     registry=registry,
 )
 
 rally_api_latency_milliseconds = Gauge(
     "rally_api_latency_milliseconds",
-    "Latency in milliseconds of the last API health check for a service",
+    (
+        "Latency in milliseconds of the last API health check for a service. "
+        "This is where a degraded (slow-but-reachable) service is visible; "
+        "rally_api_up stays 1 for degraded, so alert on this gauge for "
+        "latency-based warnings."
+    ),
     ["service"],
     registry=registry,
 )
@@ -163,7 +174,9 @@ rally_api_latency_milliseconds = Gauge(
 rally_api_overall_up = Gauge(
     "rally_api_overall_up",
     (
-        "Whether the overall API health check reported up (1) or down (0). "
+        "Whether the overall API health check reported reachable (1) or down "
+        '(0). "up" and "degraded" both map to 1 (degraded means every service '
+        "answered, just slowly — see rally_api_latency_milliseconds). "
         'When overall is "unknown" or missing — e.g. the seed health.json on '
         "a fresh volume before the first health check — this gauge is not "
         "updated (no sentinel value is written). Because it is an unlabeled "
@@ -447,17 +460,22 @@ def _apply_health_metrics(health: dict) -> None:
             if not isinstance(info, dict):
                 continue
             status = info.get("status")
-            rally_api_up.labels(service=service).set(1 if status == "up" else 0)
+            # "degraded" (reachable but slow) counts as up: this gauge measures
+            # reachability. Only an explicit "down" is 0. Slowness is visible in
+            # rally_api_latency_milliseconds below.
+            rally_api_up.labels(service=service).set(0 if status == "down" else 1)
             latency = info.get("latency_ms")
             if isinstance(latency, (int, float)) and not isinstance(latency, bool):
                 rally_api_latency_milliseconds.labels(service=service).set(latency)
 
-    # Overall: set 1/0 only for an explicit up/down. For "unknown"/missing
-    # (e.g. the seed file) we write no sentinel — the gauge keeps its prior
-    # value (0.0 before any real signal). See the gauge docstring: per-service
-    # rally_api_up is the genuinely-absent-until-checked signal for alerting.
+    # Overall: set 1/0 only for an explicit up/down/degraded. "up" and
+    # "degraded" both map to 1 (reachable); "down" maps to 0. For
+    # "unknown"/missing (e.g. the seed file) we write no sentinel — the gauge
+    # keeps its prior value (0.0 before any real signal). See the gauge
+    # docstring: per-service rally_api_up is the genuinely-absent-until-checked
+    # signal for alerting.
     overall = health.get("overall")
-    if overall == "up":
+    if overall in ("up", "degraded"):
         rally_api_overall_up.set(1)
     elif overall == "down":
         rally_api_overall_up.set(0)

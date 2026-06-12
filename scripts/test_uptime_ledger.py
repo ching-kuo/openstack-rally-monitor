@@ -217,6 +217,34 @@ def test_health_filter_appends_and_computes_uptime(tmp_path):
     }
 
 
+def test_health_filter_counts_degraded_as_up(tmp_path):
+    # Uptime measures reachability: a "degraded" check (reachable but slow)
+    # counts as up. Here 2 of 3 are reachable (up + degraded), 1 is down.
+    history = {
+        "checks": [
+            {"timestamp": iso_ts(2), "overall": "down"},
+            {"timestamp": iso_ts(1), "overall": "degraded"},
+        ]
+    }
+    current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
+    out = run_health_filter(tmp_path, history, current)
+
+    assert out["uptime"]["checks_total"] == 3
+    assert out["uptime"]["checks_up"] == 2  # up + degraded, not the down
+    assert out["uptime"]["percent"] == 66.67
+
+
+def test_health_filter_all_degraded_is_full_uptime(tmp_path):
+    # Every check degraded -> 100% uptime (the API was always reachable).
+    history = {"checks": [{"timestamp": iso_ts(1), "overall": "degraded"}]}
+    current = {"timestamp": iso_ts(0), "overall": "degraded", "services": {}}
+    out = run_health_filter(tmp_path, history, current)
+
+    assert out["uptime"]["checks_total"] == 2
+    assert out["uptime"]["checks_up"] == 2
+    assert out["uptime"]["percent"] == 100
+
+
 def test_health_filter_excludes_checks_outside_window(tmp_path):
     history = {"checks": [{"timestamp": iso_ts(45), "overall": "down"}]}
     current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
