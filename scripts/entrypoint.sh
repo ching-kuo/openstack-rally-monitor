@@ -195,6 +195,22 @@ log "Custom theme slot: ${RESULTS_DIR}/branding"
 log "Dashboard symlinks updated"
 
 # --------------------------------------------------------------------------
+# Heal historical Rally reports
+# --------------------------------------------------------------------------
+# Pre-upgrade run directories still hold AngularJS reports (old `rally task
+# report` output) that render broken under the strict CSP because their CDN
+# scripts are blocked. backfill_reports.sh re-renders them from the persisted
+# per-run JSON via render_report.py. Idempotent (skips already-migrated reports)
+# and best-effort. Backgrounded as the rally user so it never delays
+# dashboard/exporter startup and keeps regenerated files volume-owned.
+log "Backfilling historical Rally reports (background)..."
+# %q-quote RESULTS_DIR so a value with shell metacharacters can't break out of
+# the su -c command string (same hardening as the rally_env export below).
+_safe_results_dir="$(printf '%q' "${RESULTS_DIR}")"
+su -s /bin/bash rally -c "RESULTS_DIR=${_safe_results_dir} /scripts/backfill_reports.sh" &
+unset _safe_results_dir
+
+# --------------------------------------------------------------------------
 # Start Prometheus Exporter (background)
 # --------------------------------------------------------------------------
 log "Starting Prometheus exporter on port ${EXPORTER_PORT}..."
