@@ -12,7 +12,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Webhook Notifications** — Optional outbound webhook on smoke-status transitions (`passed`↔`failed`), with generic / Slack / Discord payload formats
 - **7-Day History** — Results retained with automatic pruning
 - **Uptime Percentages** — API health and smoke-test uptime over a configurable window (default 30 days), shown as dashboard badges
-- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to the full Rally HTML report, and a live "test run in progress" indicator
+- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to a self-contained per-run full report (themed to match, works offline), and a live "test run in progress" indicator
 
 ## Dashboard Customization
 
@@ -393,6 +393,7 @@ openstack-rally-monitor/
 │   ├── cleanup_monitor.sh
 │   ├── purge_orphans.sh
 │   ├── rgw_helpers.sh
+│   ├── render_report.py
 │   └── patch_rally.py
 ├── exporter/
 │   ├── rally_exporter.py
@@ -407,6 +408,8 @@ openstack-rally-monitor/
 │   ├── index.html
 │   ├── style.css
 │   ├── app.js
+│   ├── report.css
+│   ├── report.js
 │   ├── serve.py
 │   ├── themes/
 │   │   └── default/

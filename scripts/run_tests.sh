@@ -254,8 +254,14 @@ run_service_tests() {
         # Export JSON results
         rally task results "${task_uuid}" > "${result_file}" 2>/dev/null || true
 
-        # Generate HTML report
-        rally task report "${task_uuid}" --out "${html_file}" 2>/dev/null || true
+        # Render the self-contained, dashboard-themed HTML report from the JSON
+        # results. Replaces `rally task report`, whose AngularJS page pulled
+        # d3/nvd3/Angular from public CDNs (breaking offline and forcing a
+        # relaxed CSP/sandbox in serve.py) and never matched the dashboard.
+        # render_report.py is best-effort: a malformed/empty result file still
+        # yields a valid empty-state report so the dashboard link never 404s.
+        python3 "${SCRIPT_DIR}/render_report.py" "${result_file}" "${html_file}" \
+            --service "${service}" --timestamp "${TIMESTAMP}" 2>/dev/null || true
 
         # Get task status
         local status

@@ -1,0 +1,409 @@
+/* ==============================================================================
+   Rally OpenStack Monitor - Full report styles
+   Themed to match the dashboard (style.css + theme tokens). Loaded only by the
+   self-contained per-run reports under runs/<ts>/<service>.html. Reuses the
+   public theme tokens so a custom theme restyles reports for free.
+   ============================================================================== */
+
+/* --- Header --- */
+.report-header {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 1.25rem 2rem;
+    background: var(--surface-glass);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border-glass);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.report-back {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--color-brand-secondary);
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.report-back:hover {
+    text-decoration: underline;
+}
+
+.report-title {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.report-service {
+    font-size: 1.1rem;
+    font-weight: 700;
+    text-transform: capitalize;
+}
+
+.report-timestamp {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    color: var(--color-text-secondary);
+}
+
+/* --- Layout --- */
+.report-layout {
+    display: flex;
+    align-items: flex-start;
+    gap: 1.5rem;
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 1.5rem 2rem;
+    position: relative;
+    z-index: 1;
+}
+
+.report-nav {
+    flex: 0 0 260px;
+    position: sticky;
+    top: 88px;
+    max-height: calc(100vh - 110px);
+    overflow-y: auto;
+    background: var(--color-surface-card);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-lg);
+    backdrop-filter: blur(10px);
+    padding: 0.75rem;
+}
+
+.report-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* --- Nav items --- */
+.report-nav-fixed {
+    border-bottom: 1px solid var(--border-glass);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+
+.report-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--color-text-secondary);
+    font-family: var(--font);
+    font-size: 0.82rem;
+    padding: 0.45rem 0.6rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.report-nav-item:hover {
+    background: var(--surface-glass);
+    color: var(--color-text-primary);
+}
+
+.report-nav-item.active {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--color-text-primary);
+    box-shadow: inset 2px 0 0 var(--color-brand-primary);
+}
+
+.report-nav-group {
+    margin-top: 0.25rem;
+}
+
+.report-nav-grouphead {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    color: var(--color-text-primary);
+    font-family: var(--font);
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 0.4rem 0.5rem;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+
+.report-nav-grouphead:hover {
+    background: var(--surface-glass);
+}
+
+.report-nav-caret {
+    display: inline-block;
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+    transition: transform var(--transition);
+}
+
+.report-nav-group.collapsed .report-nav-caret {
+    transform: rotate(-90deg);
+}
+
+.report-nav-group.collapsed .report-nav-list {
+    display: none;
+}
+
+.report-nav-list {
+    padding-left: 0.5rem;
+}
+
+.report-nav-scenario {
+    font-size: 0.78rem;
+}
+
+.report-nav-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--color-pending);
+}
+
+.report-nav-dot.status-passed {
+    background: var(--color-success);
+    box-shadow: 0 0 6px var(--color-success);
+}
+
+.report-nav-dot.status-failed {
+    background: var(--color-failure);
+    box-shadow: 0 0 6px var(--color-failure);
+}
+
+.report-nav-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* --- Main content --- */
+.report-h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin-bottom: 1rem;
+    word-break: break-word;
+}
+
+.report-h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    margin: 1.75rem 0 0.75rem;
+}
+
+.report-scenario-head {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.report-desc {
+    color: var(--color-text-secondary);
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+}
+
+.report-empty {
+    color: var(--color-text-muted);
+    font-style: italic;
+}
+
+/* --- Tables --- */
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--color-surface-card);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    font-size: 0.82rem;
+}
+
+.report-table th,
+.report-table td {
+    text-align: left;
+    padding: 0.6rem 0.85rem;
+    border-bottom: 1px solid var(--border-glass);
+    vertical-align: top;
+}
+
+.report-table th {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    background: var(--surface-glass);
+}
+
+.report-table tbody tr:last-child td {
+    border-bottom: none;
+}
+
+.report-table tbody tr:hover {
+    background: var(--surface-glass);
+}
+
+.report-cell-name {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.76rem;
+    word-break: break-all;
+}
+
+.report-cell-detail {
+    color: var(--color-text-secondary);
+    font-size: 0.76rem;
+}
+
+.report-err {
+    color: var(--color-failure);
+    font-weight: 700;
+}
+
+/* --- Pills --- */
+.report-pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.6rem;
+    border-radius: 100px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.report-pill.status-passed {
+    background: rgba(16, 185, 129, 0.12);
+    color: var(--color-success);
+}
+
+.report-pill.status-failed {
+    background: rgba(239, 68, 68, 0.12);
+    color: var(--color-failure);
+}
+
+/* --- Stat tiles --- */
+.report-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0;
+}
+
+.report-stat {
+    background: var(--surface-glass);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    padding: 0.75rem 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.report-stat-label {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-text-muted);
+}
+
+.report-stat-value {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+/* --- Chart --- */
+.report-chart-wrap {
+    background: var(--color-surface-card);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-lg);
+    padding: 1rem;
+    height: 320px;
+}
+
+/* --- JSON / config --- */
+.report-json {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.76rem;
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+    background: var(--color-surface-raised);
+    border: 1px solid var(--border-glass);
+    border-radius: var(--radius-md);
+    padding: 1rem;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+/* --- Errors --- */
+.report-error {
+    background: rgba(239, 68, 68, 0.06);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    border-radius: var(--radius-md);
+    margin-bottom: 0.6rem;
+    padding: 0.5rem 0.75rem;
+}
+
+.report-error summary {
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    font-size: 0.8rem;
+}
+
+.report-error-type {
+    font-weight: 700;
+    color: var(--color-failure);
+}
+
+.report-error-count {
+    font-size: 0.7rem;
+    color: var(--color-text-muted);
+}
+
+.report-error-msg {
+    color: var(--color-text-secondary);
+    word-break: break-word;
+}
+
+.report-trace {
+    margin-top: 0.6rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+/* --- Responsive --- */
+@media (max-width: 768px) {
+    .report-layout {
+        flex-direction: column;
+        padding: 1rem;
+    }
+
+    .report-nav {
+        position: static;
+        flex-basis: auto;
+        width: 100%;
+        max-height: none;
+    }
+}

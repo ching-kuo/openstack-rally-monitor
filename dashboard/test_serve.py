@@ -82,6 +82,8 @@ class TestAllowlist:
             ("/", "index.html", "<html></html>", None),
             ("/app.js", "app.js", "// ok", None),
             ("/style.css", "style.css", "body {}", None),
+            ("/report.js", "report.js", "// report", None),
+            ("/report.css", "report.css", ".report {}", None),
         ],
     )
     def test_allowed_static_files_are_served(
@@ -321,10 +323,13 @@ class TestThemeAllowlist:
 # ---------------------------------------------------------------------------
 
 class TestRunReports:
-    """The fourth allowlist branch serves generated Rally reports under
+    """The fourth allowlist branch serves the self-contained themed reports under
     /results/<TIMESTAMP>/<service>.html via the /dashboard/runs -> /results
-    symlink, gated by RUN_REPORT_RE + RESULTS_ROOT containment, with a relaxed
-    per-path CSP. These tests mirror the rigor of the theme-allowlist suite."""
+    symlink, gated by RUN_REPORT_RE + RESULTS_ROOT containment. The reports are
+    now rendered by scripts/render_report.py from same-origin assets, so they
+    serve under the SAME strict CSP as every other asset -- no relaxed per-path
+    policy, no CDN origins, no sandbox. These tests mirror the rigor of the
+    theme-allowlist suite."""
 
     VALID_TS = "20260612T120000Z"
 
@@ -345,48 +350,29 @@ class TestRunReports:
         assert b"report" in body
         assert headers["content-type"].startswith("text/html")
 
-    def test_report_uses_relaxed_per_path_csp(self, server):
-        """Report responses get a dedicated CSP that permits the inline scripts
-        and the two CDN origins the default Rally template needs."""
+    def test_report_uses_the_strict_csp(self, server):
+        """Reports now carry the strict CSP: script-src is exactly 'self', with
+        no 'unsafe-inline', no CDN origins, and no sandbox directive. The report
+        executes only same-origin scripts (report.js, vendored Chart.js); its
+        data rides in a non-executable <script type=application/json> block that
+        CSP script-src does not govern."""
         base, dashboard_dir, results_dir = server
         self._make_report(results_dir, dashboard_dir, self.VALID_TS, "nova.html")
         _, headers, _ = get(base, f"/runs/{self.VALID_TS}/nova.html")
         csp = _parse_csp(headers["content-security-policy"])
-        # Relaxed exactly where the generated report needs it...
-        assert "'unsafe-inline'" in csp.get("script-src", [])
-        assert "https://ajax.googleapis.com" in csp.get("script-src", [])
-        assert "https://cdnjs.cloudflare.com" in csp.get("script-src", [])
-        assert "https://cdnjs.cloudflare.com" in csp.get("style-src", [])
-        # ...and sandboxed as defense-in-depth, while framing stays denied.
-        assert "sandbox" in csp
+        assert csp.get("script-src") == ["'self'"]
+        assert "'unsafe-inline'" not in csp.get("script-src", [])
+        assert "https://ajax.googleapis.com" not in csp.get("script-src", [])
+        assert "https://cdnjs.cloudflare.com" not in csp.get("script-src", [])
+        assert "https://cdnjs.cloudflare.com" not in csp.get("style-src", [])
+        assert "sandbox" not in csp
         assert headers["x-frame-options"] == "DENY"
 
-    def test_strict_csp_still_applies_to_dashboard_assets(self, server):
-        """The relaxed CSP must be scoped to the runs/ branch only: a normal
-        asset on the same server keeps script-src 'self' with no inline/CDN."""
-        base, dashboard_dir, results_dir = server
-        (dashboard_dir / "index.html").write_text("<html></html>")
-        self._make_report(results_dir, dashboard_dir, self.VALID_TS, "nova.html")
-
-        _, report_headers, _ = get(base, f"/runs/{self.VALID_TS}/nova.html")
-        _, index_headers, _ = get(base, "/")
-
-        report_csp = _parse_csp(report_headers["content-security-policy"])
-        index_csp = _parse_csp(index_headers["content-security-policy"])
-
-        assert report_csp != index_csp
-        assert index_csp.get("script-src") == ["'self'"]
-        assert "'unsafe-inline'" not in index_csp.get("script-src", [])
-        assert "https://ajax.googleapis.com" not in index_csp.get("script-src", [])
-        assert "sandbox" not in index_csp
-
-    def test_report_csp_does_not_leak_to_next_request(self, server):
-        """A report response (relaxed CSP) followed by a dashboard-asset request
-        on the same client connection must NOT carry the relaxed CSP. serve.py
-        runs HTTP/1.0 (connection closes per request, fresh handler each time)
-        AND do_GET resets _security_headers to strict at entry, so the relaxed
-        set can never bleed into a subsequent response. Reuse one HTTPConnection
-        to exercise the sequence regardless of how connections are pooled."""
+    def test_report_and_dashboard_share_one_strict_csp(self, server):
+        """There is a single header set now: a report and a dashboard asset on
+        the same server return byte-identical CSP. A reused connection proves no
+        per-path policy variance crept back in (a regression guard against the
+        old dual-policy model leaking across keep-alive)."""
         import http.client
         from urllib.parse import urlparse
 
@@ -401,17 +387,17 @@ class TestRunReports:
             conn.request("GET", f"/runs/{self.VALID_TS}/nova.html")
             r1 = conn.getresponse()
             r1.read()
-            assert "'unsafe-inline'" in r1.getheader("content-security-policy")
+            report_csp = r1.getheader("content-security-policy")
 
-            # Second request after the report must be strict again.
             conn.request("GET", "/index.html")
             r2 = conn.getresponse()
             r2.read()
-            csp2 = _parse_csp(r2.getheader("content-security-policy"))
-            assert csp2.get("script-src") == ["'self'"]
-            assert "'unsafe-inline'" not in csp2.get("script-src", [])
+            index_csp = r2.getheader("content-security-policy")
         finally:
             conn.close()
+
+        assert report_csp == index_csp
+        assert _parse_csp(report_csp).get("script-src") == ["'self'"]
 
     @pytest.mark.parametrize(
         "path",

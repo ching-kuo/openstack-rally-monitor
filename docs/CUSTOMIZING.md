@@ -96,6 +96,8 @@ Custom themes may override these names. Maintainers should keep them stable acro
 
 Token overrides reskin dashboard surfaces, text, status colors, brand gradients, timeline bars, service-card borders, cleanup counts, Chart.js datasets, chart labels, axis ticks, and chart grid lines.
 
+The per-run **full report** (linked from each service card, served at `runs/<timestamp>/<service>.html`) loads the same token cascade, so the same overrides reskin its nav, tables, stat tiles, status pills, and the atomic-action chart for free.
+
 Supplying `logo.svg` or `favicon.svg` replaces the default brand assets independently of token overrides.
 
 > Chart series tokens (`--chart-series-1` … `--chart-series-7`) must be `#rrggbb` hex or `rgba(...)`. Other CSS color forms (`hsl(...)`, `oklch(...)`, named colors) render correctly for line strokes but lose the translucent fill under each duration line.
