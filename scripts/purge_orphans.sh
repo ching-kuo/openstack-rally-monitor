@@ -29,6 +29,13 @@
 #   7. Users
 #   8. Projects     (last — users and resources may belong to them)
 #   9. RadosGW users (after Keystone projects are gone; buckets first, then user)
+#
+# RadosGW orphan eligibility:
+#   - rally-owned (project ID in the provenance ledger): purged with its buckets.
+#   - unknown owner but EMPTY (project confirmed gone, 0 buckets/objects): purged.
+#     Zero data means zero loss, and Keystone implicit users self-heal, so this
+#     safely reaps pre-provenance-ledger orphans the ledger cannot vouch for.
+#   - unknown owner WITH data: always skipped — needs a human.
 # ==============================================================================
 set -euo pipefail
 
@@ -70,6 +77,7 @@ TOTAL_FAILED=0
 _LISTING_ERRORS=0
 _RGW_LISTING_ERRORS=0
 _RGW_SKIPPED_UNKNOWN=0
+_RGW_EMPTY_ORPHANS=0
 RGW_PURGE_SKIPPED=false
 
 # Phase 1 ID snapshots — populated during listing, consumed during deletion.
@@ -144,6 +152,7 @@ write_audit_log() {
         --argjson rgw_buckets "$rgw_buckets_json" \
         --argjson rgw_listing_errors "${_RGW_LISTING_ERRORS}" \
         --argjson rgw_skipped_unknown_owner "${_RGW_SKIPPED_UNKNOWN}" \
+        --argjson rgw_empty_unknown_owner "${_RGW_EMPTY_ORPHANS}" \
         --argjson rgw_purge_skipped "$( $RGW_PURGE_SKIPPED && echo true || echo false )" \
         '{
             timestamp: $ts,
@@ -156,6 +165,7 @@ write_audit_log() {
             total_failed: $total_failed,
             rgw_listing_errors: $rgw_listing_errors,
             rgw_skipped_unknown_owner: $rgw_skipped_unknown_owner,
+            rgw_empty_unknown_owner: $rgw_empty_unknown_owner,
             rgw_purge_skipped: $rgw_purge_skipped,
             found_ids: {
                 servers: $servers,
@@ -390,9 +400,23 @@ purge_rgw() {
                 TOTAL_FOUND=$((TOTAL_FOUND + 1))
                 _SNAP_RGW_BUCKETS+=("${uid}|${bucket_name}")
             done < <(echo "${bucket_json}" | jq -r '.[].name // empty' 2>/dev/null || true)
+        elif [[ "${bucket_count}" -eq 0 && "${object_count}" -eq 0 ]]; then
+            # Unknown provenance, but the Keystone project is confirmed gone
+            # (rgw_find_orphaned_users only emits authoritative 404s; inconclusive
+            # lookups raise _RGW_LISTING_ERRORS and abort the purge) AND the user
+            # holds zero buckets/objects — so there is no data to lose. Keystone
+            # implicit-tenant users self-heal: Ceph recreates them on the next
+            # authenticated access. An empty dangling user is therefore always
+            # safe to reap, which clears pre-provenance-ledger orphans the
+            # rally-owned gate cannot vouch for. Unknown-owner users WITH data are
+            # still skipped below — those need a human.
+            log "RGW user ${uid}: orphaned (unknown owner, EMPTY — project gone, 0 buckets/objects; eligible)"
+            TOTAL_FOUND=$((TOTAL_FOUND + 1))
+            _RGW_EMPTY_ORPHANS=$((_RGW_EMPTY_ORPHANS + 1))
+            _SNAP_RGW_USERS+=("${uid}")
         else
             _RGW_SKIPPED_UNKNOWN=$((_RGW_SKIPPED_UNKNOWN + 1))
-            log "RGW user ${uid}: SKIPPED (unknown owner, ${bucket_count} buckets, ${object_count} objects)"
+            log "RGW user ${uid}: SKIPPED (unknown owner WITH data, ${bucket_count} buckets, ${object_count} objects)"
         fi
     done < "${orphans_file}"
 
@@ -543,4 +567,5 @@ main() {
     [[ "${TOTAL_FAILED}" -gt 0 ]] && exit 1
 }
 
-main "$@"
+# Skip the entry point when sourced for unit tests (PURGE_ORPHANS_NO_MAIN=1).
+[[ "${PURGE_ORPHANS_NO_MAIN:-}" == "1" ]] || main "$@"

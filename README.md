@@ -259,7 +259,7 @@ radosgw-admin caps add --uid=<admin-uid> --caps="buckets=*;users=*"
 
 - `run_tests.sh` automatically purges **Rally-owned** RGW orphans after each test run via `auto_purge_rgw()`. Project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`). Non-Rally orphans are never touched.
 - `cleanup_monitor.sh` then queries the RGW admin API for implicit-tenant users, cross-references against Keystone, and reports post-purge orphan counts in `cleanup_metrics.json` with a scan health status (`ok`/`skipped`/`error`)
-- `purge_orphans.sh` is available for manual bulk cleanup of all resource types (including RGW) when needed
+- `purge_orphans.sh` is available for manual bulk cleanup of all resource types (including RGW) when needed. Unlike the automatic purge, it also reaps **empty unknown-owner** RGW orphans (Keystone project confirmed gone + zero buckets/objects) — data-safe because empty implicit-tenant users self-heal — which clears pre-provenance-ledger orphans the ledger gate cannot vouch for. Unknown-owner users that still hold data are always skipped
 - All operations are **fail-closed**: scan errors or inconclusive Keystone lookups block destructive purge and surface as degraded scan status rather than false zeros
 
 If RGW credentials are not set, all RGW features are silently skipped — existing functionality is unaffected.
