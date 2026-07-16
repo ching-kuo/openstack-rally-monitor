@@ -178,6 +178,31 @@ setup_deployment() {
 # --------------------------------------------------------------------------
 # 2. Run scenarios for each service
 # --------------------------------------------------------------------------
+write_task_args() {
+    local target="$1"
+    local temporary="${target}.tmp"
+
+    if ! jq -n \
+        --arg flavor "${RALLY_NOVA_FLAVOR:-m1.tiny}" \
+        --arg image "${RALLY_NOVA_IMAGE:-cirros-0.6.2-x86_64-disk}" \
+        --arg auth_url "${OS_AUTH_URL:-}" \
+        '{
+            env: {
+                RALLY_NOVA_FLAVOR: $flavor,
+                RALLY_NOVA_IMAGE: $image,
+                OS_AUTH_URL: $auth_url
+            }
+        }' > "${temporary}"; then
+        rm -f "${temporary}"
+        return 1
+    fi
+
+    if ! mv "${temporary}" "${target}"; then
+        rm -f "${temporary}"
+        return 1
+    fi
+}
+
 run_service_tests() {
     local service="$1" task_args_file="$2"
     local scenario_file="${RALLY_CONFIG_DIR}/scenarios/${service}.yaml"
@@ -721,15 +746,7 @@ main() {
 
     # Create task args file once — all services share the same scenario parameters.
     local task_args_file="${RUN_DIR}/task_args.json"
-    cat <<EOF > "${task_args_file}"
-{
-    "env": {
-        "RALLY_NOVA_FLAVOR": "${RALLY_NOVA_FLAVOR:-m1.tiny}",
-        "RALLY_NOVA_IMAGE": "${RALLY_NOVA_IMAGE:-cirros-0.6.2-x86_64-disk}",
-        "OS_AUTH_URL": "${OS_AUTH_URL:-}"
-    }
-}
-EOF
+    write_task_args "${task_args_file}"
 
     # Run all service tests
     for service in "${SERVICES[@]}"; do
