@@ -21,6 +21,10 @@ expressions, and shell metacharacters are rejected.
   emit one warning on standard error, then use the whole-hour expression
 - values that normalize or round to 24 hours: `0 0 * * *`
 
+These are cron field steps, not stateful elapsed-time delays. A minute step that
+does not divide 60 has one shorter gap at the next hour, and an effective
+whole-hour step that does not divide 24 has one shorter gap at midnight.
+
 The helper's standard output contract is exactly one cron expression followed
 by a newline. Diagnostics must use standard error.
 

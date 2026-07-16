@@ -180,8 +180,8 @@ Located in `rally/scenarios/`. The monitored service set is configurable via `RA
 | `OS_AUTH_URL` | — | Keystone endpoint |
 | `OS_USERNAME` / `OS_PASSWORD` / `OS_PROJECT_NAME` | — | Credentials |
 | `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Configurable monitored service set (normalized identically in `run_tests.sh`, `api_health_check.py`, and `health_fallback_filter.jq`; names must match `^[a-z0-9_-]+$`, invalid tokens dropped, all-invalid falls back to default; keystone always health-checked) |
-| `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full test runs |
-| `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight health checks |
+| `RALLY_SCHEDULE_INTERVAL` | `240` | Requested cron interval for full test runs; field rollover can shorten one gap (see README) |
+| `HEALTH_CHECK_INTERVAL` | `15` | Requested cron interval for lightweight health checks; field rollover can shorten one gap (see README) |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency threshold above which a reachable service is reported `degraded` (counts as up for uptime/`rally_api_up`) |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days before old run directories are pruned |
 | `PROVENANCE_RETENTION_DAYS` | `90` | Days before `rally_project_ids.log` entries are pruned; decoupled from `RALLY_RESULTS_RETENTION_DAYS` (it is the RGW auto-purge authorization ledger) |
@@ -224,13 +224,13 @@ Behavior: off (silent no-op) unless `NOTIFY_WEBHOOK_URL` is set; a missing state
 
 ### CI
 
-`.github/workflows/build-push.yml` runs a `test` job — `python -m pytest exporter/ dashboard/ scripts/` on Python 3.13 (matching the `python:3.13-slim` runtime; the script suites shell out to bash + jq, both on `ubuntu-latest`) — before the `build-push` job, which declares `needs: test`, so a failing suite blocks the build. The build pushes the container image to GitHub Container Registry (`ghcr.io/<owner>/<repo>`) on push to `main`, on `v*` tags, on PRs to `main` (build-only, no push), and via manual dispatch. Auth uses the built-in `GITHUB_TOKEN` (`packages: write`), so no extra secrets are required. The build context is the repo root with `docker/Dockerfile`, matching `docker/docker-compose.yml`. Tags are derived by `docker/metadata-action` (branch, PR ref, semver, SHA, and `latest` on the default branch); layer caching uses the GitHub Actions cache backend.
+`.github/workflows/build-push.yml` runs a `test` job with `shellcheck -x -P scripts scripts/*.sh` followed by `python -m pytest exporter/ dashboard/ scripts/` on Python 3.13 (matching the `python:3.13-slim` runtime; the script suites shell out to bash + jq, both on `ubuntu-latest`) before the `build-push` job, which declares `needs: test`, so a lint or test failure blocks the build. The build pushes the container image to GitHub Container Registry (`ghcr.io/<owner>/<repo>`) on push to `main`, on `v*` tags, on PRs to `main` (build-only, no push), and via manual dispatch. Auth uses the built-in `GITHUB_TOKEN` (`packages: write`), so no extra secrets are required. The build context is the repo root with `docker/Dockerfile`, matching `docker/docker-compose.yml`. Tags are derived by `docker/metadata-action` (branch, PR ref, semver, SHA, and `latest` on the default branch); layer caching uses the GitHub Actions cache backend.
 
 Dependencies are pinned to exact versions for reproducible images: `docker/requirements-rally.txt` (`rally-openstack==3.0.0`, `rally==5.0.1`, `python-openstackclient==10.1.0`), `exporter/requirements.txt` (`flask`, `prometheus-client`, `gunicorn`), and `exporter/requirements-test.txt` (`pytest`). The OpenStack toolchain in particular **must** stay pinned because `patch_rally.py` targets Rally module internals and the scenario YAMLs reference plugin names upstream renames across releases — a silent bump could move the patched code or rename a plugin out from under a build. `.github/dependabot.yml` opens weekly bump PRs (pip for `/exporter` and `/docker`, the docker base image, and GitHub Actions), each gated by the test job, so version drift is always a reviewed, tested change rather than a transparent rebuild.
 
 `docker/docker-compose.yml` defaults to this published image (`image: ${RALLY_MONITOR_IMAGE:-ghcr.io/ching-kuo/openstack-rally-monitor:latest}`) while retaining the `build:` block, so `docker compose pull` fetches upstream and `docker compose up --build` still builds locally under the same tag.
 
-Running the suite locally (`python -m pytest exporter/ dashboard/ scripts/`) requires **bash >= 4 on `PATH`** — the script-suite tests resolve the interpreter via `shutil.which("bash")`, and bash 4 introduced `mapfile`, which the scripts use. macOS ships bash 3.2 at `/bin/bash`, so install a newer one (`brew install bash`) and ensure it precedes `/bin/bash` on `PATH`. The suite is 270 passed + 1 skipped.
+Running the suite locally (`python -m pytest exporter/ dashboard/ scripts/`) requires **bash >= 4 on `PATH`** — the script-suite tests resolve the interpreter via `shutil.which("bash")`, and bash 4 introduced `mapfile`, which the scripts use. macOS ships bash 3.2 at `/bin/bash`, so install a newer one (`brew install bash`) and ensure it precedes `/bin/bash` on `PATH`. Treat the current pytest output as the source of truth for the collected-test count.
 
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph

@@ -25,7 +25,7 @@ the normal workflow.
 | Check | Result |
 |---|---|
 | Red phase | One `SC2155` warning and two `SC2015` findings; non-zero exit |
-| ShellCheck green phase | All ten shell scripts passed with `-x -P scripts` and no exclusions |
+| ShellCheck green phase | Every `scripts/*.sh` file passed with `-x -P scripts` and no exclusions |
 | Bash syntax | `bash -n scripts/*.sh` passed |
 | Workflow validation | actionlint passed |
 | Full tests | `336 passed, 1 skipped` in 39.83 seconds |
