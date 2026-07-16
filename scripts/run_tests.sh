@@ -51,7 +51,8 @@ parse_rally_services() {
 mapfile -t SERVICES < <(parse_rally_services "${RALLY_SERVICES:-}")
 
 log() {
-    local msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+    local msg
+    msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
     echo "${msg}"
     # Also append to run log if it exists
     if [[ -f "${RUN_LOG}" ]]; then
@@ -666,11 +667,14 @@ auto_purge_rgw() {
 # flock-contention path (early `exit 0` before we own the lock) never writes
 # idle and clobbers the winning run's "running" state.
 write_run_state_running() {
-    printf '{"state":"running","started_at":"%s","timestamp":"%s"}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIMESTAMP}" \
-        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
-        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
-        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+    if ! {
+        printf '{"state":"running","started_at":"%s","timestamp":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIMESTAMP}" \
+            > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+            && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null
+    }; then
+        rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+    fi
 }
 
 # EXIT-trap handler: flips state back to idle on normal exit, the
@@ -678,11 +682,14 @@ write_run_state_running() {
 # run (the trap fires during shutdown). Safe to clobber here because we only
 # reach the trap-install point while holding the flock.
 write_run_state_idle() {
-    printf '{"state":"idle","finished_at":"%s"}\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
-        && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null \
-        || rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+    if ! {
+        printf '{"state":"idle","finished_at":"%s"}\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
+            && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null
+    }; then
+        rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
+    fi
 }
 
 # --------------------------------------------------------------------------

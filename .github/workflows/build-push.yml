@@ -17,7 +17,7 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # Run the six test suites (exporter/, dashboard/, scripts/) before building.
+  # Run all test suites and shell static analysis before building.
   # The script-driven suites shell out to bash + jq; both ship on ubuntu-latest.
   # Python is pinned to 3.13 to match the python:3.13-slim runtime image.
   test:
@@ -27,6 +27,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Lint shell scripts
+        run: shellcheck -x -P scripts scripts/*.sh
 
       - name: Set up Python
         uses: actions/setup-python@v5
