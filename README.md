@@ -153,8 +153,8 @@ All settings are controlled via environment variables in `.env`.
 | `OS_PROJECT_DOMAIN_NAME` | `Default` | Project domain |
 | `OS_REGION_NAME` | `RegionOne` | Region |
 | `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Comma-separated set of services to monitor. Trim to match your cloud (e.g. drop `swift` on a deployment without object storage). Parsed defensively (trimmed, lowercased, deduped, order-preserving); names must match `^[a-z0-9_-]+$` (lowercase letters, digits, `_`, `-`) — any token failing the allowlist is dropped, and if every token is dropped the default set is used. Unknown but valid names are skipped with a log line. `keystone` is always health-checked (the session authenticates against it) |
-| `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full Rally test runs |
-| `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight API health checks |
+| `RALLY_SCHEDULE_INTERVAL` | `240` | Minutes between full Rally test runs; decimal integer `1..1440`. Values at least 60 minutes that are not whole hours round up to the next hour for cron |
+| `HEALTH_CHECK_INTERVAL` | `15` | Minutes between lightweight API health checks; decimal integer `1..1440` with the same cron rounding policy |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency in ms above which a reachable service is reported `degraded`. Degraded counts as up for uptime/`rally_api_up`; the slowness shows in `rally_api_latency_milliseconds` |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning |
 | `PROVENANCE_RETENTION_DAYS` | `90` | Days to keep `rally_project_ids.log` (the RGW auto-purge authorization ledger). Deliberately decoupled from `RALLY_RESULTS_RETENTION_DAYS` |
@@ -169,8 +169,8 @@ All settings are controlled via environment variables in `.env`.
 | `NOTIFY_WEBHOOK_URL` | — | Webhook URL for smoke-status transition notifications (enables the feature). Treated as a secret — may embed a token and lands in `/rally/rally_env` (mode 0640) |
 | `NOTIFY_FORMAT` | `generic` | Webhook payload shape: `generic` (raw JSON), `slack` (`{"text": …}`), or `discord` (`{"content": …}`) |
 | `NOTIFY_DASHBOARD_URL` | — | Optional dashboard URL embedded in the notification payload / chat message |
-| `EXPORTER_PORT` | `9101` | Prometheus exporter port |
-| `DASHBOARD_PORT` | `8080` | Dashboard port |
+| `EXPORTER_PORT` | `9101` | Prometheus exporter port; decimal integer `1..65535` |
+| `DASHBOARD_PORT` | `8080` | Dashboard port; decimal integer `1..65535` |
 
 ## Scenarios
 

@@ -6,6 +6,7 @@
 # test runner in a single container.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 EXPORTER_PORT="${EXPORTER_PORT:-9101}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
@@ -16,32 +17,14 @@ log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [entrypoint] $*"
 }
 
-# Convert a minute-based interval to a valid cron schedule expression.
-# Intervals >= 60 that are exact multiples of 60 use the hours field.
-make_cron_schedule() {
-    local mins="$1"
-    if (( mins < 1 )); then
-        log "ERROR: Schedule interval must be >= 1 minute, got ${mins}"
-        exit 1
-    fi
-    if (( mins > 1440 )); then
-        log "ERROR: Schedule interval must be <= 1440 minutes (24h), got ${mins}"
-        exit 1
-    fi
-    if (( mins >= 60 )); then
-        local hrs
-        if (( mins % 60 == 0 )); then
-            hrs=$(( mins / 60 ))
-        else
-            local rounded=$(( ((mins + 59) / 60) * 60 ))
-            log "WARNING: Interval ${mins}m is not a multiple of 60. Rounding up to ${rounded}m for cron."
-            hrs=$(( rounded / 60 ))
-        fi
-        echo "0 */${hrs} * * *"
-    else
-        echo "*/${mins} * * * *"
-    fi
-}
+source "${SCRIPT_DIR}/entrypoint_config.sh"
+
+# Validate environment-derived numeric values before initialization has any
+# side effects. Downstream shell command strings receive normalized digits only.
+SCHEDULE_INTERVAL=$(normalize_interval "${SCHEDULE_INTERVAL}" "RALLY_SCHEDULE_INTERVAL")
+HEALTH_CHECK_INTERVAL=$(normalize_interval "${HEALTH_CHECK_INTERVAL}" "HEALTH_CHECK_INTERVAL")
+EXPORTER_PORT=$(normalize_port "${EXPORTER_PORT}" "EXPORTER_PORT")
+DASHBOARD_PORT=$(normalize_port "${DASHBOARD_PORT}" "DASHBOARD_PORT")
 
 # --------------------------------------------------------------------------
 # Initialize
