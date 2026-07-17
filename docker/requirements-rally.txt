@@ -17,4 +17,4 @@
 # plugin names stay matched to a known Rally release.
 rally-openstack==3.0.0
 rally==5.0.1
-python-openstackclient==10.1.0
+python-openstackclient==10.2.1
