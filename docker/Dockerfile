@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 LABEL maintainer="infra-labs"
 LABEL description="OpenStack Rally testing and monitoring tool"
