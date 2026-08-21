@@ -16,5 +16,5 @@
 # (Requires-Dist: rally>=4.1.0); pinned here so patch_rally.py and the scenario
 # plugin names stay matched to a known Rally release.
 rally-openstack==3.0.0
-rally==5.0.1
+rally==5.1.1
 python-openstackclient==10.1.0
