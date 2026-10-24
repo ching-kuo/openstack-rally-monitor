@@ -14,11 +14,14 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask, Response, jsonify
 from prometheus_client import (
     Counter,
-    CollectorRegistry,
     Gauge,
     generate_latest,
     CONTENT_TYPE_LATEST,
 )
+
+from announcement_metrics import apply_announcement_metrics
+from health_metrics import apply_health_metrics
+from metrics_common import SCHEDULE_INTERVAL_SECONDS, registry
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -27,12 +30,13 @@ RESULTS_DIR = os.environ.get("RESULTS_DIR", "/results")
 EXPORTER_PORT = int(os.environ.get("EXPORTER_PORT", 9101))
 READY_MAX_AGE_MINUTES = int(os.environ.get("READY_MAX_AGE_MINUTES", 480))
 
+
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
-# Prometheus Metrics Registry
+# Prometheus Metrics (the API health and announcement gauges live in
+# health_metrics.py and announcement_metrics.py, on the same registry)
 # ---------------------------------------------------------------------------
-registry = CollectorRegistry()
 
 rally_task_success = Gauge(
     "rally_task_success",
@@ -130,7 +134,18 @@ rally_rgw_scan_ok = Gauge(
 
 rally_last_run_timestamp = Gauge(
     "rally_last_run_timestamp",
-    "Epoch timestamp of the last Rally test run",
+    "Epoch timestamp of the last Rally test run (its start time)",
+    registry=registry,
+)
+
+rally_last_run_end_timestamp = Gauge(
+    "rally_last_run_end_timestamp",
+    (
+        "Epoch timestamp at which the last Rally run finished: its start plus "
+        "run_duration_seconds (just its start for a run aborted during setup, "
+        "or before the duration is recorded). RallyStaleResults measures from "
+        "here."
+    ),
     registry=registry,
 )
 
@@ -140,70 +155,35 @@ rally_overall_success = Gauge(
     registry=registry,
 )
 
+rally_run_setup_ok = Gauge(
+    "rally_run_setup_ok",
+    (
+        "Whether the last Rally run got past setup (1) or aborted before any "
+        "test ran (0): its summary carries a top-level error "
+        "(deployment_setup_failed, task_args_write_failed), so no per-service "
+        "results exist. Only meaningful while rally_data_valid is 1; it keeps "
+        "its last value while the summary is unreadable."
+    ),
+    registry=registry,
+)
+
+rally_schedule_interval_seconds = Gauge(
+    "rally_schedule_interval_seconds",
+    (
+        "Longest expected gap between Rally runs, from RALLY_SCHEDULE_INTERVAL "
+        "after the same whole-hour round-up cron applies"
+    ),
+    registry=registry,
+)
+rally_schedule_interval_seconds.set(SCHEDULE_INTERVAL_SECONDS)
+
 rally_run_duration_seconds = Gauge(
     "rally_run_duration_seconds",
-    "Total duration of the last full Rally test suite run in seconds",
-    registry=registry,
-)
-
-rally_api_up = Gauge(
-    "rally_api_up",
     (
-        "Whether the API health check for a service reported reachable (1) or "
-        'down (0). "degraded" (the service answered but exceeded '
-        "HEALTH_LATENCY_WARN_MS) counts as up (1) — this gauge measures "
-        "reachability, not speed. Slowness shows up in "
-        "rally_api_latency_milliseconds, not here."
+        "Total duration of the last full Rally test suite run in seconds; 0 "
+        "when the latest summary has none (a run aborted during setup, killed, "
+        "or still finishing)"
     ),
-    ["service"],
-    registry=registry,
-)
-
-rally_api_latency_milliseconds = Gauge(
-    "rally_api_latency_milliseconds",
-    (
-        "Latency in milliseconds of the last API health check for a service. "
-        "This is where a degraded (slow-but-reachable) service is visible; "
-        "rally_api_up stays 1 for degraded, so alert on this gauge for "
-        "latency-based warnings."
-    ),
-    ["service"],
-    registry=registry,
-)
-
-rally_api_overall_up = Gauge(
-    "rally_api_overall_up",
-    (
-        "Whether the most recent API health data reports overall reachability "
-        '(1) or not (0). "up" and "degraded" both map to 1 (degraded means '
-        "every service answered, just slowly — see "
-        "rally_api_latency_milliseconds). Everything else maps to 0 and the "
-        'gauge FAILS CLOSED: an explicit "down", an "unknown"/missing overall '
-        "(e.g. the seed health.json on a fresh volume, or a corrupt/missing "
-        "file), and any unrecognized value all set 0. Semantics: 1 = healthy "
-        "signal; 0 = down OR no valid signal. This pairs with per-service "
-        "rally_api_up (genuinely absent until a service is first checked, so "
-        "absent series cannot fire `== 0`): when the health pipeline breaks, "
-        "those per-service series vanish and only this gauge can still signal "
-        "the loss. RallyApiSignalLost alerts on this 0 state."
-    ),
-    registry=registry,
-)
-
-rally_announcement_active = Gauge(
-    "rally_announcement_active",
-    (
-        "Number of currently-active operator announcements of each type. "
-        "All three type labels (incident, maintenance, scheduled) are emitted "
-        "every scrape, 0 when none, so the series never appear or disappear."
-    ),
-    ["type"],
-    registry=registry,
-)
-
-rally_maintenance_mode = Gauge(
-    "rally_maintenance_mode",
-    "Whether any maintenance-type announcement is currently active (1) or not (0)",
     registry=registry,
 )
 
@@ -249,7 +229,6 @@ _announce_cache_time: float = 0.0
 # Only when this changes do we clear and rebuild per-service/scenario gauges.
 _last_processed_ts: str = ""
 _last_applied_cleanup: dict = {}
-_last_applied_health: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -437,129 +416,6 @@ def _apply_cleanup_metrics(cleanup: dict) -> None:
     rally_rgw_scan_ok.set(0 if rgw_scan_status == "error" else 1)
 
 
-def _apply_health_metrics(health: dict) -> None:
-    """Apply API health-check metrics from health.json.
-
-    Called on every scrape regardless of whether the Rally summary changed,
-    because health.json updates on its own ~15-minute cycle (written by
-    health_check.sh). Mirrors _apply_cleanup_metrics: identity-check to skip
-    redundant work, then clear-before-set so a service that drops out of a
-    later health.json does not leave a stale labeled series behind.
-    """
-    global _last_applied_health
-    if health is _last_applied_health:
-        return
-    _last_applied_health = health
-
-    # health.json is a full snapshot; clear prior per-service labels first so
-    # stale services do not linger when the file shrinks or goes missing.
-    rally_api_up.clear()
-    rally_api_latency_milliseconds.clear()
-
-    services = health.get("services", {})
-    if isinstance(services, dict):
-        for service, info in services.items():
-            if not isinstance(info, dict):
-                continue
-            status = info.get("status")
-            # "degraded" (reachable but slow) counts as up: this gauge measures
-            # reachability. Only an explicit "down" is 0. Slowness is visible in
-            # rally_api_latency_milliseconds below.
-            rally_api_up.labels(service=service).set(0 if status == "down" else 1)
-            latency = info.get("latency_ms")
-            if isinstance(latency, (int, float)) and not isinstance(latency, bool):
-                rally_api_latency_milliseconds.labels(service=service).set(latency)
-
-    # Overall: "up" and "degraded" both map to 1 (reachable); everything else
-    # maps to 0 (fail closed). An explicit "down", an "unknown"/missing overall
-    # (e.g. the seed file), or any unrecognized value all set 0. This is
-    # deliberate: per-service rally_api_up labels are cleared above and only
-    # re-set for services present in a valid health.json, so a corrupt or
-    # missing file leaves NO per-service series to fire `== 0` alerts. If this
-    # unlabeled gauge stayed at its prior 1 on bad data, a broken health
-    # pipeline would read as "all healthy". Failing closed means "1 = the most
-    # recent health data reports overall reachability; 0 = down OR no valid
-    # signal" — RallyApiSignalLost in rally_alerts.yml covers the 0 case.
-    overall = health.get("overall")
-    if overall in ("up", "degraded"):
-        rally_api_overall_up.set(1)
-    else:
-        rally_api_overall_up.set(0)
-
-
-# Operator-announcement types. Enum-only: never derive labels from body/id text.
-# Mirrors TYPE_LABELS in dashboard/app.js and VALID_TYPES_RE in announce.sh.
-_ANNOUNCEMENT_TYPES = ("incident", "maintenance", "scheduled")
-
-
-def _parse_iso8601_ms(value) -> float:
-    """Parse an ISO 8601 UTC timestamp to epoch milliseconds.
-
-    Returns float("nan") when the value is missing or unparseable, matching the
-    JS side where Date.parse(...) yields NaN and Number.isFinite(NaN) is false.
-    """
-    if not isinstance(value, str):
-        return float("nan")
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except (ValueError, TypeError):
-        return float("nan")
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp() * 1000.0
-
-
-def _is_announcement_active(rec: dict, now_ms: float) -> bool:
-    """Return whether an announcement record is currently active.
-
-    KEEP IN SYNC with dashboard/app.js::isAnnouncementActive — both encode the
-    same active-ness semantics (the repo uses this convention for
-    ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
-      - unknown type            -> not active
-      - effective_from in the future (parseable) -> not active
-      - expires_at at/<= now (parseable)         -> not active
-      - records missing both bounds (incidents)  -> active until cleared
-    Unparseable bounds are ignored (treated as absent), matching the JS
-    Number.isFinite guard.
-    """
-    if not isinstance(rec, dict):
-        return False
-    if rec.get("type") not in _ANNOUNCEMENT_TYPES:
-        return False
-    start_ms = _parse_iso8601_ms(rec.get("effective_from"))
-    if start_ms == start_ms and start_ms > now_ms:  # not-NaN and future
-        return False
-    end_ms = _parse_iso8601_ms(rec.get("expires_at"))
-    if end_ms == end_ms and end_ms <= now_ms:  # not-NaN and past/now
-        return False
-    return True
-
-
-def _apply_announcement_metrics(state: dict) -> None:
-    """Apply maintenance/announcement gauges from announcement-state.json.
-
-    Emits all three type labels every scrape (0 when none) so series never
-    appear or disappear, and sets rally_maintenance_mode to 1 iff any
-    maintenance record is currently active. Label cardinality is enum-only;
-    body/id text never becomes a label.
-    """
-    counts = {t: 0 for t in _ANNOUNCEMENT_TYPES}
-    now_ms = time.time() * 1000.0
-
-    announcements = state.get("announcements", []) if isinstance(state, dict) else []
-    if isinstance(announcements, list):
-        for rec in announcements:
-            if _is_announcement_active(rec, now_ms):
-                counts[rec["type"]] += 1
-
-    for atype in _ANNOUNCEMENT_TYPES:
-        rally_announcement_active.labels(type=atype).set(counts[atype])
-    rally_maintenance_mode.set(1 if counts["maintenance"] > 0 else 0)
-
-
 def update_metrics():
     """Read latest results and update all Prometheus metrics.
 
@@ -571,7 +427,11 @@ def update_metrics():
     and rebuilt when the summary timestamp changes, to avoid transient metric gaps.
 
     rally_data_valid and rally_overall_success are always updated to reflect the
-    current validity of the data.
+    current validity of the data. A summary carrying a top-level error (the
+    run aborted before any test, e.g. deployment_setup_failed) is valid data
+    about a failed run: it clears the per-service series, sets
+    rally_overall_success, rally_run_setup_ok and rally_run_duration_seconds
+    to 0, and advances rally_last_run_timestamp.
     """
     global _last_processed_ts
 
@@ -582,7 +442,12 @@ def update_metrics():
 
     services = summary.get("services", {})
     current_ts = summary.get("timestamp", "")
-    is_valid = bool(services) and current_ts not in ("none", "waiting_for_first_run", "")
+    run_error = summary.get("error")
+    is_valid = (bool(services) or bool(run_error)) and current_ts not in (
+        "none",
+        "waiting_for_first_run",
+        "",
+    )
 
     # Cleanup, health, and announcement metrics are always applied — each comes
     # from a separate file with its own independent update cycle (cleanup and
@@ -590,23 +455,36 @@ def update_metrics():
     # operator runs announce.sh). Apply them before the validity check so these
     # signals stay current even when the Rally summary is missing or stale.
     _apply_cleanup_metrics(cleanup)
-    _apply_health_metrics(health)
-    _apply_announcement_metrics(announcements)
+    apply_health_metrics(health)
+    apply_announcement_metrics(announcements)
 
     if not is_valid:
         # No usable data: signal invalidity without disturbing labeled metrics.
+        # Forget the processed timestamp so the next valid read rebuilds the
+        # labeled series and overall success instead of keeping this 0.
         rally_data_valid.set(0)
         rally_overall_success.set(0)
+        _last_processed_ts = ""
         return
 
     rally_data_valid.set(1)
+    rally_run_setup_ok.set(0 if run_error else 1)
 
     # run_duration_seconds is written to the summary file after the test run
     # completes, potentially with the same timestamp as the initial write.
-    # Update it on every valid scrape so corrections are never missed.
+    # Update it (and the end timestamp derived from it) on every valid scrape
+    # so corrections are never missed. A summary without one (an aborted run,
+    # a run killed after build_summary, or one still finishing) counts as 0 for
+    # BOTH gauges: its end time is then its start, and RallyStaleResults must
+    # not add the previous run's duration to a threshold measured from it.
     run_duration = summary.get("run_duration_seconds", 0)
-    if run_duration > 0:
-        rally_run_duration_seconds.set(run_duration)
+    if run_error or not isinstance(run_duration, (int, float)) or isinstance(run_duration, bool):
+        run_duration = 0
+    run_duration = max(run_duration, 0)
+    rally_run_duration_seconds.set(run_duration)
+    started = parse_timestamp(current_ts)
+    if started > 0:
+        rally_last_run_end_timestamp.set(started + run_duration)
 
     # If the summary timestamp hasn't changed, summary-derived labeled metrics
     # are already up-to-date. Skip the clear+rebuild to avoid transient gaps.
@@ -631,8 +509,9 @@ def update_metrics():
     if ts > 0:
         rally_last_run_timestamp.set(ts)
 
-    # Per-service metrics
-    all_passed = True
+    # Per-service metrics. A run-level error means nothing was tested, so the
+    # run failed even though there are no per-service results to say so.
+    all_passed = not run_error
     for service, data in services.items():
         status = data.get("status", "pending")
 

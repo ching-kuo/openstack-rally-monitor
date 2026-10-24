@@ -9,6 +9,7 @@ an environment without the SDK.
 """
 import json
 import re
+import sys
 
 import api_health_check as hc
 
@@ -338,6 +339,22 @@ def test_main_honours_rally_services_env(monkeypatch, capsys):
     assert rc == 0
     doc = json.loads(capsys.readouterr().out)
     assert set(doc["services"]) == {"keystone", "nova", "cinder"}
+
+
+def test_build_connection_bounds_every_api_call(monkeypatch):
+    """Without a timeout a hung endpoint blocks the checker forever; the
+    wrapper's flock then makes every later cron check exit, and health.json
+    silently stops updating."""
+    import types
+
+    seen = {}
+    fake = types.ModuleType("openstack")
+    fake.connect = lambda **kwargs: seen.update(kwargs) or "conn"
+    monkeypatch.setitem(sys.modules, "openstack", fake)
+
+    assert hc.build_connection() == "conn"
+    assert seen["api_timeout"] == hc.API_TIMEOUT_SECONDS
+    assert 0 < hc.API_TIMEOUT_SECONDS <= 60
 
 
 # ---------------------------------------------------------------------------

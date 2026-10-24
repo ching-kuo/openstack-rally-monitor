@@ -118,3 +118,17 @@ def test_entrypoint_validates_before_initialization() -> None:
     assert source.index('HEALTH_CHECK_INTERVAL=$(normalize_interval') < initialization
     assert source.index('EXPORTER_PORT=$(normalize_port') < initialization
     assert source.index('DASHBOARD_PORT=$(normalize_port') < initialization
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("300", "300\n"), ("1", "1\n"), ("3600", "3600\n"), ("0090", "90\n")])
+def test_normalize_timeout_accepts_seconds(raw: str, expected: str) -> None:
+    result = run_function("normalize_timeout", raw)
+    assert result.returncode == 0
+    assert result.stdout == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "3601", "5m", "", "-1"])
+def test_normalize_timeout_rejects_out_of_range(raw: str) -> None:
+    result = run_function("normalize_timeout", raw)
+    assert result.returncode != 0
+    assert result.stdout == ""

@@ -1,0 +1,130 @@
+# Unit tests for rally_alerts.yml:  promtool test rules prometheus/rally_alerts_test.yml
+# (run by exporter/test_alert_rules.py when promtool is on PATH).
+#
+# Every input series carries the job/instance labels a real scrape adds, so
+# the tests catch label-matching mistakes (e.g. `labeled == 0 and unlabeled == 1`
+# without on(), which never matches). Assertions query the ALERTS series rather
+# than alert_rule_test so they do not have to restate annotation text.
+rule_files:
+  - rally_alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Per-service/per-scenario test alerts fire despite rally_data_valid having
+  # fewer labels.
+  - interval: 1m
+    input_series:
+      - series: 'rally_service_status{service="nova",job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_task_success{service="nova",scenario="Boot",job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_task_sla_passed{service="nova",scenario="Boot",job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_data_valid{job="rally",instance="a:9101"}'
+        values: '1x30'
+    promql_expr_test:
+      - expr: ALERTS{alertstate="firing",alertname=~"RallyServiceDown|RallyTestFailure|RallySLABreach"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RallyServiceDown",alertstate="firing",service="nova",job="rally",instance="a:9101",severity="critical",team="infra"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RallyTestFailure",alertstate="firing",service="nova",scenario="Boot",job="rally",instance="a:9101",severity="warning",team="infra"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RallySLABreach",alertstate="firing",service="nova",scenario="Boot",job="rally",instance="a:9101",severity="warning",team="infra"}'
+            value: 1
+
+  # ...but not while the exporter has no valid data.
+  - interval: 1m
+    input_series:
+      - series: 'rally_service_status{service="nova",job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_data_valid{job="rally",instance="a:9101"}'
+        values: '0x30'
+    promql_expr_test:
+      - expr: ALERTS{alertname="RallyServiceDown"}
+        eval_time: 20m
+        exp_samples: []
+
+  # A run aborted during setup: RallyRunSetupFailed fires and RallyOverallFailure
+  # is suppressed for that instance only. Instance b is a separate monitor whose
+  # services genuinely fail; its overall failure must still fire.
+  - interval: 1m
+    input_series:
+      - series: 'rally_run_setup_ok{job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_overall_success{job="rally",instance="a:9101"}'
+        values: '0x30'
+      - series: 'rally_data_valid{job="rally",instance="a:9101"}'
+        values: '1x30'
+      - series: 'rally_run_setup_ok{job="rally",instance="b:9101"}'
+        values: '1x30'
+      - series: 'rally_overall_success{job="rally",instance="b:9101"}'
+        values: '0x30'
+      - series: 'rally_data_valid{job="rally",instance="b:9101"}'
+        values: '1x30'
+    promql_expr_test:
+      - expr: ALERTS{alertstate="firing",alertname=~"RallyRunSetupFailed|RallyOverallFailure"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RallyRunSetupFailed",alertstate="firing",job="rally",instance="a:9101",severity="critical",team="infra"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RallyOverallFailure",alertstate="firing",job="rally",instance="b:9101",severity="critical",team="infra"}'
+            value: 1
+
+  # Stale results at the default 4h schedule. The last run ended at t=0 after
+  # taking 5h (longer than the interval, so cron skipped a tick under the run
+  # flock): the threshold is 2 intervals + that duration = 13h, plus for: 15m.
+  - interval: 5m
+    input_series:
+      - series: 'rally_last_run_end_timestamp{job="rally",instance="a:9101"}'
+        values: '1+0x200'
+      - series: 'rally_run_duration_seconds{job="rally",instance="a:9101"}'
+        values: '18000+0x200'
+      - series: 'rally_schedule_interval_seconds{job="rally",instance="a:9101"}'
+        values: '14400+0x200'
+    promql_expr_test:
+      - expr: ALERTS{alertname="RallyStaleResults",alertstate="firing"}
+        eval_time: 13h
+        exp_samples: []
+      - expr: ALERTS{alertname="RallyStaleResults",alertstate="firing"}
+        eval_time: 13h20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RallyStaleResults",alertstate="firing",job="rally",instance="a:9101",severity="warning",team="infra"}'
+            value: 1
+
+  # A fresh container (no run finished yet, gauge 0) is not "stale".
+  - interval: 5m
+    input_series:
+      - series: 'rally_last_run_end_timestamp{job="rally",instance="a:9101"}'
+        values: '0+0x200'
+      - series: 'rally_run_duration_seconds{job="rally",instance="a:9101"}'
+        values: '0+0x200'
+      - series: 'rally_schedule_interval_seconds{job="rally",instance="a:9101"}'
+        values: '14400+0x200'
+    promql_expr_test:
+      - expr: ALERTS{alertname="RallyStaleResults"}
+        eval_time: 10h
+        exp_samples: []
+
+  # Stale health checks: fires past rally_api_stale_after_seconds (45m) plus
+  # for: 15m, never on the fresh-boot 0.
+  - interval: 5m
+    input_series:
+      - series: 'rally_api_last_check_timestamp{job="rally",instance="a:9101"}'
+        values: '1+0x100'
+      - series: 'rally_api_stale_after_seconds{job="rally",instance="a:9101"}'
+        values: '2700+0x100'
+      - series: 'rally_api_last_check_timestamp{job="rally",instance="b:9101"}'
+        values: '0+0x100'
+      - series: 'rally_api_stale_after_seconds{job="rally",instance="b:9101"}'
+        values: '2700+0x100'
+    promql_expr_test:
+      - expr: ALERTS{alertname="RallyApiHealthStale",alertstate="firing"}
+        eval_time: 55m
+        exp_samples: []
+      - expr: ALERTS{alertname="RallyApiHealthStale",alertstate="firing"}
+        eval_time: 65m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RallyApiHealthStale",alertstate="firing",job="rally",instance="a:9101",severity="warning",team="infra"}'
+            value: 1

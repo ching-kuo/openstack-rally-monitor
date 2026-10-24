@@ -132,3 +132,30 @@ def test_ordered_union_preferred_order_then_unknowns():
     items = '[{"services":{"octavia":{},"nova":{}}}]'
     # Preferred (nova) first in canonical order; unknown (octavia) trails.
     assert _eval_union(items) == ["nova", "octavia"]
+
+
+# ---------------------------------------------------------------------------
+# serviceErrorText: service-level failure reason shown in the modal
+# ---------------------------------------------------------------------------
+
+def _eval_service_error(svc_js: str) -> str:
+    fn = _extract("serviceErrorText")
+    return _run_node(f"{fn}\nprocess.stdout.write(serviceErrorText({svc_js}));")
+
+
+def test_service_error_text_task_failed_to_start_uses_detail():
+    text = _eval_service_error(
+        '{"status":"failed","error":"task_failed_to_start","error_detail":"Task config is invalid"}'
+    )
+    assert text == "Task failed to start: Task config is invalid"
+
+
+def test_service_error_text_falls_back_to_error_code():
+    assert _eval_service_error('{"status":"failed","error":"task_failed_to_start"}') == (
+        "Task failed to start: task_failed_to_start"
+    )
+
+
+def test_service_error_text_empty_without_error():
+    assert _eval_service_error('{"status":"passed"}') == ""
+    assert _eval_service_error("null") == ""

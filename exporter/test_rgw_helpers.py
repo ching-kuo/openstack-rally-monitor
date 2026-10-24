@@ -295,4 +295,5 @@ def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
     )[1]
 
     assert main_body.index("auto_purge_rgw") < main_body.index("check_cleanup")
-    assert main_body.index("check_cleanup") < main_body.index("publish_dashboard_files")
+    # finish_run (run_lib.sh) prunes, records the duration, then publishes.
+    assert main_body.index("check_cleanup") < main_body.index("finish_run")

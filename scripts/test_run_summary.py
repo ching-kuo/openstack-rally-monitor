@@ -557,3 +557,27 @@ def test_build_summary_honours_trimmed_rally_services(tmp_path: Path) -> None:
     assert summary["services"]["nova"]["status"] == "passed"
     # keystone had no result file -> skipped (honest signal for a missing scenario).
     assert summary["services"]["keystone"]["status"] == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Task that never started -> failed, not skipped
+# ---------------------------------------------------------------------------
+
+def test_task_that_never_started_is_failed_with_error(tmp_path: Path) -> None:
+    """run_service_tests drops <service>.start_failed when no task UUID is
+    found. That service must read as failed (with the reason) -- "skipped"
+    would leave rally_overall_success at 1 and the dashboard card pending while
+    the smoke ledger and notify.sh already count the run as failed."""
+    run_dir = tmp_path / TIMESTAMP
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "nova.start_failed").write_text("Task config is invalid\n")
+    summary = build_summary(tmp_path, {"keystone": [scenario("Authenticate.keystone")]})
+
+    nova = svc(summary, "nova")
+    assert nova["status"] == "failed"
+    assert nova["error"] == "task_failed_to_start"
+    assert nova["error_detail"] == "Task config is invalid"
+    assert nova["scenarios"] == []
+    # Untouched services keep their usual shape (no error key).
+    assert "error" not in svc(summary, "keystone")
+    assert svc(summary, "glance")["status"] == "skipped"

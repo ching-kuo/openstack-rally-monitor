@@ -4,156 +4,10 @@ import os
 import time
 
 import pytest
-from prometheus_client import generate_latest
 
+import metrics_common as mc
 import rally_exporter as exporter
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def make_summary(timestamp="20240101T120000Z", services=None, run_duration=10.0):
-    """Build a minimal valid summary dict."""
-    if services is None:
-        services = {
-            "nova": {
-                "status": "passed",
-                "duration": 10.0,
-                "total_iterations": 2,
-                "failed_iterations": 0,
-                "sla_passed": True,
-                "scenarios": [
-                    {
-                        "name": "CreateDeleteServer",
-                        "duration": 10.0,
-                        "iterations": 2,
-                        "failures": 0,
-                        "sla": True,
-                    }
-                ],
-            }
-        }
-    return {"timestamp": timestamp, "services": services, "run_duration_seconds": run_duration}
-
-
-def make_cleanup(s_nova=0, c_nova=0, rgw_status="skipped", rgw_users=0, rgw_buckets=0, rgw_unknown=0):
-    """Build a minimal cleanup_metrics dict."""
-    return {
-        "timestamp": "20240101T120000Z",
-        "cleanup_failed": 1 if s_nova > 0 else 0,
-        "context_cleanup_warning": 1 if c_nova > 0 else 0,
-        "rgw_scan_status": rgw_status,
-        "rgw_orphaned_users": rgw_users,
-        "rgw_orphaned_buckets": rgw_buckets,
-        "rgw_unknown_owner_orphans": rgw_unknown,
-        "orphaned_resources": {"nova": s_nova},
-        "context_orphaned_resources": {"nova": c_nova},
-        "details": {"servers": s_nova},
-        "context_details": {"servers": c_nova},
-    }
-
-
-def make_health(overall="up", services=None):
-    """Build a minimal health.json dict."""
-    if services is None:
-        services = {
-            "keystone": {"status": "up", "latency_ms": 120, "checked_at": "2024-01-01T12:00:00Z"},
-            "nova": {"status": "down", "latency_ms": 5000, "checked_at": "2024-01-01T12:00:00Z"},
-        }
-    return {"timestamp": "2024-01-01T12:00:00Z", "overall": overall, "services": services}
-
-
-def make_announcement(rec_type="incident", effective_from=None, expires_at=None,
-                      rec_id="incident-1", body="x"):
-    """Build a single announcement record (only enum-relevant fields matter)."""
-    rec = {"id": rec_id, "type": rec_type, "body": body, "created_at": "2024-01-01T00:00:00Z"}
-    if effective_from is not None:
-        rec["effective_from"] = effective_from
-    if expires_at is not None:
-        rec["expires_at"] = expires_at
-    return rec
-
-
-def iso_offset(seconds):
-    """ISO 8601 UTC timestamp `seconds` from now (negative = past)."""
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
-
-
-def metrics_output():
-    """Return current registry output as a string."""
-    return generate_latest(exporter.registry).decode()
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture(autouse=True)
-def reset_module_state():
-    """Reset module-level cache and metric state between tests."""
-    exporter._summary_mtime = -1.0
-    exporter._summary_data = {}
-    exporter._summary_cache_time = 0.0
-    exporter._cleanup_mtime = -1.0
-    exporter._cleanup_data = {}
-    exporter._cleanup_cache_time = 0.0
-    exporter._health_mtime = -1.0
-    exporter._health_data = {}
-    exporter._health_cache_time = 0.0
-    exporter._announce_mtime = -1.0
-    exporter._announce_data = {}
-    exporter._announce_cache_time = 0.0
-    exporter._last_processed_ts = ""
-    exporter._last_applied_cleanup = {}
-    exporter._last_applied_health = {}
-    # Reset scalar metrics
-    exporter.rally_data_valid.set(0)
-    exporter.rally_overall_success.set(0)
-    exporter.rally_last_run_timestamp.set(0)
-    exporter.rally_run_duration_seconds.set(0)
-    exporter.rally_maintenance_mode.set(0)
-    # Clear labeled metrics
-    for m in [
-        exporter.rally_task_success,
-        exporter.rally_task_duration_seconds,
-        exporter.rally_task_iterations_total,
-        exporter.rally_task_failures_total,
-        exporter.rally_task_sla_passed,
-        exporter.rally_service_status,
-        exporter.rally_cleanup_failure,
-        exporter.rally_orphaned_resources,
-        exporter.rally_context_cleanup_warning,
-        exporter.rally_context_orphaned_resources,
-        exporter.rally_api_up,
-        exporter.rally_api_latency_milliseconds,
-        exporter.rally_announcement_active,
-    ]:
-        m.clear()
-    exporter.rally_rgw_orphaned_users.set(0)
-    exporter.rally_rgw_orphaned_buckets.set(0)
-    exporter.rally_rgw_unknown_owner_orphans.set(0)
-    exporter.rally_rgw_scan_ok.set(1)
-    # rally_api_overall_up is unlabeled: .clear() is unsupported, so reset to a
-    # known baseline between tests. The gauge now FAILS CLOSED -- unknown/missing
-    # overall sets 0 -- and several tests pre-set it to 1 to prove the flip.
-    exporter.rally_api_overall_up.set(0)
-    yield
-
-
-@pytest.fixture
-def results_dir(tmp_path, monkeypatch):
-    """Temporary results directory with RESULTS_DIR patched."""
-    monkeypatch.setattr(exporter, "RESULTS_DIR", str(tmp_path))
-    return tmp_path
-
-
-@pytest.fixture
-def client():
-    """Flask test client."""
-    exporter.app.config["TESTING"] = True
-    with exporter.app.test_client() as c:
-        yield c
+from exporter_testlib import make_cleanup, make_summary, metrics_output
 
 
 # ---------------------------------------------------------------------------
@@ -419,281 +273,139 @@ class TestUpdateMetrics:
         assert "rally_rgw_scan_ok 0.0" in output
 
 
-# ---------------------------------------------------------------------------
-# load_health
-# ---------------------------------------------------------------------------
+class TestCronSpacing:
+    """KEEP IN SYNC with entrypoint_config.sh::make_cron_schedule."""
 
-class TestLoadHealth:
-    @pytest.mark.parametrize("contents", [None, "{not json"])
-    def test_missing_or_corrupt_file_returns_default(self, results_dir, contents):
-        if contents is not None:
-            (results_dir / "health.json").write_text(contents)
-        result = exporter.load_health()
-        assert result == {"overall": "unknown", "services": {}}
+    @pytest.mark.parametrize(
+        "raw, expected_minutes",
+        [
+            ("15", 15),
+            ("45", 45),
+            ("015", 15),
+            ("60", 60),
+            ("61", 120),
+            ("90", 120),
+            ("240", 240),
+            ("1439", 1440),
+            ("1440", 1440),
+            (None, 240),
+            ("", 240),
+            ("4h", 240),
+            ("0", 240),
+            ("1441", 240),
+        ],
+    )
+    def test_spacing(self, raw, expected_minutes):
+        assert mc.cron_spacing_seconds(raw, 240) == expected_minutes * 60
 
-    def test_missing_or_corrupt_file_increments_error_counter(self, results_dir):
-        """health.json is always seeded, so absence/corruption is a real error."""
-        before = exporter.rally_exporter_errors_total.labels(file="health.json")._value.get()
-        exporter.load_health()  # no file present
-        after = exporter.rally_exporter_errors_total.labels(file="health.json")._value.get()
-        assert after == before + 1
 
-    def test_valid_file_returns_data(self, results_dir):
-        (results_dir / "health.json").write_text(json.dumps(make_health()))
-        result = exporter.load_health()
-        assert result["overall"] == "up"
-        assert result["services"]["keystone"]["status"] == "up"
+class TestRunSetupFailure:
+    """A run that aborts before any test ({services: {}, error}) is a real,
+    failed run -- not "no data"."""
 
+    @staticmethod
+    def failure_summary(timestamp="20240101T160000Z"):
+        return {
+            "timestamp": timestamp,
+            "error": "deployment_setup_failed",
+            "error_detail": "401 Unauthorized",
+            "services": {},
+        }
 
-# ---------------------------------------------------------------------------
-# API health metrics — update_metrics / _apply_health_metrics
-# ---------------------------------------------------------------------------
+    def test_failure_summary_is_valid_but_failed(self, results_dir):
+        path = results_dir / "latest_summary.json"
+        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z")))
+        exporter.update_metrics()
+        assert 'rally_service_status{service="nova"} 1.0' in metrics_output()
 
-class TestHealthMetrics:
-    def test_per_service_and_overall_set(self, results_dir):
+        path.write_text(json.dumps(self.failure_summary()))
+        exporter._summary_mtime = -1.0  # force cache miss
+        exporter.update_metrics()
+        output = metrics_output()
+        assert "rally_data_valid 1.0" in output
+        assert "rally_overall_success 0.0" in output
+        assert "rally_run_setup_ok 0.0" in output
+        # The last green per-service series must not survive the failed run.
+        assert "rally_service_status{" not in output
+        assert "rally_task_success{" not in output
+        # The failed run is the newest run: staleness alerts must not fire.
+        assert "rally_last_run_timestamp 1.7041248e+09" in output
+
+    def test_failure_summary_resets_duration_and_end_time(self, results_dir):
+        """An aborted run has no duration: the previous run's must not linger,
+        and its end time is its start (RallyStaleResults measures from here)."""
+        sample = exporter.registry.get_sample_value
+        path = results_dir / "latest_summary.json"
+        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z", run_duration=600)))
+        exporter.update_metrics()
+        assert sample("rally_run_duration_seconds") == 600
+        assert sample("rally_last_run_end_timestamp") == 1704110400 + 600
+
+        path.write_text(json.dumps(self.failure_summary()))  # 20240101T160000Z
+        exporter._summary_mtime = -1.0
+        exporter.update_metrics()
+        assert sample("rally_run_duration_seconds") == 0
+        assert sample("rally_last_run_end_timestamp") == 1704124800
+
+    def test_missing_duration_resets_duration_with_end_time(self, results_dir):
+        """A run killed after build_summary has no run_duration_seconds. Its
+        end time is its start, so the duration that RallyStaleResults adds to
+        the threshold must be 0 too, not the previous run's."""
+        sample = exporter.registry.get_sample_value
+        path = results_dir / "latest_summary.json"
+        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z", run_duration=600)))
+        exporter.update_metrics()
+
+        killed = make_summary(timestamp="20240101T160000Z")
+        del killed["run_duration_seconds"]
+        path.write_text(json.dumps(killed))
+        exporter._summary_mtime = -1.0
+        exporter.update_metrics()
+        assert sample("rally_run_duration_seconds") == 0
+        assert sample("rally_last_run_end_timestamp") == 1704124800
+
+    def test_normal_summary_sets_run_setup_ok(self, results_dir):
         (results_dir / "latest_summary.json").write_text(json.dumps(make_summary()))
-        (results_dir / "health.json").write_text(json.dumps(make_health()))
+        exporter.update_metrics()
+        assert "rally_run_setup_ok 1.0" in metrics_output()
+
+    def test_service_failed_to_start_fails_overall(self, results_dir):
+        """A service whose Rally task never started is reported failed by
+        build_summary (with an error field) and must clear overall success."""
+        summary = make_summary(services={
+            "nova": {
+                "status": "failed",
+                "error": "task_failed_to_start",
+                "duration": 0,
+                "total_iterations": 0,
+                "failed_iterations": 0,
+                "sla_passed": True,
+                "scenarios": [],
+            }
+        })
+        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
         exporter.update_metrics()
         output = metrics_output()
-        assert 'rally_api_up{service="keystone"} 1.0' in output
-        assert 'rally_api_up{service="nova"} 0.0' in output
-        assert 'rally_api_latency_milliseconds{service="keystone"} 120.0' in output
-        assert 'rally_api_latency_milliseconds{service="nova"} 5000.0' in output
-        assert "rally_api_overall_up 1.0" in output
+        assert 'rally_service_status{service="nova"} 0.0' in output
+        assert "rally_overall_success 0.0" in output
 
-    def test_overall_down_sets_zero(self, results_dir):
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="down")))
+    def test_recovers_after_transient_invalid_read(self, results_dir):
+        """A transiently unreadable summary followed by the same valid summary
+        must restore overall success and the labeled series (it used to stay 0
+        until the next run because the timestamp had already been processed)."""
+        path = results_dir / "latest_summary.json"
+        path.write_text(json.dumps(make_summary()))
         exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
+        path.unlink()
+        exporter.update_metrics()
+        assert "rally_overall_success 0.0" in metrics_output()
 
-    def test_degraded_service_counts_as_up(self, results_dir):
-        """degraded means reachable-but-slow: rally_api_up is 1 (slowness shows
-        only in rally_api_latency_milliseconds)."""
-        (results_dir / "health.json").write_text(json.dumps(make_health(
-            overall="degraded",
-            services={
-                "keystone": {"status": "up", "latency_ms": 120, "checked_at": "2024-01-01T12:00:00Z"},
-                "nova": {"status": "degraded", "latency_ms": 6200, "checked_at": "2024-01-01T12:00:00Z"},
-                "cinder": {"status": "down", "latency_ms": 30000, "checked_at": "2024-01-01T12:00:00Z"},
-            },
-        )))
+        path.write_text(json.dumps(make_summary()))
+        exporter._summary_mtime = -1.0
         exporter.update_metrics()
         output = metrics_output()
-        assert 'rally_api_up{service="keystone"} 1.0' in output
-        assert 'rally_api_up{service="nova"} 1.0' in output  # degraded -> up
-        assert 'rally_api_up{service="cinder"} 0.0' in output  # down -> 0
-        # The slow service is still visible via its latency gauge.
-        assert 'rally_api_latency_milliseconds{service="nova"} 6200.0' in output
-
-    def test_overall_degraded_sets_one(self, results_dir):
-        """overall degraded -> rally_api_overall_up 1 (reachable)."""
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="degraded")))
-        exporter.update_metrics()
-        assert "rally_api_overall_up 1.0" in metrics_output()
-
-    def test_overall_unknown_fails_closed_to_zero(self, results_dir):
-        """A seed/unknown overall FAILS CLOSED to 0, even after a prior healthy
-        signal. Otherwise a corrupt/missing health.json would leave this gauge
-        stuck at 1 while the per-service rally_api_up series are cleared (absent
-        series cannot fire `== 0` alerts), so a broken pipeline would read as
-        all-healthy."""
-        exporter.rally_api_overall_up.set(1)  # simulate a prior "up" signal
-        (results_dir / "health.json").write_text(
-            json.dumps(make_health(overall="unknown"))
-        )
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
-
-    def test_overall_missing_fails_closed_to_zero(self, results_dir):
-        exporter.rally_api_overall_up.set(1)
-        (results_dir / "health.json").write_text(
-            json.dumps({"timestamp": "2024-01-01T12:00:00Z", "services": {}})
-        )
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
-
-    def test_overall_healthy_then_corrupt_flips_to_zero(self, results_dir):
-        """Regression: a healthy scrape (overall up -> 1) followed by a
-        corrupt/missing-overall health.json must flip the gauge to 0, not leave
-        it stuck at 1. This is the exact stale-signal bug the fail-closed change
-        fixes."""
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="up")))
-        exporter.update_metrics()
-        assert "rally_api_overall_up 1.0" in metrics_output()
-        # Now the file loses a valid overall (e.g. truncated/corrupt write).
-        (results_dir / "health.json").write_text(
-            json.dumps({"timestamp": "2024-01-01T12:05:00Z", "services": {}})
-        )
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
-
-    def test_health_updates_when_summary_invalid(self, results_dir):
-        """Health metrics apply even with no/invalid summary (own update cycle)."""
-        (results_dir / "health.json").write_text(json.dumps(make_health()))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert "rally_data_valid 0.0" in output
-        assert 'rally_api_up{service="keystone"} 1.0' in output
-
-    def test_health_labels_clear_when_service_drops(self, results_dir):
-        """A service that disappears from health.json must not leave a stale series."""
-        health_path = results_dir / "health.json"
-        health_path.write_text(json.dumps(make_health()))
-        exporter.update_metrics()
-        assert 'rally_api_up{service="nova"}' in metrics_output()
-
-        # New health snapshot without nova
-        health_path.write_text(json.dumps(make_health(services={
-            "keystone": {"status": "up", "latency_ms": 100, "checked_at": "2024-01-01T12:15:00Z"},
-        })))
-        exporter._health_mtime = -1.0  # force cache miss
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_api_up{service="nova"}' not in output
-        assert 'rally_api_up{service="keystone"} 1.0' in output
-
-    def test_missing_health_file_fails_closed_to_zero(self, results_dir):
-        """With no health.json, load_health returns overall 'unknown', which now
-        fails closed to 0 (was the stale-at-1 bug): a missing health pipeline
-        must not read as healthy."""
-        exporter.rally_api_overall_up.set(1)
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
-
-
-# ---------------------------------------------------------------------------
-# load_announcements
-# ---------------------------------------------------------------------------
-
-class TestLoadAnnouncements:
-    def test_absent_file_returns_default_no_error(self, results_dir):
-        """Absence is the normal pre-first-post state: no error counter bump."""
-        before = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        result = exporter.load_announcements()
-        after = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        assert result == {"announcements": []}
-        assert after == before  # NOT incremented
-
-    def test_corrupt_file_returns_default_and_increments_error(self, results_dir):
-        (results_dir / "announcement-state.json").write_text("{bad json")
-        before = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        result = exporter.load_announcements()
-        after = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        assert result == {"announcements": []}
-        assert after == before + 1
-
-    def test_valid_file_returns_data(self, results_dir):
-        state = {"announcements": [make_announcement()]}
-        (results_dir / "announcement-state.json").write_text(json.dumps(state))
-        result = exporter.load_announcements()
-        assert len(result["announcements"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# _is_announcement_active
-# ---------------------------------------------------------------------------
-
-class TestIsAnnouncementActive:
-    def test_incident_no_bounds_is_active(self):
-        rec = make_announcement(rec_type="incident")
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is True
-
-    def test_unknown_type_not_active(self):
-        rec = make_announcement(rec_type="bogus")
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is False
-
-    def test_future_effective_from_not_active(self):
-        rec = make_announcement(rec_type="scheduled", effective_from=iso_offset(3600),
-                                expires_at=iso_offset(7200))
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is False
-
-    def test_past_expires_at_not_active(self):
-        rec = make_announcement(rec_type="maintenance", expires_at=iso_offset(-60))
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is False
-
-    def test_active_window_is_active(self):
-        rec = make_announcement(rec_type="scheduled", effective_from=iso_offset(-60),
-                                expires_at=iso_offset(3600))
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is True
-
-    def test_unparseable_bounds_ignored(self):
-        rec = make_announcement(rec_type="incident", effective_from="not-a-date",
-                                expires_at="garbage")
-        assert exporter._is_announcement_active(rec, time.time() * 1000.0) is True
-
-
-# ---------------------------------------------------------------------------
-# Announcement metrics — update_metrics / _apply_announcement_metrics
-# ---------------------------------------------------------------------------
-
-class TestAnnouncementMetrics:
-    def test_absent_file_emits_zeros_no_error(self, results_dir):
-        before = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        exporter.update_metrics()
-        after = exporter.rally_exporter_errors_total.labels(
-            file="announcement-state.json"
-        )._value.get()
-        output = metrics_output()
-        assert 'rally_announcement_active{type="incident"} 0.0' in output
-        assert 'rally_announcement_active{type="maintenance"} 0.0' in output
-        assert 'rally_announcement_active{type="scheduled"} 0.0' in output
-        assert "rally_maintenance_mode 0.0" in output
-        assert after == before  # absence is not an error
-
-    def test_active_incident_counted(self, results_dir):
-        state = {"announcements": [make_announcement(rec_type="incident")]}
-        (results_dir / "announcement-state.json").write_text(json.dumps(state))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_announcement_active{type="incident"} 1.0' in output
-        assert "rally_maintenance_mode 0.0" in output
-
-    def test_future_effective_from_not_counted(self, results_dir):
-        state = {"announcements": [make_announcement(
-            rec_type="scheduled", effective_from=iso_offset(3600), expires_at=iso_offset(7200)
-        )]}
-        (results_dir / "announcement-state.json").write_text(json.dumps(state))
-        exporter.update_metrics()
-        assert 'rally_announcement_active{type="scheduled"} 0.0' in metrics_output()
-
-    def test_past_expires_at_not_counted(self, results_dir):
-        state = {"announcements": [make_announcement(
-            rec_type="maintenance", expires_at=iso_offset(-60)
-        )]}
-        (results_dir / "announcement-state.json").write_text(json.dumps(state))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_announcement_active{type="maintenance"} 0.0' in output
-        assert "rally_maintenance_mode 0.0" in output
-
-    def test_active_maintenance_sets_mode(self, results_dir):
-        state = {"announcements": [make_announcement(
-            rec_type="maintenance", expires_at=iso_offset(3600)
-        )]}
-        (results_dir / "announcement-state.json").write_text(json.dumps(state))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_announcement_active{type="maintenance"} 1.0' in output
-        assert "rally_maintenance_mode 1.0" in output
-
-    def test_corrupt_file_emits_zeros(self, results_dir):
-        (results_dir / "announcement-state.json").write_text("{corrupt")
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_announcement_active{type="incident"} 0.0' in output
-        assert 'rally_announcement_active{type="maintenance"} 0.0' in output
-        assert 'rally_announcement_active{type="scheduled"} 0.0' in output
-        assert "rally_maintenance_mode 0.0" in output
+        assert "rally_overall_success 1.0" in output
+        assert 'rally_service_status{service="nova"} 1.0' in output
 
 
 # ---------------------------------------------------------------------------

@@ -57,22 +57,26 @@ cp env.sample .env
 
 The entire system runs in a single Docker container (`rally-monitor`) with three concurrent processes managed by `scripts/entrypoint.sh`:
 
-1. **Prometheus Exporter** (`exporter/rally_exporter.py`) — Flask app on `:9101` that reads JSON files from `/results/` (`latest_summary.json`, `cleanup_metrics.json`, `health.json`, `announcement-state.json`) and exposes them as Prometheus gauge metrics on `/metrics`. Also serves `/health` (liveness) and `/ready` (readiness).
+1. **Prometheus Exporter** (`exporter/rally_exporter.py`, with the API-health gauges in `exporter/health_metrics.py`, the announcement gauges in `exporter/announcement_metrics.py`, and the shared registry/cron-spacing/ISO-parsing helpers in `exporter/metrics_common.py`) — Flask app on `:9101` that reads JSON files from `/results/` (`latest_summary.json`, `cleanup_metrics.json`, `health.json`, `announcement-state.json`) and exposes them as Prometheus gauge metrics on `/metrics`. Also serves `/health` (liveness) and `/ready` (readiness).
 
 2. **Dashboard** (`dashboard/`) — Static files served by Python's `ThreadingHTTPServer` on `:8080`. The dashboard is pure HTML/JS/CSS with no build step; it fetches JSON from symlinked files (`results.json`, `history.json`, `health.json`, `health_history.json`, `announcement-state.json`, `run_state.json`) in the same directory, plus self-contained per-run HTML reports (rendered by `render_report.py`, see Full Report) via the `runs/` symlink.
 
-3. **Cron Jobs** — Two cron schedules:
+3. **Cron Jobs** — `cron -f` runs as a supervised child of `entrypoint.sh` (in its `wait -n` set, so a dead cron exits the container). Two cron schedules:
    - Rally test runs (`RALLY_SCHEDULE_INTERVAL`, default 240 min) → `scripts/run_tests.sh`
    - API health checks (`HEALTH_CHECK_INTERVAL`, default 15 min) → `scripts/health_check.sh`
 
 ### Data Flow
 
 ```
-run_tests.sh
+run_tests.sh                           (orchestration; summary/ledger/publish/prune/run-state/abort
+                                        helpers live in the sourced scripts/run_lib.sh)
   → write_run_state_running()          → /results/run_state.json (state: running; EXIT trap → idle)
   → rally task start <scenario>.yaml   (for each service in RALLY_SERVICES; --tag run-<ts>-<service>)
   → poll live c_rally_* projects       (append IDs to /results/rally_project_ids.log)
-  → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json)
+  → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json; no UUID found
+                                        → <service>.start_failed marker → service "failed" with
+                                        error task_failed_to_start + an empty-state <service>.html
+                                        carrying the reason; "skipped" = no scenario file only)
   → render_report.py <service>.json    (self-contained themed /results/<timestamp>/<service>.html)
   → build_summary()                    → /results/latest_summary.json (first_error per scenario)
   → record_smoke_result()              → /results/smoke_history.json (rolling uptime ledger)
@@ -80,23 +84,43 @@ run_tests.sh
   → announce.sh auto-clear-if-all-green
   → auto_purge_rgw()                   (deletes rally-owned RGW orphans; no-op without RGW creds)
   → cleanup_monitor.sh                 → /results/cleanup_metrics.json
-  → publish_dashboard_files()          → /results/results.json, history.json
-  (deployment_setup_failed path also runs record_smoke_result + publish_dashboard_files + notify.sh
-   before exiting, so the failed run shows as a failed timeline cell instead of the last green run)
+  → finish_run(): prune_old_results()  (before publish, so history.json never lists pruned runs;
+                                        a prune failure is logged, never stops the publish)
+                 run_duration_seconds  → latest_summary.json (before publish, so results.json has it)
+                 publish_dashboard_files() → /results/results.json, history.json
+  (abort_run: the deployment_setup_failed and task_args_write_failed paths write the
+   {services:{}, error} payload independently to latest_summary.json and RUN_DIR/summary.json
+   (RUN_DIR may be what failed; each write is best effort and logged, and latest_summary.json
+   is never copied into RUN_DIR, since after a failed write it holds the previous run), run `record_smoke_result failed` (forced, not classified from
+   latest_summary.json, so the ledger and notify.sh never see a stale green) + publish_dashboard_files +
+   notify.sh, and exit 1, so the failed run shows as a failed timeline cell instead of the
+   last green run. error_detail and the start-failed reason both come from run_lib.sh::log_tail:
+   last 5 log lines, cut to 500 characters (not bytes), invalid UTF-8 replaced)
 
 health_check.sh                        (thin cron wrapper: flock, atomic write w/ `jq empty` validation,
-                                        history append, all-down fallback via health_fallback_filter.jq)
-  → python3 api_health_check.py        (ONE openstacksdk session: authorize()=keystone timing,
+                                        history append, all-down fallback via health_fallback_filter.jq;
+                                        checker wrapped in `timeout $HEALTH_CHECK_TIMEOUT`, a timeout takes the fallback;
+                                        every health.json — checker or fallback — is stamped when the
+                                        check FINISHES, which the exporter's staleness cut-off assumes)
+  → python3 api_health_check.py        (ONE openstacksdk session, api_timeout=30 per request:
+                                        authorize()=keystone timing,
                                         then one read-only GET per service in RALLY_SERVICES;
                                         emits health.json shape on stdout, third status "degraded")
   → /results/health.json, health_history.json (rolling window sized to cover
     UPTIME_WINDOW_DAYS at HEALTH_CHECK_INTERVAL, min 672 entries; carries an
     embedded uptime object computed by scripts/health_history_filter.jq)
 
-rally_exporter.py
+rally_exporter.py (+ health_metrics.py, announcement_metrics.py, metrics_common.py;
+                   tests: test_rally_exporter.py, test_health_metrics.py,
+                   test_announcement_metrics.py, shared conftest.py + exporter_testlib.py)
   → reads latest_summary.json + cleanup_metrics.json + health.json + announcement-state.json each scrape
   → updates Prometheus Gauges in memory (RGW orphan/scan health, rally_api_* from health.json,
     rally_announcement_active/rally_maintenance_mode from announcement-state.json)
+  → a summary with a top-level .error is a valid FAILED run (labeled series cleared,
+    rally_overall_success 0, rally_run_setup_ok 0, rally_run_duration_seconds 0,
+    rally_last_run_timestamp advanced)
+  → health.json older than rally_api_stale_after_seconds (or without a parseable timestamp)
+    is stale: per-service rally_api_* dropped, rally_api_overall_up 0 (re-checked each scrape)
 ```
 
 ### File Layout (runtime volumes)
@@ -148,14 +172,14 @@ Mutating subcommands wrap their read-modify-write cycle in `flock` on `/results/
 
 The dashboard renders one banner above the 7-day timeline. Body text is rendered via `textContent` (no Markdown, no HTML); a `<details>` element exposes progress updates and other concurrent records. Each banner carries a visible bracketed type label (`[INCIDENT]` / `[MAINTENANCE]` / `[SCHEDULED]`) so color is not the sole signal — color tokens reused from the public theme contract: `--color-failure` (incident), `--color-warning` (maintenance), `--color-brand-secondary` (scheduled). Auto-refresh preserves `<details>` open state when the same primary announcement is still active.
 
-`rally_exporter.py::_apply_announcement_metrics` reads the same `announcement-state.json` on every scrape and emits `rally_announcement_active{type}` (all three enum labels always present, 0 when none) plus unlabeled `rally_maintenance_mode` (1 iff any `maintenance` record is active). A missing state file yields zeros, not an exporter error. The active-ness predicate (`_is_announcement_active`: unknown type → inactive; future `effective_from` → inactive; past/now `expires_at` → inactive; unparseable bounds ignored) is **KEEP IN SYNC** with `dashboard/app.js::isAnnouncementActive`; label cardinality is enum-only (`_ANNOUNCEMENT_TYPES`, mirroring `TYPE_LABELS` in app.js and `VALID_TYPES_RE` in announce.sh), so body/id text never becomes a label. `rally_maintenance_mode` drives the commented-out, opt-in maintenance-inhibition variants of `RallyTestFailure`/`RallyServiceDown`/`RallySLABreach` in `prometheus/rally_alerts.yml` (`… unless on() rally_maintenance_mode == 1`; `on()` matches the unlabeled gauge against each rule's label set), so one `announce.sh post --type maintenance` can silence both the banner and those alerts.
+`announcement_metrics.py::apply_announcement_metrics` reads the same `announcement-state.json` on every scrape and emits `rally_announcement_active{type}` (all three enum labels always present, 0 when none) plus unlabeled `rally_maintenance_mode` (1 iff any `maintenance` record is active). A missing state file yields zeros, not an exporter error. The active-ness predicate (`is_announcement_active`: unknown type → inactive; future `effective_from` → inactive; past/now `expires_at` → inactive; unparseable bounds ignored) is **KEEP IN SYNC** with `dashboard/app.js::isAnnouncementActive`; label cardinality is enum-only (`ANNOUNCEMENT_TYPES`, mirroring `TYPE_LABELS` in app.js and `VALID_TYPES_RE` in announce.sh), so body/id text never becomes a label. `rally_maintenance_mode` drives the commented-out, opt-in maintenance-inhibition variants of `RallyTestFailure`/`RallyServiceDown`/`RallySLABreach` in `prometheus/rally_alerts.yml` (`… unless on(job, instance) rally_maintenance_mode == 1`; the gauge carries only the scrape labels, so `on(job, instance)` matches it against each rule's labeled series without suppressing other monitor instances), so one `announce.sh post --type maintenance` can silence both the banner and those alerts.
 
 ### Uptime Tracking
 
 The dashboard shows two uptime badges (in the timeline section headers), both computed over `UPTIME_WINDOW_DAYS` (default 30):
 
 - **Smoke-test uptime** — `run_tests.sh::record_smoke_result` appends `{timestamp, status}` to `/results/smoke_history.json` after every run (including the deployment-failure path) and recomputes the embedded `uptime` object. A run is `passed` only under the same all-green predicate `announce.sh` uses (non-empty services, no `.error`, all passed) — the predicate is duplicated in both scripts with keep-in-sync cross-references. The ledger is pruned by timestamp, so uptime coverage is independent of `RALLY_RESULTS_RETENTION_DAYS`. `publish_dashboard_files` embeds `uptime` into `results.json`; `record_smoke_result` also syncs it directly into an existing `results.json`. The deployment-failure path now calls `publish_dashboard_files` right after `record_smoke_result`, so `results.json`/`history.json` reflect the failure instead of the last green run — this is correct because `dashboard/app.js::getRunStatus` treats a summary with a non-empty `.error` OR empty services as **failed** (it no longer renders "All Healthy"). The failed run therefore appears as a failed timeline cell with the error surfaced in the tooltip (`Error: <error>`). The standalone `record_smoke_result` sync is retained as belt-and-suspenders for direct invocations and any future early-exit path that exits before a publish.
-- **API uptime** — `health_check.sh` applies `scripts/health_history_filter.jq` (via `jq -f`, so tests exercise the shipped filter) to append the check, cap stored history (`UPTIME_WINDOW_DAYS * 24 * 60 / HEALTH_CHECK_INTERVAL`, floored at 672 so the 7-day health timeline never shrinks), and embed `uptime` into `health_history.json`. The count cap bounds storage; the timestamp cutoff defines the uptime window — they are intentionally separate. Uptime measures **reachability, not speed**: the filter counts a check as up whenever `.overall != "down"`, so a `degraded` check (every service answered but at least one exceeded `HEALTH_LATENCY_WARN_MS`) does not depress availability. This is **KEEP IN SYNC** with `rally_exporter.py::_apply_health_metrics`, which likewise treats `degraded`/`up` as `rally_api_up == 1`. (The unlabeled `rally_api_overall_up` gauge is intentionally stricter — it **fails closed**, mapping anything other than `up`/`degraded` to 0, including `unknown`/missing; see Prometheus Integration.)
+- **API uptime** — `health_check.sh` applies `scripts/health_history_filter.jq` (via `jq -f`, so tests exercise the shipped filter) to append the check, cap stored history (`UPTIME_WINDOW_DAYS * 24 * 60 / HEALTH_CHECK_INTERVAL`, floored at 672 so the 7-day health timeline never shrinks), and embed `uptime` into `health_history.json`. The count cap bounds storage; the timestamp cutoff defines the uptime window — they are intentionally separate. Uptime measures **reachability, not speed**: the filter counts a check as up whenever `.overall != "down"`, so a `degraded` check (every service answered but at least one exceeded `HEALTH_LATENCY_WARN_MS`) does not depress availability. This is **KEEP IN SYNC** with `health_metrics.py::apply_health_metrics`, which likewise treats `degraded`/`up` as `rally_api_up == 1`. (The unlabeled `rally_api_overall_up` gauge is intentionally stricter — it **fails closed**, mapping anything other than `up`/`degraded` to 0, including `unknown`/missing; see Prometheus Integration.)
 
 `dashboard/app.js::renderUptimeBadge` hides a badge until its `uptime.percent` is a number, so first boots and pre-feature data files render unchanged. The latency chart plots at most `HEALTH_CHART_MAX_POINTS` (672) checks regardless of stored history size. Uptime is dashboard-only by design — Prometheus users can derive it with `avg_over_time()` on existing gauges.
 
@@ -182,6 +206,7 @@ Located in `rally/scenarios/`. The monitored service set is configurable via `RA
 | `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Configurable monitored service set (normalized identically in `run_tests.sh`, `api_health_check.py`, and `health_fallback_filter.jq`; names must match `^[a-z0-9_-]+$`, invalid tokens dropped, all-invalid falls back to default; keystone always health-checked) |
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Requested cron interval for full test runs; field rollover can shorten one gap (see README) |
 | `HEALTH_CHECK_INTERVAL` | `15` | Requested cron interval for lightweight health checks; field rollover can shorten one gap (see README) |
+| `HEALTH_CHECK_TIMEOUT` | `300` | Seconds before `health_check.sh` kills the checker (then publishes all-down); also floors the exporter's `health.json` staleness threshold. Set once in `entrypoint.sh` (1..3600) and shared |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency threshold above which a reachable service is reported `degraded` (counts as up for uptime/`rally_api_up`) |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days before old run directories are pruned |
 | `PROVENANCE_RETENTION_DAYS` | `90` | Days before `rally_project_ids.log` entries are pruned; decoupled from `RALLY_RESULTS_RETENTION_DAYS` (it is the RGW auto-purge authorization ledger) |
@@ -217,9 +242,11 @@ Behavior: off (silent no-op) unless `NOTIFY_WEBHOOK_URL` is set; a missing state
 ### Prometheus Integration
 
 - Scrape target: `<host>:9101/metrics`
-- API health gauges (from `health.json`): `rally_api_up{service}` (degraded counts as up — reachability, not speed; clear-before-set each scrape, so a service dropping out of a snapshot leaves no stale series and a corrupt/missing file leaves NO per-service series), `rally_api_latency_milliseconds{service}` (where degraded slowness is visible), and unlabeled `rally_api_overall_up` which **fails closed**: `up`/`degraded` → 1, everything else → 0 (explicit `down`, `unknown`/missing overall, corrupt/missing file, any unrecognized value). Because per-service series vanish when the pipeline breaks, this unlabeled gauge is the only one that can still signal a blind exporter — hence it must not retain a stale `1`
+- API health gauges (from `health.json`): `rally_api_up{service}` (degraded counts as up — reachability, not speed; clear-before-set each scrape, so a service dropping out of a snapshot leaves no stale series and a corrupt/missing file leaves NO per-service series), `rally_api_latency_milliseconds{service}` (where degraded slowness is visible), and unlabeled `rally_api_overall_up` which **fails closed**: `up`/`degraded` → 1, everything else → 0 (explicit `down`, `unknown`/missing overall, corrupt/missing file, any unrecognized value). Because per-service series vanish when the pipeline breaks, this unlabeled gauge is the only one that can still signal a blind exporter — hence it must not retain a stale `1`. Staleness is re-evaluated on every scrape (an unchanged file ages): a `health.json` whose `timestamp` is older than `health_metrics.py::HEALTH_STALE_AFTER_SECONDS` or unparseable drops the per-service series and sets the overall gauge to 0. The threshold is three health-check intervals, floored at one interval + `HEALTH_CHECK_TIMEOUT` + 60s so one slow check never reads as stale; it is exported as `rally_api_stale_after_seconds`. `HEALTH_CHECK_TIMEOUT` (default 300 s) has one source: `entrypoint.sh` normalizes it (`normalize_timeout`, 1..3600) and exports it to the exporter and, via `rally_env`, to `health_check.sh` (the kill deadline); the scripts' own 300 fallbacks only cover a run without the entrypoint. `rally_api_last_check_timestamp` keeps the last parseable check time while `health.json` is missing or corrupt (0 only until a first check is seen), so `RallyApiHealthStale`, which ignores 0, still fires for a pipeline that breaks after working; after an exporter restart onto a broken file, `RallyApiSignalLost` is the remaining signal. `rally_api_last_check_timestamp` exports the check time
+- Threshold gauges (set once at import): `rally_schedule_interval_seconds` is the longest gap cron leaves for `RALLY_SCHEDULE_INTERVAL`, and the health interval feeding `rally_api_stale_after_seconds` is the same for `HEALTH_CHECK_INTERVAL` (`metrics_common.py::cron_spacing_seconds`, **KEEP IN SYNC** with `entrypoint_config.sh::make_cron_schedule`'s whole-hour round-up). The exporter reads both env vars directly (inherited through `su`); `entrypoint.sh` refuses to start on an invalid value, so the exporter's default fallback only covers unset vars
+- Run gauges: a summary with a top-level `.error` (`deployment_setup_failed`, `task_args_write_failed`) is valid data about a failed run — per-service series cleared, `rally_overall_success` 0, `rally_run_setup_ok` 0, `rally_run_duration_seconds` 0, `rally_last_run_timestamp` advanced. `rally_run_setup_ok` keeps its last value while the summary is unreadable (only meaningful with `rally_data_valid == 1`; its alert is gated on that). `rally_last_run_end_timestamp` = start + `run_duration_seconds` (just the start while the duration is not yet written or for an aborted run). A service whose task never started is `status: "failed"` with `error: "task_failed_to_start"`, so it clears `rally_overall_success` like any failure; the dashboard modal and its empty-state report show the reason
 - Announcement gauges (from `announcement-state.json`): `rally_announcement_active{type}` (all three enum labels always emitted) and `rally_maintenance_mode`
-- Alert rules: copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and add it under `rule_files:` in `prometheus.yml`. The `rally_api` group adds `RallyApiDown` (critical, `rally_api_up == 0`, `for: 20m`) and `RallyApiSignalLost` (warning, `rally_api_overall_up == 0`, `for: 60m` — covers both a sustained overall outage and a broken/stale health pipeline whose absent per-service series cannot fire `RallyApiDown`); `RallyTestFailure`/`RallyServiceDown`/`RallySLABreach` carry commented opt-in `unless on() rally_maintenance_mode == 1` inhibition variants
+- Alert rules: copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and add it under `rule_files:` in `prometheus.yml`. The `rally_api` group adds `RallyApiDown` (critical, `rally_api_up == 0`, `for: 20m`) and `RallyApiSignalLost` (warning, `rally_api_overall_up == 0`, `for: 60m` — covers both a sustained overall outage and a broken/stale health pipeline whose absent per-service series cannot fire `RallyApiDown`) plus the narrower `RallyApiHealthStale` (warning, check older than `rally_api_stale_after_seconds`, `for: 15m`, ignores a 0 timestamp). `RallyStaleResults` measures from `rally_last_run_end_timestamp` and fires past `2 * rally_schedule_interval_seconds + rally_run_duration_seconds` (the next run finishes within one interval plus its own duration, even when cron ticks are skipped under the run flock); `RallyRunSetupFailed` (critical, `rally_run_setup_ok == 0`) owns aborted runs and `RallyOverallFailure` excludes them via a plain `unless rally_run_setup_ok == 0` (same labels, so per instance). **Label matching:** the labeled rules guard with `and on(job, instance) rally_data_valid == 1` — a bare `and` compares all labels and never matches `service`/`scenario` series (this silently disabled `RallyTestFailure`/`RallyServiceDown`/`RallySLABreach` before). Every alert has a `runbook` annotation (the four test-result alerts share one through a YAML anchor); purge runbooks dry-run first and use `-u rally`. `RallyTestFailure`/`RallyServiceDown`/`RallySLABreach` carry commented opt-in `unless on(job, instance) rally_maintenance_mode == 1` inhibition variants. `prometheus/rally_alerts_test.yml` holds promtool unit tests (assert on `ALERTS`, every series carries job/instance); `exporter/test_alert_rules.py` runs them when `promtool` is on PATH and skips otherwise — CI does not install promtool
 - Uptime is dashboard-only by design; derive it Prometheus-side with `avg_over_time(rally_api_up[30d])`
 
 ### CI

@@ -115,3 +115,15 @@ def test_atomic_bars_shapes_chart_data():
     out = _eval_json("atomicBars", f"atomicBars({atomics})")
     assert out["labels"] == ["nova.boot", "nova.delete"]
     assert out["data"] == [20.5, 9]
+
+
+# --- errorHeading -----------------------------------------------------------
+
+def test_error_heading_is_generic_with_code():
+    assert _eval("errorHeading", 'errorHeading({error_code: "task_failed_to_start", error: "x"})') == (
+        "Service error: task_failed_to_start"
+    )
+
+
+def test_error_heading_without_code():
+    assert _eval("errorHeading", 'errorHeading({error: "x"})') == "Service error"

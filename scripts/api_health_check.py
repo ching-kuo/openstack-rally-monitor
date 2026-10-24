@@ -41,6 +41,13 @@ DEPENDENT_SERVICES = ("nova", "neutron", "glance", "cinder", "swift")
 
 DEFAULT_WARN_MS = 5000
 
+# Per-request timeout (seconds) for every API call, token issuance included.
+# Without it a hung endpoint blocks the checker indefinitely and, because
+# health_check.sh holds a non-blocking flock, every later cron check exits
+# early: health.json silently stops updating. health_check.sh also wraps the
+# whole checker in `timeout` as a backstop.
+API_TIMEOUT_SECONDS = 30
+
 # Default monitored service set; mirrors run_tests.sh DEFAULT_RALLY_SERVICES.
 DEFAULT_RALLY_SERVICES = ("keystone", "nova", "neutron", "glance", "cinder", "swift")
 
@@ -273,11 +280,12 @@ def build_connection():
     test/dev environments without openstacksdk. ``openstack.connect()`` reads
     the standard ``OS_*`` environment variables (``cloud='envvars'`` default).
     openstacksdk ships in the image as a python-openstackclient dependency, so
-    it is intentionally NOT added to any requirements file.
+    it is intentionally NOT added to any requirements file. ``api_timeout``
+    bounds each request (see API_TIMEOUT_SECONDS).
     """
     import openstack  # noqa: PLC0415 - lazy import; see docstring
 
-    return openstack.connect()
+    return openstack.connect(api_timeout=API_TIMEOUT_SECONDS)
 
 
 def main(argv=None) -> int:

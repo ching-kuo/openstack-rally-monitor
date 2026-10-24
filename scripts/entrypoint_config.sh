@@ -51,6 +51,12 @@ normalize_interval() {
     _normalize_bounded_decimal "${1-}" 1 1440 "${2:-Schedule interval}"
 }
 
+# Seconds; shared by health_check.sh (kill deadline) and the exporter
+# (staleness floor) through the exported HEALTH_CHECK_TIMEOUT.
+normalize_timeout() {
+    _normalize_bounded_decimal "${1-}" 1 3600 "${2:-Timeout}"
+}
+
 normalize_port() {
     _normalize_bounded_decimal "${1-}" 1 65535 "${2:-Port}"
 }

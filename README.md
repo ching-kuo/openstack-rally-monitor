@@ -155,6 +155,7 @@ All settings are controlled via environment variables in `.env`.
 | `RALLY_SERVICES` | `keystone,nova,neutron,glance,cinder,swift` | Comma-separated set of services to monitor. Trim to match your cloud (e.g. drop `swift` on a deployment without object storage). Parsed defensively (trimmed, lowercased, deduped, order-preserving); names must match `^[a-z0-9_-]+$` (lowercase letters, digits, `_`, `-`) — any token failing the allowlist is dropped, and if every token is dropped the default set is used. Unknown but valid names are skipped with a log line. `keystone` is always health-checked (the session authenticates against it) |
 | `RALLY_SCHEDULE_INTERVAL` | `240` | Requested cron interval for full Rally test runs, in minutes; decimal integer `1..1440`. Values at least 60 minutes that are not whole hours round up to the next hour for cron |
 | `HEALTH_CHECK_INTERVAL` | `15` | Requested cron interval for lightweight API health checks, in minutes; decimal integer `1..1440` with the same cron rounding policy |
+| `HEALTH_CHECK_TIMEOUT` | `300` | Seconds before a hung health check is killed and an all-down result published; also the floor of the exporter's `health.json` staleness threshold. Decimal integer `1..3600` |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency in ms above which a reachable service is reported `degraded`. Degraded counts as up for uptime/`rally_api_up`; the slowness shows in `rally_api_latency_milliseconds` |
 | `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning |
 | `PROVENANCE_RETENTION_DAYS` | `90` | Days to keep `rally_project_ids.log` (the RGW auto-purge authorization ledger). Deliberately decoupled from `RALLY_RESULTS_RETENTION_DAYS` |
@@ -179,7 +180,7 @@ does not divide 24 has one shorter gap at midnight.
 
 ## Scenarios
 
-Each service has a dedicated YAML scenario in `rally/scenarios/`. The monitored set is configurable via `RALLY_SERVICES` (default: all six below); a configured name without a matching `rally/scenarios/<name>.yaml` is skipped with a `SKIP` log line rather than failing the run.
+Each service has a dedicated YAML scenario in `rally/scenarios/`. The monitored set is configurable via `RALLY_SERVICES` (default: all six below); a configured name without a matching `rally/scenarios/<name>.yaml` is skipped with a `SKIP` log line rather than failing the run. A service whose scenario file exists but whose Rally task never starts (no task UUID) is reported **failed** with `error: "task_failed_to_start"`, not skipped; the dashboard modal and its "Full Rally report" show the tail of the task log as the reason.
 
 | Service | Tests |
 |---------|-------|
@@ -198,7 +199,12 @@ All metrics are exposed on `:9101/metrics`. Alongside the existing `rally_task_*
 |--------|--------|---------|
 | `rally_api_up` | `service` | API health check reachable (1) or down (0). `degraded` (slow but reachable) counts as **up** — this gauge measures reachability, not speed |
 | `rally_api_latency_milliseconds` | `service` | Latency of the last health check. This is where a `degraded` service is visible — alert here for latency-based warnings |
-| `rally_api_overall_up` | — | Overall API health, **fail-closed**: `up`/`degraded` → 1; everything else → 0 — `down`, `unknown`/missing overall (e.g. the seed `health.json` on a fresh volume, or a corrupt/missing file), and any unrecognized value. Semantics: `1` = the most recent health data reports overall reachability; `0` = down OR no valid signal. When the health pipeline breaks, the per-service `rally_api_up` series vanish (so they cannot fire `== 0`) and only this gauge can still signal the loss — see `RallyApiSignalLost` |
+| `rally_api_overall_up` | — | Overall API health, **fail-closed**: `up`/`degraded` → 1; everything else → 0 — `down`, `unknown`/missing overall (e.g. the seed `health.json` on a fresh volume, or a corrupt/missing file), and any unrecognized value. Semantics: `1` = the most recent health data reports overall reachability; `0` = down OR no valid signal. When the health pipeline breaks, the per-service `rally_api_up` series vanish (so they cannot fire `== 0`) and only this gauge can still signal the loss — see `RallyApiSignalLost`. A `health.json` older than three health-check intervals counts as stale: per-service series are dropped and this gauge reads 0 |
+| `rally_api_last_check_timestamp` | — | Epoch time of the last health check the exporter read; kept while `health.json` is missing or corrupt, 0 until a first check is seen (so a fresh container does not alert); drives `RallyApiHealthStale` |
+| `rally_api_stale_after_seconds` | — | Age after which `health.json` counts as stale: three health-check intervals (45 min at the default), never less than one interval plus `HEALTH_CHECK_TIMEOUT` + 60 s |
+| `rally_schedule_interval_seconds` | — | Longest gap cron leaves between Rally runs (`RALLY_SCHEDULE_INTERVAL` after the whole-hour round-up) |
+| `rally_last_run_end_timestamp` | — | When the last run finished: its start plus `rally_run_duration_seconds` (just its start for a run aborted during setup); `RallyStaleResults` measures from here |
+| `rally_run_setup_ok` | — | 0 when the last run aborted during setup, before any test (its summary carries a top-level `error`: `deployment_setup_failed` or `task_args_write_failed`), else 1. Such a run also clears the per-service series and sets `rally_overall_success` and `rally_run_duration_seconds` to 0. Only meaningful while `rally_data_valid` is 1 |
 | `rally_announcement_active` | `type` | Count of currently-active announcements per type; all three labels (`incident`, `maintenance`, `scheduled`) are always emitted (0 when none) |
 | `rally_maintenance_mode` | — | 1 when any `maintenance`-type announcement is active, else 0 (drives the optional alert inhibition below) |
 
@@ -220,15 +226,21 @@ Defined in `prometheus/rally_alerts.yml`.
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
 | `RallyApiDown` | critical | A service's lightweight API health check has reported down for >20 min |
-| `RallyApiSignalLost` | warning | `rally_api_overall_up == 0` for >60 min — a sustained overall outage OR a broken/stale health pipeline (corrupt or missing `health.json`, whose absent per-service series cannot fire `RallyApiDown`) |
-| `RallyStaleResults` | warning | No new results in >2 hours |
-| `RallyOverallFailure` | critical | One or more services failing |
+| `RallyApiSignalLost` | warning | `rally_api_overall_up == 0` for >60 min — a sustained overall outage OR a broken/stale health pipeline (corrupt, missing, or stale `health.json`, whose absent per-service series cannot fire `RallyApiDown`) |
+| `RallyApiHealthStale` | warning | `health.json` older than `rally_api_stale_after_seconds` (45 min at the default) for >15 min — the checks stopped, not necessarily the cloud |
+| `RallyStaleResults` | warning | No run finished for over two schedule intervals plus the last run's duration (8 h + run time at the default `RALLY_SCHEDULE_INTERVAL=240`) |
+| `RallyRunSetupFailed` | critical | The last run aborted during setup, before any test — `error` in `latest_summary.json` says which step (`deployment_setup_failed`: Keystone auth or `OS_AUTH_URL`; `task_args_write_failed`: `/results` not writable) |
+| `RallyOverallFailure` | critical | One or more services failing (an aborted run is left to `RallyRunSetupFailed`) |
 
-`RallyApiDown` fires on `rally_api_up == 0` with `for: 20m` (two consecutive 15-minute health checks), making it the fastest available outage signal — far ahead of the ~4-hour Rally cadence. A `degraded` (slow-but-reachable) service keeps `rally_api_up == 1`, so alert on `rally_api_latency_milliseconds` if you want a latency-based warning. `RallyApiSignalLost` (warning, `for: 60m`) is the fail-closed companion: `rally_api_overall_up` is `0` on a real overall outage AND when the health pipeline itself breaks (corrupt or missing `health.json`). In the broken-pipeline case the per-service `rally_api_up` series are absent and cannot fire `RallyApiDown`, so this catch-all is the only signal that survives a blind exporter — `RallyApiDown` stays the page-worthy critical, `RallyApiSignalLost` stays a warning.
+`RallyApiDown` fires on `rally_api_up == 0` with `for: 20m` (two consecutive 15-minute health checks), making it the fastest available outage signal — far ahead of the ~4-hour Rally cadence. A `degraded` (slow-but-reachable) service keeps `rally_api_up == 1`, so alert on `rally_api_latency_milliseconds` if you want a latency-based warning. `RallyApiSignalLost` (warning, `for: 60m`) is the fail-closed companion: `rally_api_overall_up` is `0` on a real overall outage AND when the health pipeline itself breaks (corrupt or missing `health.json`). In the broken-pipeline case the per-service `rally_api_up` series are absent and cannot fire `RallyApiDown`, so this catch-all is the only signal that survives a blind exporter — `RallyApiDown` stays the page-worthy critical, `RallyApiSignalLost` stays a warning. The exporter also treats a `health.json` older than three check intervals as stale (the checker uses a 30 s per-request API timeout, `health_check.sh` kills a run after `HEALTH_CHECK_TIMEOUT` (300 s), and cron is a supervised process), so a stalled pipeline reaches this alert too; `RallyApiHealthStale` names that case specifically.
+
+Every alert carries a `runbook` annotation. Purge runbooks always preview with a dry run (`docker exec -u rally rally-monitor /scripts/purge_orphans.sh`) before `--confirm`.
 
 ### Maintenance inhibition (opt-in)
 
-`RallyTestFailure`, `RallyServiceDown`, and `RallySLABreach` ship with commented-out maintenance-inhibition variants. Uncomment the `… unless on() rally_maintenance_mode == 1` form of each `expr` to suppress these flappy alerts while an operator has posted a `maintenance`-type announcement, so a single `announce.sh post --type maintenance` silences both the dashboard banner and the alerts during a planned window. `rally_maintenance_mode` is unlabeled, so the `unless` needs `on()` to match the empty label set.
+`RallyTestFailure`, `RallyServiceDown`, and `RallySLABreach` ship with commented-out maintenance-inhibition variants. Uncomment the `… unless on(job, instance) rally_maintenance_mode == 1` form of each `expr` to suppress these flappy alerts while an operator has posted a `maintenance`-type announcement, so a single `announce.sh post --type maintenance` silences both the dashboard banner and the alerts during a planned window. `rally_maintenance_mode` carries only the scrape labels (`job`, `instance`), so the `unless` matches `on(job, instance)` — the same reason the labeled test alerts guard with `and on(job, instance) rally_data_valid == 1` (a bare `and` compares every label and never matches a `service`-labeled series).
+
+The rules have promtool unit tests in `prometheus/rally_alerts_test.yml`: `promtool test rules prometheus/rally_alerts_test.yml` (the pytest suite runs them when `promtool` is on `PATH`).
 
 > **Health-check latency baseline caveat:** as of this version the health check uses a single authenticated openstacksdk session instead of six per-service CLI invocations, so `rally_api_latency_milliseconds` now measures the API round-trip rather than ~1–3 s of CLI startup + token issuance. Latency values **step down** at upgrade — re-baseline any latency alerts tuned against the previous CLI-based numbers.
 
@@ -394,6 +406,7 @@ openstack-rally-monitor/
 ├── scripts/
 │   ├── entrypoint.sh
 │   ├── run_tests.sh
+│   ├── run_lib.sh
 │   ├── health_check.sh
 │   ├── cleanup_monitor.sh
 │   ├── purge_orphans.sh
@@ -403,13 +416,16 @@ openstack-rally-monitor/
 │   └── patch_rally.py
 ├── exporter/
 │   ├── rally_exporter.py
+│   ├── health_metrics.py
+│   ├── announcement_metrics.py
+│   ├── metrics_common.py
 │   ├── requirements.txt
 │   ├── requirements-test.txt
-│   ├── test_rally_exporter.py
-│   └── test_rgw_helpers.py
+│   ├── test_*.py, conftest.py, exporter_testlib.py
 ├── prometheus/
 │   ├── prometheus.yml
-│   └── rally_alerts.yml
+│   ├── rally_alerts.yml
+│   └── rally_alerts_test.yml
 ├── dashboard/
 │   ├── index.html
 │   ├── style.css

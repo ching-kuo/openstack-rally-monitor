@@ -15,12 +15,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 HEALTH_FILE="${RESULTS_DIR}/health.json"
-TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [health-check] $*" >&2; }
 
 log "Starting health checks..."
-LOCKFILE="/rally/logs/rally-health.lock"
+# HEALTH_LOCKFILE overrides the lock path (tests run outside the container).
+LOCKFILE="${HEALTH_LOCKFILE:-/rally/logs/rally-health.lock}"
 exec 200>"${LOCKFILE}"
 flock -n 200 || { log "Another health check is already in progress, exiting."; exit 0; }
 
@@ -32,11 +32,22 @@ flock -n 200 || { log "Another health check is already in progress, exiting."; e
 # stdout pollution (a stray banner from a dependency) can never replace
 # health.json with an unparseable document — consumers (the history filter,
 # the exporter, the dashboard) all assume valid JSON.
-if python3 "${SCRIPT_DIR}/api_health_check.py" > "${HEALTH_FILE}.tmp" 2>>/dev/null \
+#
+# `timeout` is a backstop for the checker's per-request api_timeout: a hung run
+# would otherwise hold the flock forever, every later cron check would exit
+# early, and health.json would silently stop updating. A timed-out run is a
+# failed run, so it takes the all-down branch below.
+# HEALTH_CHECK_TIMEOUT is set once by entrypoint.sh and also read by the
+# exporter, whose staleness threshold is never shorter than an interval plus
+# this; the 300 fallback only covers a direct invocation without it
+# (KEEP IN SYNC with entrypoint.sh and health_metrics.py::parse_check_timeout).
+CHECK_TIMEOUT_SECONDS="${HEALTH_CHECK_TIMEOUT:-300}"
+if timeout "${CHECK_TIMEOUT_SECONDS}" python3 "${SCRIPT_DIR}/api_health_check.py" \
+        > "${HEALTH_FILE}.tmp" 2>>/dev/null \
         && jq empty "${HEALTH_FILE}.tmp" 2>/dev/null; then
     mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"
 else
-    log "ERROR: api_health_check.py failed or emitted invalid JSON; writing all-down health document."
+    log "ERROR: api_health_check.py failed, timed out, or emitted invalid JSON; writing all-down health document."
     rm -f "${HEALTH_FILE}.tmp"
     # The all-down set honors RALLY_SERVICES like the checker itself (keystone
     # always present), so a trimmed deployment never gains phantom down
@@ -44,8 +55,14 @@ else
     # series. The shipped filter file is used (rather than an inline program)
     # so tests exercise exactly this code path; normalization rules and the
     # keep-in-sync contract are documented in health_fallback_filter.jq.
+    #
+    # Stamped NOW, at publish time, like the checker's own document (its
+    # timestamp is taken when the checks finish). The exporter's staleness
+    # cut-off (health_metrics.py::stale_after_seconds) assumes completion
+    # stamps; a start stamp would make back-to-back timed-out checks look stale
+    # between publishes and drop the rally_api_up=0 series RallyApiDown needs.
     jq -n -f "${SCRIPT_DIR}/health_fallback_filter.jq" \
-          --arg ts "${TIMESTAMP}" \
+          --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           --arg raw "${RALLY_SERVICES:-}" \
           --arg default "keystone,nova,neutron,glance,cinder,swift" \
         > "${HEALTH_FILE}.tmp" && mv "${HEALTH_FILE}.tmp" "${HEALTH_FILE}"

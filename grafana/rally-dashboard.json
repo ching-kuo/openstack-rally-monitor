@@ -171,6 +171,14 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 21600
+              },
+              {
+                "color": "red",
+                "value": 28800
               }
             ]
           },
@@ -210,7 +218,8 @@
         }
       ],
       "title": "Data Age",
-      "type": "stat"
+      "type": "stat",
+      "description": "Time since the last Rally run started. Thresholds assume the default RALLY_SCHEDULE_INTERVAL of 240m: yellow at 6h, red at 8h (RallyStaleResults fires once no run has finished for two intervals plus the last run duration). Scale them if you change the interval."
     },
     {
       "datasource": {
@@ -283,7 +292,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rally_service_status{service=~\"keystone|nova|neutron|glance|cinder|swift\"}",
+          "expr": "rally_service_status",
           "instant": true,
           "legendFormat": "{{service}}",
           "range": false,
@@ -291,7 +300,8 @@
         }
       ],
       "title": "Per-Service Status",
-      "type": "stat"
+      "type": "stat",
+      "description": "1 = passed, 0 = failed, -1 = skipped/pending. Shows every service in RALLY_SERVICES."
     },
     {
       "datasource": {
@@ -345,8 +355,9 @@
         }
       ],
       "timeFrom": "7d",
-      "title": "Failed Iterations (7d)",
-      "type": "timeseries"
+      "title": "Failed Iterations per Run",
+      "type": "timeseries",
+      "description": "Failed iterations in the most recent run per service (a last-run gauge, not a running total), plotted over the last 7 days."
     },
     {
       "datasource": {
@@ -415,17 +426,17 @@
       ],
       "title": "SLA Results",
       "transformations": [
-	    {
-	      "id": "labelsToFields",
-	      "options": {
-	        "mode": "columns"
-	      }
-	    },
-	    {
-	      "id": "organize",
-	      "options": {
-	        "excludeByName": {
-          "Time": true
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
             },
             "indexByName": {
               "Value": 2,
@@ -512,30 +523,30 @@
       ],
       "title": "Orphaned Resources",
       "transformations": [
-	        {
-	          "id": "labelsToFields",
-	          "options": {
-	            "mode": "columns"
-	          }
-	        },
-	        {
-	          "id": "merge",
-	          "options": {}
-	        },
-	        {
-	          "id": "organize",
-	          "options": {
-	            "excludeByName": {
-	              "Time": true
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
             },
-        "indexByName": {
-          "Value": 3,
-          "resource_type": 1,
-          "service": 0,
-          "type": 2
+            "indexByName": {
+              "Value": 3,
+              "resource_type": 1,
+              "service": 0,
+              "type": 2
+            }
+          }
         }
-      }
-    }
       ],
       "type": "table"
     },

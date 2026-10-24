@@ -23,6 +23,12 @@ source "${SCRIPT_DIR}/entrypoint_config.sh"
 # side effects. Downstream shell command strings receive normalized digits only.
 SCHEDULE_INTERVAL=$(normalize_interval "${SCHEDULE_INTERVAL}" "RALLY_SCHEDULE_INTERVAL")
 HEALTH_CHECK_INTERVAL=$(normalize_interval "${HEALTH_CHECK_INTERVAL}" "HEALTH_CHECK_INTERVAL")
+# Normalized once and exported so both the exporter (started below) and cron's
+# health_check.sh (via rally_env) read the same value. KEEP IN SYNC: the 300
+# default and 1..3600 bounds are repeated as fallbacks for runs without this
+# entrypoint in health_check.sh and exporter/health_metrics.py::parse_check_timeout.
+HEALTH_CHECK_TIMEOUT=$(normalize_timeout "${HEALTH_CHECK_TIMEOUT:-300}" "HEALTH_CHECK_TIMEOUT")
+export HEALTH_CHECK_TIMEOUT
 EXPORTER_PORT=$(normalize_port "${EXPORTER_PORT}" "EXPORTER_PORT")
 DASHBOARD_PORT=$(normalize_port "${DASHBOARD_PORT}" "DASHBOARD_PORT")
 
@@ -232,7 +238,7 @@ RALLY_ENV_VARS=(
     RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION
     RALLY_CONFIG_DIR
     RESULTS_DIR EXPORTER_PORT DASHBOARD_PORT HEALTH_CHECK_INTERVAL
-    HEALTH_LATENCY_WARN_MS
+    HEALTH_LATENCY_WARN_MS HEALTH_CHECK_TIMEOUT
     UPTIME_WINDOW_DAYS PROVENANCE_RETENTION_DAYS
     NOTIFY_WEBHOOK_URL NOTIFY_FORMAT NOTIFY_DASHBOARD_URL
 )
@@ -271,8 +277,11 @@ touch /rally/logs/health-check.log && chmod 0660 /rally/logs/health-check.log
 tail -F -n 0 -q /rally/logs/rally-tests.log /rally/logs/health-check.log &
 LOG_TAIL_PID=$!
 
-# Start cron daemon
-cron
+# Start cron in the foreground as a supervised child: if it dies, `wait -n`
+# below exits the container (and the restart policy brings it back) instead of
+# health checks and test runs silently stopping while the exporter stays up.
+cron -f &
+CRON_PID=$!
 
 log "Rally tests scheduled:  ${CRON_SCHEDULE} (every ${SCHEDULE_INTERVAL} min)"
 log "Health checks scheduled: ${HEALTH_CRON} (every ${HEALTH_CHECK_INTERVAL} min)"
@@ -296,11 +305,11 @@ log "  - Rally tests:   every ${SCHEDULE_INTERVAL} min (${CRON_SCHEDULE})"
 log "  - Health checks: every ${HEALTH_CHECK_INTERVAL} min (${HEALTH_CRON})"
 
 # Trap signals for graceful shutdown
-trap 'log "Shutting down..."; kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null; exit 0' SIGTERM SIGINT
+trap 'log "Shutting down..."; kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} ${CRON_PID} 2>/dev/null; exit 0' SIGTERM SIGINT
 
 # Wait for any child to exit. Tailer death is fatal — otherwise `docker logs`
-# would silently go dark.
-wait -n ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null || true
+# would silently go dark — and so is cron's (no more runs or health checks).
+wait -n ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} ${CRON_PID} 2>/dev/null || true
 log "A child process exited, shutting down..."
-kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} 2>/dev/null || true
+kill ${EXPORTER_PID} ${DASHBOARD_PID} ${LOG_TAIL_PID} ${CRON_PID} 2>/dev/null || true
 exit 1

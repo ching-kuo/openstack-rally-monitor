@@ -271,7 +271,7 @@ const TYPE_LABELS = {
 // Active = currently displayable. effective_from in the future or expires_at
 // in the past hides the record on the client even if the CLI has not yet
 // pruned it. Incidents have neither bound and stay active until cleared.
-// KEEP IN SYNC with rally_exporter.py::_is_announcement_active — both encode
+// KEEP IN SYNC with announcement_metrics.py::is_announcement_active — both encode
 // the same active-ness semantics (the repo uses this convention for
 // ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
 //   - unknown type                      -> not active
@@ -817,6 +817,14 @@ function renderServiceCards(summary, history, health) {
 // "waiting_for_first_run" have no run directory, so no link is shown for them.
 const RUN_TIMESTAMP_RE = /^\d{8}T\d{6}Z$/;
 
+// Service-level failure reason (build_summary sets error/error_detail when a
+// service's Rally task never started), or "" when there is none.
+function serviceErrorText(svc) {
+  if (!svc || !svc.error) return "";
+  const label = svc.error === "task_failed_to_start" ? "Task failed to start" : "Error";
+  return `${label}: ${svc.error_detail || svc.error}`;
+}
+
 function openModal(serviceName, data, runTimestamp) {
   const overlay = document.getElementById("modalOverlay");
   const title = document.getElementById("modalTitle");
@@ -824,12 +832,17 @@ function openModal(serviceName, data, runTimestamp) {
 
   title.textContent = `${SERVICE_ICONS[serviceName] || ""} ${serviceName} — Scenario Details`;
 
+  // Built as one string and assigned once: appending with `innerHTML +=`
+  // re-parses the whole body each time.
+  const errorText = serviceErrorText(data);
+  let html = errorText ? `<div class="scenario-error">${escapeHtml(errorText)}</div>` : "";
+
   const scenarios = data.scenarios || [];
   if (scenarios.length === 0) {
-    body.innerHTML =
+    html +=
       '<p style="color: var(--color-text-muted); text-align: center;">No scenario data available</p>';
   } else {
-    body.innerHTML = scenarios
+    html += scenarios
       .map(
         (s) => `
             <div class="scenario-row">
@@ -866,11 +879,12 @@ function openModal(serviceName, data, runTimestamp) {
   // do not pre-check. Only shown for a real run timestamp (not the seed value).
   if (RUN_TIMESTAMP_RE.test(runTimestamp || "")) {
     const href = `runs/${encodeURIComponent(runTimestamp)}/${encodeURIComponent(serviceName)}.html`;
-    body.innerHTML +=
+    html +=
       `<a class="report-link" href="${escapeHtml(href)}" target="_blank" rel="noopener">` +
       `Full Rally report ↗</a>`;
   }
 
+  body.innerHTML = html;
   overlay.classList.add("active");
 }
 

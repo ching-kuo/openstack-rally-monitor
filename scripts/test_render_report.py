@@ -232,3 +232,42 @@ def test_main_with_missing_file_emits_empty_state(tmp_path):
     assert rc == 0
     assert out.exists()
     assert _data_block(out.read_text())["scenarios"] == []
+
+
+def test_main_with_error_embeds_reason_in_empty_state(tmp_path):
+    """A task that never started has no results file; the report still renders
+    and carries the reason so the dashboard link explains the failure."""
+    out = tmp_path / "nova.html"
+    rc = rr.main([
+        str(tmp_path / "nope.json"), str(out), "--service", "nova", "--timestamp", "t",
+        "--error", "Task config is invalid: </script>",
+    ])
+    assert rc == 0
+    payload = _data_block(out.read_text())
+    assert payload["scenarios"] == []
+    assert payload["error"] == "Task config is invalid: </script>"
+
+
+def test_payload_has_no_error_key_by_default(tmp_path):
+    assert "error" not in rr.build_payload([], "nova", "t")
+
+
+def test_main_with_unencodable_error_still_emits_report(tmp_path):
+    """Undecodable argv bytes reach Python as lone surrogates; writing them as
+    UTF-8 used to raise UnicodeEncodeError and leave no report (a 404 link)."""
+    out = tmp_path / "nova.html"
+    rc = rr.main([str(tmp_path / "nope.json"), str(out), "--service", "nova",
+                  "--timestamp", "t", "--error", "broken \udcff byte"])
+    assert rc == 0
+    assert _data_block(out.read_text())["error"].startswith("broken ")
+    assert not (tmp_path / "nova.html.tmp").exists()
+
+
+def test_main_embeds_error_code(tmp_path):
+    out = tmp_path / "nova.html"
+    rc = rr.main([str(tmp_path / "nope.json"), str(out), "--service", "nova", "--timestamp", "t",
+                  "--error-code", "task_failed_to_start"])
+    assert rc == 0
+    payload = _data_block(out.read_text())
+    assert payload["error_code"] == "task_failed_to_start"
+    assert "error" not in payload

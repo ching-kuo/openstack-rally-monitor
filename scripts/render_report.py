@@ -198,13 +198,25 @@ def _scenario_payload(workload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_payload(raw: Any, service: str, timestamp: str) -> dict[str, Any]:
-    """Build the full report payload from parsed ``rally task results`` JSON."""
+def build_payload(
+    raw: Any, service: str, timestamp: str, error: str = "", error_code: str = ""
+) -> dict[str, Any]:
+    """Build the full report payload from parsed ``rally task results`` JSON.
+
+    ``error_code`` (e.g. ``task_failed_to_start``, the same code build_summary
+    writes) and ``error`` (its detail, e.g. the task-log tail) describe a
+    service-level failure; report.js shows them on the overview.
+    """
     workloads = raw if isinstance(raw, list) else []
     scenarios = [
         _scenario_payload(w) for w in workloads if isinstance(w, dict)
     ]
-    return {"service": service, "timestamp": timestamp, "scenarios": scenarios}
+    payload: dict[str, Any] = {"service": service, "timestamp": timestamp, "scenarios": scenarios}
+    if error_code:
+        payload["error_code"] = error_code
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _embed_json(data: dict[str, Any]) -> str:
@@ -274,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("output", help="Path to write the HTML report to")
     parser.add_argument("--service", default="", help="Service name (e.g. nova)")
     parser.add_argument("--timestamp", default="", help="Run timestamp (UTC)")
+    parser.add_argument("--error", default="", help="Service-level failure detail to display")
+    parser.add_argument("--error-code", default="", help="Service-level failure code (e.g. task_failed_to_start)")
     args = parser.parse_args(argv)
 
     raw: Any = []
@@ -288,20 +302,24 @@ def main(argv: list[str] | None = None) -> int:
         raw = []
 
     try:
-        output = render_html(build_payload(raw, args.service, args.timestamp))
+        output = render_html(build_payload(raw, args.service, args.timestamp, args.error, args.error_code))
     except Exception as exc:  # noqa: BLE001 -- best effort; never 404 the link
         # build_payload/render_html are defensive, but an unforeseen result
         # shape must still not abort the run with no report. Fall back to an
         # empty-state report (which is built from a known-good empty list).
         print(f"render_report: render failed for {args.results}: {exc}", file=sys.stderr)
-        output = render_html(build_payload([], args.service, args.timestamp))
+        output = render_html(build_payload([], args.service, args.timestamp, args.error, args.error_code))
+    out_path = Path(args.output)
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     try:
-        out_path = Path(args.output)
-        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
-        tmp.write_text(output, encoding="utf-8")
+        # errors="replace": undecodable argv bytes reach Python as lone
+        # surrogates (as can \udcXX escapes in the results JSON); a strict
+        # UTF-8 write would raise and leave no report, so write them as "?".
+        tmp.write_text(output, encoding="utf-8", errors="replace")
         tmp.replace(out_path)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 -- report the failure, leave no .tmp
         print(f"render_report: could not write {args.output}: {exc}", file=sys.stderr)
+        tmp.unlink(missing_ok=True)
         return 1
     return 0
 

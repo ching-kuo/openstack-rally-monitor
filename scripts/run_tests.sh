@@ -54,13 +54,16 @@ log() {
     local msg
     msg="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
     echo "${msg}"
-    # Also append to run log if it exists
+    # Also append to run log if it exists. Best effort: a full disk or broken
+    # run directory must not abort the run (set -e) from inside log().
     if [[ -f "${RUN_LOG}" ]]; then
-        echo "${msg}" >> "${RUN_LOG}"
+        echo "${msg}" >> "${RUN_LOG}" 2>/dev/null || true
     fi
 }
 
 source "${SCRIPT_DIR}/rgw_helpers.sh"
+# Summary, ledger, publish, prune, run-state and abort helpers.
+source "${SCRIPT_DIR}/run_lib.sh"
 
 # --------------------------------------------------------------------------
 # 0. Log environment for debugging (passwords redacted)
@@ -216,7 +219,7 @@ run_service_tests() {
     fi
 
     log "Running ${service} scenarios..."
-    local task_uuid=""
+    local task_uuid="" start_error="" start_error_code=""
     local log_file="${RUN_DIR}/${service}.log"
     # Tag every task with a run+service-unique marker so we can resolve its UUID
     # by tag below. Verified supported on `rally task start` and `rally task
@@ -264,7 +267,11 @@ run_service_tests() {
         log "  ${service}: WARNING - task log is empty or missing"
     fi
 
-    task_uuid=$(grep -oP 'Task \K[a-f0-9-]+' "${log_file}" | head -1) || true
+    # Match a full canonical UUID only: a loose `Task [a-f0-9-]+` also matched
+    # words like "Task aborted" (-> task "ab"). -E rather than -P so this works
+    # with any grep.
+    task_uuid=$(grep -oE 'Task [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+        "${log_file}" | head -1 | cut -d' ' -f2) || true
 
     if [[ -z "${task_uuid}" ]]; then
         # Fall back to a TAG-SCOPED lookup, not `rally task list --uuids-only |
@@ -280,15 +287,6 @@ run_service_tests() {
         # Export JSON results
         rally task results "${task_uuid}" > "${result_file}" 2>/dev/null || true
 
-        # Render the self-contained, dashboard-themed HTML report from the JSON
-        # results. Replaces `rally task report`, whose AngularJS page pulled
-        # d3/nvd3/Angular from public CDNs (breaking offline and forcing a
-        # relaxed CSP/sandbox in serve.py) and never matched the dashboard.
-        # render_report.py is best-effort: a malformed/empty result file still
-        # yields a valid empty-state report so the dashboard link never 404s.
-        python3 "${SCRIPT_DIR}/render_report.py" "${result_file}" "${html_file}" \
-            --service "${service}" --timestamp "${TIMESTAMP}" 2>/dev/null || true
-
         # Get task status
         local status
         status=$(rally task status "${task_uuid}" 2>/dev/null | awk '{print $NF}') || status="unknown"
@@ -296,6 +294,12 @@ run_service_tests() {
         log "  ${service}: task=${task_uuid} status=${status}"
     else
         log "  ${service}: FAILED to start task (no task UUID found)"
+        # Leave a marker so build_summary reports this service as failed (with
+        # the tail of the task log as the reason) rather than "skipped", which
+        # is reserved for a service with no scenario file.
+        start_error_code="task_failed_to_start"
+        start_error=$(log_tail "${log_file}") || true
+        printf '%s' "${start_error}" > "${RUN_DIR}/${service}.start_failed" || true
         # Log full task output for debugging
         if [[ -f "${log_file}" ]]; then
             log "  --- FULL ${service} task log ---"
@@ -303,250 +307,19 @@ run_service_tests() {
             log "  --- end ---"
         fi
     fi
-}
 
-# --------------------------------------------------------------------------
-# 3. Build summary JSON from all results
-# --------------------------------------------------------------------------
-build_summary() {
-    log "Building summary..."
-    local summary='{"timestamp":"'"${TIMESTAMP}"'","services":{}}'
-
-    for service in "${SERVICES[@]}"; do
-        local result_file="${RUN_DIR}/${service}.json"
-        local svc_status="skipped"
-        local duration=0
-        local total_iterations=0
-        local failed_iterations=0
-        local sla_passed="true"
-        local scenarios_detail="[]"
-
-        if [[ -f "${result_file}" ]]; then
-            # Verify if file is valid JSON array (crashed tasks return plain text)
-            if ! jq -e '. | type == "array"' "${result_file}" >/dev/null 2>&1; then
-                svc_status="failed"
-                log "  ${service}: result file is not valid JSON array"
-                # Log first 5 lines of the file for debug
-                head -5 "${result_file}" | while IFS= read -r line; do log "    ${line}"; done
-            else
-                # Parse Rally JSON results
-                svc_status="passed"
-
-                # Extract per-scenario metrics using Rally's actual JSON structure.
-                # first_error: the message of the first failed iteration, so the
-                # dashboard modal can show WHY a scenario failed without a shell
-                # in. Rally iteration errors are arrays [type, message, traceback];
-                # take .error[1] (message) and fall back to .error[0] defensively
-                # (older/edge shapes may carry a single element). Truncated to 300
-                # chars server-side so summaries stay small. Empty string for a
-                # passing scenario (the dashboard hides the line when empty).
-                scenarios_detail=$(jq -c '
-                    [.[] | {
-                        name: .key.name,
-                        duration: .full_duration,
-                        iterations: (if (.result | length) > 0 then (.result | length) else (.key.kw.runner.times // 0) end),
-                        failures: ([.result[]? | select(.error | length > 0)] | length),
-                        first_error: (([.result[]? | select(.error | length > 0)][0].error // []) | (.[1] // .[0] // "") | tostring | .[0:300]),
-                        sla: (([.sla[] | select(.success == true)] | length) == ([.sla[]] | length))
-                    }]
-                ' "${result_file}" 2>/dev/null) || scenarios_detail="[]"
-
-                # Aggregate metrics
-                duration=$(echo "${scenarios_detail}" | jq '[.[].duration] | add // 0' 2>/dev/null) || duration=0
-                total_iterations=$(echo "${scenarios_detail}" | jq '[.[].iterations] | add // 0' 2>/dev/null) || total_iterations=0
-                failed_iterations=$(echo "${scenarios_detail}" | jq '[.[].failures] | add // 0' 2>/dev/null) || failed_iterations=0
-                sla_passed=$(echo "${scenarios_detail}" | jq 'all(.[]; .sla == true)' 2>/dev/null) || sla_passed="false"
-
-                if [[ "${failed_iterations}" -gt 0 ]] || [[ "${sla_passed}" != "true" ]] || [[ "${total_iterations}" -eq 0 ]]; then
-                    svc_status="failed"
-                fi
-
-                log "  ${service}: status=${svc_status} dur=${duration}s iters=${total_iterations} fails=${failed_iterations} sla=${sla_passed}"
-            fi
-        else
-            log "  ${service}: no result file found"
-        fi
-
-        summary=$(echo "${summary}" | jq \
-            --arg svc "${service}" \
-            --arg status "${svc_status}" \
-            --argjson dur "${duration}" \
-            --argjson total "${total_iterations}" \
-            --argjson failed "${failed_iterations}" \
-            --argjson sla "${sla_passed}" \
-            --argjson scenarios "${scenarios_detail}" \
-            '.services[$svc] = {
-                status: $status,
-                duration: $dur,
-                total_iterations: $total,
-                failed_iterations: $failed,
-                sla_passed: $sla,
-                scenarios: $scenarios
-            }')
-    done
-
-    echo "${summary}" | jq '.' > "${RUN_DIR}/summary.json.tmp" && mv "${RUN_DIR}/summary.json.tmp" "${RUN_DIR}/summary.json"
-
-    # Update latest summary symlink
-    cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
-    log "Summary written to ${RUN_DIR}/summary.json"
-}
-
-# --------------------------------------------------------------------------
-# 3.5 Record run outcome in the rolling smoke-test uptime ledger
-# --------------------------------------------------------------------------
-# Kept separately from the per-run directories (which are pruned after
-# RALLY_RESULTS_RETENTION_DAYS) so uptime can cover UPTIME_WINDOW_DAYS.
-# A run counts as "passed" only when it has services, no top-level error,
-# and every service passed -- a copy of ALL_GREEN_PREDICATE in announce.sh;
-# keep the two in sync.
-#
-# The computed pass/fail is exported in the RUN_SMOKE_STATUS global so main()
-# can hand the same value to notify.sh without re-deriving the predicate a
-# third time (notify.sh is intentionally predicate-free; it just compares the
-# status it is given against the last-notified one).
-RUN_SMOKE_STATUS="failed"
-record_smoke_result() {
-    local status
-    status=$(jq -r '
-        if (.services | length) > 0 and ((.error // null) == null)
-           and (.services | to_entries | all(.value.status == "passed"))
-        then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
-    RUN_SMOKE_STATUS="${status}"
-
-    [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
-
-    if jq --arg ts "${TIMESTAMP}" --arg status "${status}" \
-          --argjson days "${UPTIME_WINDOW_DAYS}" '
-        ((now - ($days * 86400)) | strftime("%Y%m%dT%H%M%SZ")) as $cutoff
-        | .runs = ([.runs[], {timestamp: $ts, status: $status}]
-                   | map(select(.timestamp >= $cutoff)))
-        | ([.runs[] | select(.status == "passed")] | length) as $up
-        | .uptime = {
-            window_days: $days,
-            runs_total: (.runs | length),
-            runs_passed: $up,
-            percent: (if (.runs | length) > 0
-                      then (10000 * $up / (.runs | length) | round / 100)
-                      else null end)
-        }' "${SMOKE_HISTORY_FILE}" > "${SMOKE_HISTORY_FILE}.tmp"; then
-        mv "${SMOKE_HISTORY_FILE}.tmp" "${SMOKE_HISTORY_FILE}"
-        log "Smoke uptime ledger updated (status=${status}, window=${UPTIME_WINDOW_DAYS}d)"
-    else
-        rm -f "${SMOKE_HISTORY_FILE}.tmp"
-        log "WARNING: failed to update smoke uptime ledger"
-        return 0
-    fi
-
-    # Keep the published uptime in sync directly. The deployment-failure path
-    # now calls publish_dashboard_files() right after this (so results.json is
-    # rewritten there too), but this standalone sync is retained so a direct
-    # `record_smoke_result` invocation -- and any future early-exit path -- still
-    # refreshes an existing results.json without depending on a later publish.
-    local results_file="${RESULTS_DIR}/results.json"
-    [[ -f "${results_file}" ]] || return 0
-    if jq --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
-          '.uptime = ($smoke[0].uptime // null)' \
-          "${results_file}" > "${results_file}.tmp"; then
-        mv "${results_file}.tmp" "${results_file}"
-    else
-        rm -f "${results_file}.tmp"
-        log "WARNING: failed to refresh uptime in results.json"
-    fi
-}
-
-# --------------------------------------------------------------------------
-# 4. Publish static JSON files for the dashboard
-# --------------------------------------------------------------------------
-ensure_cleanup_metrics_file() {
-    local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
-    [[ -f "${cleanup_file}" ]] && return 0
-
-    cat > "${cleanup_file}.tmp" <<'EOF'
-{
-    "timestamp": "waiting_for_first_run",
-    "cleanup_failed": 0,
-    "context_cleanup_warning": 0,
-    "rgw_scan_status": "skipped",
-    "rgw_scan_errors": 0,
-    "rgw_orphaned_users": 0,
-    "rgw_orphaned_buckets": 0,
-    "rgw_orphaned_objects": 0,
-    "rgw_rally_owned_orphans": 0,
-    "rgw_unknown_owner_orphans": 0,
-    "orphaned_resources": {},
-    "context_orphaned_resources": {},
-    "details": {},
-    "context_details": {}
-}
-EOF
-    mv "${cleanup_file}.tmp" "${cleanup_file}"
-    log "Seeded missing cleanup metrics file at ${cleanup_file}"
-}
-
-publish_dashboard_files() {
-    log "Publishing dashboard static files..."
-    local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
-    ensure_cleanup_metrics_file
-
-    # Write into the persistent results volume so files survive container restarts.
-    # /dashboard/results.json and /dashboard/history.json are symlinks pointing here.
-
-    [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
-
-    # results.json: combined summary + cleanup + smoke uptime for the current-run card view
-    jq -n \
-        --slurpfile summary "${SUMMARY_FILE}" \
-        --slurpfile cleanup "${cleanup_file}" \
-        --slurpfile smoke "${SMOKE_HISTORY_FILE}" \
-        '{summary: $summary[0], cleanup: $cleanup[0], uptime: ($smoke[0].uptime // null)}' \
-        > "${RESULTS_DIR}/results.json.tmp" && mv "${RESULTS_DIR}/results.json.tmp" "${RESULTS_DIR}/results.json"
-
-    # history.json: all retained per-run summary files for the timeline
-    find "${RESULTS_DIR}" -maxdepth 2 -name "summary.json" \
-        -path "*/20*T*Z/*" | sort | \
-        xargs jq -s '{runs: .}' \
-        > "${RESULTS_DIR}/history.json.tmp" && mv "${RESULTS_DIR}/history.json.tmp" "${RESULTS_DIR}/history.json"
-
-    log "Dashboard files published to ${RESULTS_DIR}"
-}
-
-# --------------------------------------------------------------------------
-# 5. Prune old results beyond retention period
-# --------------------------------------------------------------------------
-prune_old_results() {
-    log "Pruning results older than ${RETENTION_DAYS} days..."
-    find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
-    # The provenance ledger is pruned on its own longer window (see below).
-    log "Pruning Rally project ledger older than ${PROVENANCE_RETENTION_DAYS} days..."
-    prune_rally_project_ledger
-    log "Pruning complete"
-}
-
-prune_rally_project_ledger() {
-    [[ -f "${RALLY_PROJECT_LEDGER_FILE}" ]] || return 0
-
-    # Prune on PROVENANCE_RETENTION_DAYS (default 90), NOT RETENTION_DAYS (7).
-    # This ledger is the SOLE authorization basis for auto_purge_rgw:
-    # rgw_classify_owner greps it, and unknown-owner orphans are never purged
-    # (fail-closed). Pruning at the 7-day run-directory window would silently
-    # degrade any RGW orphan that outlives it (container downtime, RGW creds
-    # added after the fact, repeated fail-closed scan errors) from
-    # rally_owned to unknown_owner -- RallyRgwOrphanedUsers would then fire
-    # forever until a human intervenes. Decoupled for the same reason
-    # smoke_history.json is pruned by UPTIME_WINDOW_DAYS rather than the
-    # run-directory retention window (CLAUDE.md "Uptime Tracking").
-    local cutoff
-    cutoff=$(date -u -d "${PROVENANCE_RETENTION_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || {
-        log "Skipping Rally project ledger pruning (date arithmetic unavailable)"
-        return 0
-    }
-
-    awk -v cutoff="${cutoff}" '
-        NF == 1 { print; next }
-        NF >= 2 && $1 >= cutoff { print }
-    ' "${RALLY_PROJECT_LEDGER_FILE}" > "${RALLY_PROJECT_LEDGER_FILE}.tmp" \
-        && mv "${RALLY_PROJECT_LEDGER_FILE}.tmp" "${RALLY_PROJECT_LEDGER_FILE}"
+    # Render the self-contained, dashboard-themed HTML report from the JSON
+    # results. Replaces `rally task report`, whose AngularJS page pulled
+    # d3/nvd3/Angular from public CDNs (breaking offline and forcing a
+    # relaxed CSP/sandbox in serve.py) and never matched the dashboard.
+    # render_report.py is best-effort: a malformed/empty/missing result file
+    # still yields a valid empty-state report so the dashboard link never 404s.
+    # On a failed start, --error-code/--error carry the same code and task-log
+    # tail build_summary records, so the report explains the failure (empty
+    # values are the same as omitting them).
+    python3 "${SCRIPT_DIR}/render_report.py" "${result_file}" "${html_file}" \
+        --service "${service}" --timestamp "${TIMESTAMP}" \
+        --error-code "${start_error_code}" --error "${start_error}" 2>/dev/null || true
 }
 
 # --------------------------------------------------------------------------
@@ -557,26 +330,6 @@ check_cleanup() {
     /scripts/cleanup_monitor.sh || {
         log "WARNING: Cleanup monitor detected issues"
     }
-}
-
-# Inject the freshly-written cleanup_metrics.json into the current run's
-# summary.json (and latest_summary.json) so history.json carries per-run
-# cleanup counts instead of showing zeros for every historical entry.
-attach_cleanup_to_summary() {
-    local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
-    local run_summary="${RUN_DIR}/summary.json"
-    [[ -f "${cleanup_file}" ]] || return 0
-
-    for target in "${run_summary}" "${SUMMARY_FILE}"; do
-        [[ -f "${target}" ]] || continue
-        if jq --slurpfile cleanup "${cleanup_file}" '. + {cleanup: $cleanup[0]}' \
-                "${target}" > "${target}.tmp"; then
-            mv "${target}.tmp" "${target}"
-        else
-            rm -f "${target}.tmp"
-            log "WARNING: failed to attach cleanup metrics to ${target}"
-        fi
-    done
 }
 
 # --------------------------------------------------------------------------
@@ -657,42 +410,6 @@ auto_purge_rgw() {
 }
 
 # --------------------------------------------------------------------------
-# Run-progress state (run_state.json)
-# --------------------------------------------------------------------------
-# Surfaces "a Rally run is in progress" to the dashboard (a small pulsing chip)
-# so the multi-minute run doesn't look like a stale/hung dashboard. Written
-# atomically (tmp+mv) like every other file-drop. Only ever touched by the
-# process that HOLDS the flock: write_run_state_running is called immediately
-# after flock succeeds, and the EXIT trap is installed only after that, so the
-# flock-contention path (early `exit 0` before we own the lock) never writes
-# idle and clobbers the winning run's "running" state.
-write_run_state_running() {
-    if ! {
-        printf '{"state":"running","started_at":"%s","timestamp":"%s"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${TIMESTAMP}" \
-            > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
-            && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null
-    }; then
-        rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
-    fi
-}
-
-# EXIT-trap handler: flips state back to idle on normal exit, the
-# deployment_setup_failed `exit 1`, and signals. Best-effort and never fails the
-# run (the trap fires during shutdown). Safe to clobber here because we only
-# reach the trap-install point while holding the flock.
-write_run_state_idle() {
-    if ! {
-        printf '{"state":"idle","finished_at":"%s"}\n' \
-            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            > "${RUN_STATE_FILE}.tmp" 2>/dev/null \
-            && mv "${RUN_STATE_FILE}.tmp" "${RUN_STATE_FILE}" 2>/dev/null
-    }; then
-        rm -f "${RUN_STATE_FILE}.tmp" 2>/dev/null
-    fi
-}
-
-# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
@@ -725,35 +442,17 @@ main() {
         log "FATAL: Cannot set up deployment, aborting."
         log "HINT: Check ${RUN_DIR}/deployment.log for detailed error output."
         log "HINT: Verify OS_AUTH_URL is reachable and credentials are correct."
-        local error_detail=""
-        if [[ -f "${RUN_DIR}/deployment.log" ]]; then
-            error_detail=$(tail -5 "${RUN_DIR}/deployment.log" | tr '\n' ' ' | head -c 500)
-        fi
-        jq -n \
-            --arg ts "${TIMESTAMP}" \
-            --arg err "deployment_setup_failed" \
-            --arg detail "${error_detail}" \
-            '{timestamp: $ts, error: $err, error_detail: $detail, services: {}}' \
-            > "${RUN_DIR}/summary.json.tmp" && mv "${RUN_DIR}/summary.json.tmp" "${RUN_DIR}/summary.json"
-        cp "${RUN_DIR}/summary.json" "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
-        # Count the aborted run against smoke-test uptime.
-        record_smoke_result
-        # Publish so results.json/history.json reflect the failure instead of
-        # showing the last green run. getRunStatus in the dashboard treats the
-        # empty-services + .error shape as failed (it no longer renders
-        # "All Healthy"), so a full publish here is correct and honest. The
-        # failure summary written to ${RUN_DIR}/summary.json above is picked up
-        # by history.json's find, so the run also shows as a failed timeline cell.
-        publish_dashboard_files
-        # Fire a transition notification (no-op unless NOTIFY_WEBHOOK_URL is
-        # set and the status actually changed). Never let it affect the run.
-        /scripts/notify.sh "${RUN_SMOKE_STATUS}" || true
-        exit 1
+        abort_run deployment_setup_failed "$(log_tail "${RUN_DIR}/deployment.log" || true)"
     }
 
     # Create task args file once — all services share the same scenario parameters.
+    # Called as a condition so a failure takes the abort path (summary, ledger,
+    # publish) instead of a silent `set -e` exit with no record of the run.
     local task_args_file="${RUN_DIR}/task_args.json"
-    write_task_args "${task_args_file}"
+    if ! write_task_args "${task_args_file}"; then
+        log "FATAL: Cannot write ${task_args_file}, aborting."
+        abort_run task_args_write_failed "could not write ${task_args_file}"
+    fi
 
     # Run all service tests
     for service in "${SERVICES[@]}"; do
@@ -791,18 +490,8 @@ main() {
     # per-run cleanup counts (results.json already merges them at publish time).
     attach_cleanup_to_summary
 
-    # Publish static files for the dashboard (replaces API calls)
-    publish_dashboard_files
-
-    # Prune old results
-    prune_old_results
-
-    RUN_END_EPOCH=$(date +%s)
-    RUN_DURATION=$(( RUN_END_EPOCH - RUN_START_EPOCH ))
-    # Inject run_duration_seconds into the latest_summary.json
-    jq --argjson dur "${RUN_DURATION}" '. + {run_duration_seconds: $dur}' \
-        "${SUMMARY_FILE}" > "${SUMMARY_FILE}.tmp" && mv "${SUMMARY_FILE}.tmp" "${SUMMARY_FILE}"
-    log "Total run duration: ${RUN_DURATION}s"
+    # Prune, record the run duration, and publish the dashboard files.
+    finish_run
 
     log "=========================================="
     log "Rally Test Run Complete"

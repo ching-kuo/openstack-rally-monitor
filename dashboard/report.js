@@ -151,8 +151,22 @@ function destroyChart() {
   }
 }
 
+// Heading for a service-level failure: generic text plus the machine code
+// (e.g. task_failed_to_start) rather than a second copy of app.js's labels.
+function errorHeading(payload) {
+  return payload.error_code ? `Service error: ${payload.error_code}` : "Service error";
+}
+
 function renderOverview(mainEl, payload) {
   mainEl.appendChild(el("h1", "report-h1", "Task overview"));
+  if (payload.error || payload.error_code) {
+    // Service-level failure (e.g. the Rally task never started): show the
+    // reason. textContent only, never parsed as markup.
+    const box = el("div", "report-error");
+    box.appendChild(el("p", "report-error-type", errorHeading(payload)));
+    if (payload.error) box.appendChild(el("pre", "report-trace", payload.error));
+    mainEl.appendChild(box);
+  }
   if (!payload.scenarios.length) {
     mainEl.appendChild(el("p", "report-empty", "No scenario results were recorded for this run."));
     return;

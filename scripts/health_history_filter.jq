@@ -9,7 +9,7 @@
 # (> HEALTH_LATENCY_WARN_MS) — the API was still reachable, so it must not
 # depress availability. Slowness surfaces on the dashboard (amber cells) and in
 # the rally_api_latency_milliseconds gauge, not here. KEEP IN SYNC with
-# rally_exporter.py::_apply_health_metrics, which likewise treats degraded as up.
+# health_metrics.py::apply_health_metrics, which likewise treats degraded as up.
 ((now - ($days * 86400)) | strftime("%Y-%m-%dT%H:%M:%SZ")) as $cutoff
 | .checks = ((.checks + $cur)[-$max:])
 | (.checks | map(select(.timestamp >= $cutoff))) as $window
