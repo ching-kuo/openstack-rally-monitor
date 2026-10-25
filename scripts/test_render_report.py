@@ -200,7 +200,13 @@ def test_hostile_result_cannot_break_out_of_data_block():
     # The injected closing tag must not appear literally; the data block's only
     # </script> is its own legitimate terminator.
     assert "<script>alert(1)" not in html
-    assert html.count("</script>") == 3  # data block + 2 external script tags
+    # Every <script> opener in the page is one we emit: the inert data block
+    # and the two same-origin src= scripts. An injected tag would add an opener.
+    assert re.findall(r"<script\b[^>]*>", html) == [
+        '<script type="application/json" id="rally-report-data">',
+        '<script src="../../vendor/chart.umd.min.js">',
+        f'<script src="../../report.js?v={rr.ASSET_VERSION}" defer>',
+    ]
     # ...and the value still round-trips for rendering.
     recovered = _data_block(html)["scenarios"][0]["error_samples"][0]["message"]
     assert recovered == "</script><script>alert(1)</script>"
@@ -271,3 +277,32 @@ def test_main_embeds_error_code(tmp_path):
     payload = _data_block(out.read_text())
     assert payload["error_code"] == "task_failed_to_start"
     assert "error" not in payload
+
+
+# --- Header: readable timestamp and back link to the run -------------------
+
+def test_header_formats_rally_timestamp_as_readable_utc():
+    html = rr.render_html(rr.build_payload([], "nova", "20260220T143021Z"))
+    assert '<span class="report-timestamp">2026-02-20 14:30:21 UTC</span>' in html
+    assert "<title>Rally Report &middot; nova &middot; 2026-02-20 14:30:21 UTC</title>" in html
+    # The raw run id still rides in the payload for report.js.
+    assert _data_block(html)["timestamp"] == "20260220T143021Z"
+
+
+def test_back_link_targets_the_run_on_the_dashboard():
+    html = rr.render_html(rr.build_payload([], "nova", "20260220T143021Z"))
+    assert 'href="../../index.html#run=20260220T143021Z"' in html
+
+
+def test_non_rally_timestamp_is_escaped_and_gets_no_run_hash():
+    html = rr.render_html(rr.build_payload([], "nova", '<b>"x"</b>'))
+    assert '<span class="report-timestamp">&lt;b&gt;&quot;x&quot;&lt;/b&gt;</span>' in html
+    assert 'href="../../index.html"' in html
+
+
+def test_report_assets_carry_a_cache_buster():
+    """report.css/report.js are cached for 5 minutes; a new renderer must not
+    pair a new report shell with a stale script."""
+    html = rr.render_html(rr.build_payload([], "nova", "t"))
+    assert f'href="../../report.css?v={rr.ASSET_VERSION}"' in html
+    assert f'src="../../report.js?v={rr.ASSET_VERSION}"' in html

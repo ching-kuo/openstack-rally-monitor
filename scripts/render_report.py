@@ -32,6 +32,7 @@ import argparse
 import html
 import json
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -235,6 +236,16 @@ def _embed_json(data: dict[str, Any]) -> str:
     )
 
 
+# Cache-buster for report.css/report.js (served with max-age=300), same
+# date-plus-letter scheme as index.html's ?v= strings. Bump it whenever either
+# file changes so a fresh report shell never pairs with a stale script.
+ASSET_VERSION = "20261026a"
+
+# Compact rally run timestamp (also the run-directory name); KEEP IN SYNC with
+# serve.py RUN_REPORT_RE, app.js RUN_TIMESTAMP_RE and backfill_reports.sh TS_RE.
+_RUN_TS_RE = re.compile(r"([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z")
+
+
 def render_html(payload: dict[str, Any]) -> str:
     """Render the self-contained HTML shell around the embedded payload.
 
@@ -245,7 +256,20 @@ def render_html(payload: dict[str, Any]) -> str:
     relative-path convention.
     """
     service = html.escape(str(payload.get("service") or ""))
-    timestamp = html.escape(str(payload.get("timestamp") or ""))
+    raw_ts = str(payload.get("timestamp") or "")
+    back_href = "../../index.html"
+    m = _RUN_TS_RE.fullmatch(raw_ts)
+    if m:
+        # 20260220T143021Z -> 2026-02-20 14:30:21 UTC; other values as-is.
+        y, mo, d, h, mi, sec = m.groups()
+        readable = f"{y}-{mo}-{d} {h}:{mi}:{sec} UTC"
+        # The link carries the run timestamp for the dashboard's run permalink
+        # (#run=<ts>; app.js does not act on it yet). Only a real run id (which
+        # the regex limits to digits, "T" and "Z") is put in the link.
+        back_href += f"#run={raw_ts}"
+    else:
+        readable = raw_ts
+    timestamp = html.escape(readable)
     data_block = _embed_json(payload)
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -258,14 +282,14 @@ def render_html(payload: dict[str, Any]) -> str:
 <link rel="stylesheet" href="../../style.css">
 <link rel="stylesheet" class="custom-theme-css" href="../../themes/custom/tokens.css">
 <link rel="stylesheet" class="custom-theme-css" href="../../themes/custom/overrides.css">
-<link rel="stylesheet" href="../../report.css">
+<link rel="stylesheet" href="../../report.css?v={ASSET_VERSION}">
 <script type="application/json" id="rally-report-data">{data_block}</script>
 <script src="../../vendor/chart.umd.min.js"></script>
-<script src="../../report.js" defer></script>
+<script src="../../report.js?v={ASSET_VERSION}" defer></script>
 </head>
 <body class="report-body">
 <header class="report-header">
-<a class="report-back" href="../../index.html">&larr; Dashboard</a>
+<a class="report-back" href="{back_href}">&larr; Dashboard</a>
 <div class="report-title">
 <span class="report-service">{service}</span>
 <span class="report-timestamp">{timestamp}</span>

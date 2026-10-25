@@ -496,7 +496,11 @@ section {
     border-left: 3px solid var(--color-failure);
 }
 
-.service-card.status-pending {
+/* skipped (no scenario file) and unknown (an unrecognized status value, see
+   app.js knownStatus) share the muted pending look. */
+.service-card.status-pending,
+.service-card.status-skipped,
+.service-card.status-unknown {
     border-left: 3px solid var(--color-pending);
 }
 
@@ -535,7 +539,9 @@ section {
     color: var(--color-failure);
 }
 
-.status-chip.pending {
+.status-chip.pending,
+.status-chip.skipped,
+.status-chip.unknown {
     background: rgba(100, 116, 139, 0.12);
     color: var(--color-pending);
 }
@@ -588,7 +594,9 @@ section {
     background: var(--color-failure);
 }
 
-.card-timeline-cell.pending {
+.card-timeline-cell.pending,
+.card-timeline-cell.skipped,
+.card-timeline-cell.unknown {
     background: rgba(100, 116, 139, 0.3);
 }
 

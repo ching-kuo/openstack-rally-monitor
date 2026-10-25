@@ -17,6 +17,8 @@ context, and assert on their return values. This pins:
 If node is unavailable the tests skip rather than fail (CI images that omit
 node still get a green run; the bash-side publish test covers the data path).
 """
+import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -184,3 +186,79 @@ def test_cleanup_badge_flags_a_blind_openstack_scan():
     assert _cleanup_badge(
         '{"cleanup_failed":1,"details":{},"openstack_scan_status":"error"}'
     ) == "ISSUES|section-badge error"
+
+
+# ---------------------------------------------------------------------------
+# Status whitelist + relative data paths
+# ---------------------------------------------------------------------------
+
+def test_known_status_maps_unrecognized_values_to_unknown():
+    fn = _extract("knownStatus")
+    out = _run_node(
+        f"{fn}\nconst A=['passed','failed'];"
+        "process.stdout.write([knownStatus('passed',A), knownStatus('x\" onclick=\"y',A),"
+        " knownStatus(undefined,A)].join('|'));"
+    )
+    assert out == "passed|unknown|unknown"
+
+
+def test_service_cards_never_interpolate_raw_status():
+    """A hostile status must not reach a class name or the chip text."""
+    hostile = '"><img src=x onerror=alert(1)>'
+    stub = (
+        "const cards = [];"
+        "const grid = {appendChild: (c) => cards.push(c)};"
+        "const document = {getElementById: () => grid,"
+        " createElement: () => ({className: '', innerHTML: ''})};"
+        "const escapeHtml = (v) => String(v ?? '').replace(/[&<>\"']/g, (c) => `&#${c.charCodeAt(0)};`);"
+        "const formatDuration = () => '1s';"
+        "const SERVICE_ICONS = {}; const SERVICE_DESCRIPTIONS = {};"
+    )
+    # The real whitelists, so the test follows app.js if a status is added.
+    src = APP_JS.read_text()
+    stub += "".join(
+        re.search(rf"^const {name} = .*;$", src, re.M).group(0)
+        for name in ("SERVICE_STATUSES", "HEALTH_STATUSES")
+    )
+    js = (
+        f"{stub}\n{_extract('knownStatus')}\n{_extract('renderServiceCards')}\n"
+        f"const bad = {json.dumps(hostile)};"
+        "renderServiceCards({timestamp: 't', services: {nova: {status: bad}}},"
+        " {runs: [{services: {nova: {status: bad}}}]},"
+        " {services: {nova: {status: bad, latency_ms: 1}}});"
+        "process.stdout.write(cards[0].className + '\\n' + cards[0].innerHTML);"
+    )
+    out = _run_node(js)
+    assert "<img" not in out
+    assert out.splitlines()[0] == "service-card status-unknown"
+    assert '<span class="status-chip unknown">unknown</span>' in out
+
+
+def test_data_fetches_use_relative_paths():
+    """Absolute /x.json paths break behind a sub-path reverse proxy."""
+    assert re.findall(r"""fetch\(\s*["'`]/""", APP_JS.read_text()) == []
+
+
+def _health_detail(status: str, services_js: str) -> str:
+    fn = _extract("healthCellDetail")
+    stub = "const escapeHtml = (v) => String(v ?? '');"
+    return _run_node(
+        f"{stub}\n{fn}\nprocess.stdout.write(healthCellDetail({json.dumps(status)}, {services_js}));"
+    )
+
+
+def test_health_cell_detail_unknown_is_not_all_up():
+    assert _health_detail("unknown", "{}") == "Status unknown"
+    assert _health_detail("up", "{}") == "All services up"
+    assert _health_detail("down", '{"nova":{"status":"down"}}') == "Down: nova"
+
+
+def test_format_duration_tolerates_non_numbers():
+    """A string/garbage duration used to throw in .toFixed and abort the whole
+    card loop (or the modal)."""
+    fn = _extract("formatDuration")
+    out = _run_node(
+        f"{fn}\nprocess.stdout.write([formatDuration('12.5'), formatDuration('x'),"
+        " formatDuration(undefined), formatDuration(0.25), formatDuration(90)].join('|'));"
+    )
+    assert out == "12.5s|—|—|250ms|1.5m"

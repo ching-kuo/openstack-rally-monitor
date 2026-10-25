@@ -150,7 +150,7 @@ record_smoke_result() {
 
     [[ -f "${SMOKE_HISTORY_FILE}" ]] || echo '{"runs": []}' > "${SMOKE_HISTORY_FILE}"
 
-    if jq --arg ts "${TIMESTAMP}" --arg status "${status}" \
+    if jq -c --arg ts "${TIMESTAMP}" --arg status "${status}" \
           --argjson days "${UPTIME_WINDOW_DAYS}" '
         ((now - ($days * 86400)) | strftime("%Y%m%dT%H%M%SZ")) as $cutoff
         | .runs = ([.runs[], {timestamp: $ts, status: $status}]
@@ -222,9 +222,10 @@ publish_dashboard_files() {
     # xargs may split a long file list across several commands, so it only
     # concatenates (cat); a single jq -s then builds one document. `xargs jq -s`
     # would emit one {runs: ...} per batch -- invalid JSON past ~3k runs.
+    # Compact (-c) like the other history files: the dashboard re-fetches it.
     find "${RESULTS_DIR}" -maxdepth 2 -name "summary.json" \
         -path "*/20*T*Z/*" -print0 | sort -z | \
-        xargs -0 -r cat -- | jq -s '{runs: .}' \
+        xargs -0 -r cat -- | jq -cs '{runs: .}' \
         > "${RESULTS_DIR}/history.json.tmp" && mv "${RESULTS_DIR}/history.json.tmp" "${RESULTS_DIR}/history.json"
 
     log "Dashboard files published to ${RESULTS_DIR}"

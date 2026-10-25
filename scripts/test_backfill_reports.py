@@ -118,3 +118,46 @@ def test_malformed_json_yields_empty_state_report(tmp_path):
     rendered = (run_dir / "nova.html").read_text()
     assert NEW_MARKER in rendered  # broken old report replaced by a valid empty state
     assert "regenerated 1 of 1" in result.stdout
+
+
+def test_skips_run_bookkeeping_json(tmp_path):
+    """<RUN_DIR>/summary.json and task_args.json match the service-name pattern
+    but are not Rally results: rendering them wrote junk, servable reports."""
+    run_dir = _make_run(tmp_path, "20260615T160001Z", "nova", html=None)
+    (run_dir / "summary.json").write_text(json.dumps({"timestamp": "t", "services": {}}))
+    (run_dir / "task_args.json").write_text(json.dumps({"flavor_name": "m1.tiny"}))
+
+    result = run_backfill(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (run_dir / "summary.html").exists()
+    assert not (run_dir / "task_args.html").exists()
+    assert NEW_MARKER in (run_dir / "nova.html").read_text()
+    assert "regenerated 1 of 1" in result.stdout
+
+
+def test_removes_junk_reports_from_earlier_backfills(tmp_path):
+    """Earlier backfills rendered summary.json/task_args.json into servable
+    junk reports. They are removed only when both the source JSON and the
+    data-block marker prove the file is such junk."""
+    run_dir = _make_run(tmp_path, "20260615T160001Z", "nova", html=None)
+    junk = f'<html><script type="application/json" {NEW_MARKER}>{{}}</script></html>'
+    (run_dir / "summary.json").write_text("{}")
+    (run_dir / "summary.html").write_text(junk)
+    (run_dir / "task_args.json").write_text("{}")
+    (run_dir / "task_args.html").write_text(junk)
+    # No source JSON next to it: not ours to judge, keep it.
+    other = _make_run(tmp_path, "20260616T160001Z", "nova", html=None)
+    (other / "summary.html").write_text(junk)
+    # Source JSON present but no marker: not a report we rendered, keep it.
+    third = _make_run(tmp_path, "20260617T160001Z", "nova", html=None)
+    (third / "task_args.json").write_text("{}")
+    (third / "task_args.html").write_text("<html>operator file</html>")
+
+    result = run_backfill(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (run_dir / "summary.html").exists()
+    assert not (run_dir / "task_args.html").exists()
+    assert (other / "summary.html").exists()
+    assert (third / "task_args.html").exists()

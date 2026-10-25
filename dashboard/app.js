@@ -59,6 +59,16 @@ function orderedServiceUnion(items) {
   return ordered;
 }
 
+// Status values that may become CSS class names or chip text. Anything else in
+// the data files (a corrupt or hostile value) renders as "unknown" instead of
+// being interpolated into markup.
+const SERVICE_STATUSES = ["passed", "failed", "skipped", "pending"];
+const HEALTH_STATUSES = ["up", "degraded", "down", "unknown"];
+
+function knownStatus(value, allowed) {
+  return allowed.includes(value) ? value : "unknown";
+}
+
 let durationChart = null;
 let healthLatencyChart = null;
 
@@ -74,7 +84,7 @@ let cachedHealth = null;
 // ---------------------------------------------------------------------------
 async function fetchResults() {
   try {
-    const res = await fetch("/results.json");
+    const res = await fetch("results.json");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
@@ -85,7 +95,7 @@ async function fetchResults() {
 
 async function fetchHistory() {
   try {
-    const res = await fetch("/history.json");
+    const res = await fetch("history.json");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
@@ -96,7 +106,7 @@ async function fetchHistory() {
 
 async function fetchHealth() {
   try {
-    const res = await fetch("/health.json");
+    const res = await fetch("health.json");
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -107,7 +117,7 @@ async function fetchHealth() {
 
 async function fetchHealthHistory() {
   try {
-    const res = await fetch("/health_history.json");
+    const res = await fetch("health_history.json");
     if (!res.ok) return { checks: [] };
     return await res.json();
   } catch (err) {
@@ -121,7 +131,7 @@ async function fetchHealthHistory() {
 // file). A corrupt state file must not blow up the page.
 async function fetchAnnouncements() {
   try {
-    const res = await fetch("/announcement-state.json", { cache: "no-store" });
+    const res = await fetch("announcement-state.json", { cache: "no-store" });
     if (!res.ok) return { announcements: [] };
     return await res.json();
   } catch (err) {
@@ -134,7 +144,7 @@ async function fetchAnnouncements() {
 // null, which renderRunState() treats as idle (chip hidden).
 async function fetchRunState() {
   try {
-    const res = await fetch("/run_state.json", { cache: "no-store" });
+    const res = await fetch("run_state.json", { cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -209,7 +219,11 @@ function setSpanLabel(id, records) {
   if (el) el.textContent = formatCoveredSpan(records);
 }
 
-function formatDuration(seconds) {
+function formatDuration(value) {
+  // Coerced: a non-number duration in the data must not throw in .toFixed and
+  // abort the card loop or the modal.
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return "—";
   if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`;
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   return `${(seconds / 60).toFixed(1)}m`;
@@ -698,36 +712,39 @@ function renderHealthTimeline(healthHistory) {
 
   container.innerHTML = "";
   checks.forEach((check) => {
-    const status = check.overall || "unknown";
+    const status = knownStatus(check.overall, HEALTH_STATUSES);
     const cell = document.createElement("div");
     cell.className = `htl-cell ${status}`;
-
-    const svcEntries = Object.entries(check.services || {});
-    let detail;
-    if (status === "down") {
-      const downSvcs = svcEntries
-        .filter(([, v]) => v.status === "down")
-        .map(([k]) => escapeHtml(k));
-      detail = `Down: ${downSvcs.join(", ")}`;
-    } else if (status === "degraded") {
-      // List the slow services with their latencies so the tooltip reads e.g.
-      // "Degraded: nova (6200ms)".
-      const slowSvcs = svcEntries
-        .filter(([, v]) => v.status === "degraded")
-        .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
-      detail = `Degraded: ${slowSvcs.join(", ")}`;
-    } else {
-      detail = "All services up";
-    }
 
     cell.innerHTML = `
             <div class="timeline-tooltip">
                 <strong>${escapeHtml(formatTimestamp(check.timestamp))}</strong><br>
-                ${detail}
+                ${healthCellDetail(status, check.services)}
             </div>
         `;
     container.appendChild(cell);
   });
+}
+
+// Tooltip HTML for one health-timeline cell; `status` is already whitelisted.
+function healthCellDetail(status, services) {
+  const svcEntries = Object.entries(services || {});
+  if (status === "down") {
+    const downSvcs = svcEntries
+      .filter(([, v]) => v.status === "down")
+      .map(([k]) => escapeHtml(k));
+    return `Down: ${downSvcs.join(", ")}`;
+  }
+  if (status === "degraded") {
+    // List the slow services with their latencies so the tooltip reads e.g.
+    // "Degraded: nova (6200ms)".
+    const slowSvcs = svcEntries
+      .filter(([, v]) => v.status === "degraded")
+      .map(([k, v]) => `${escapeHtml(k)} (${escapeHtml(v.latency_ms)}ms)`);
+    return `Degraded: ${slowSvcs.join(", ")}`;
+  }
+  if (status === "up") return "All services up";
+  return "Status unknown";
 }
 
 // ---------------------------------------------------------------------------
@@ -744,19 +761,20 @@ function renderServiceCards(summary, history, health) {
 
   grid.innerHTML = "";
   for (const [name, data] of Object.entries(services)) {
+    const status = knownStatus(data.status, SERVICE_STATUSES);
     const card = document.createElement("div");
-    card.className = `service-card status-${data.status}`;
+    card.className = `service-card status-${status}`;
     card.onclick = () => openModal(name, data, runTimestamp);
 
     // Build mini timeline from history
     const miniTimeline = (history.runs || []).map((run) => {
       const svc = (run.services || {})[name];
-      return svc ? svc.status : "pending";
+      return svc ? knownStatus(svc.status, SERVICE_STATUSES) : "pending";
     });
 
     // Live API health indicator
     const svcHealth = health && health.services && health.services[name];
-    const liveStatus = svcHealth ? svcHealth.status : "unknown";
+    const liveStatus = knownStatus(svcHealth && svcHealth.status, HEALTH_STATUSES);
     const liveLatency = svcHealth ? `${svcHealth.latency_ms}ms` : "";
     // "degraded" = reachable but slow: keep it subtle ("API slow · 6200ms").
     const liveLabel =
@@ -777,7 +795,7 @@ function renderServiceCards(summary, history, health) {
                     </div>
                 </div>
                 <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.35rem;">
-                    <span class="status-chip ${data.status}">${data.status}</span>
+                    <span class="status-chip ${status}">${status}</span>
                     <div class="live-indicator ${liveStatus}">
                         <span class="live-dot"></span>
                         <span>${escapeHtml(liveLabel)}</span>
@@ -790,12 +808,12 @@ function renderServiceCards(summary, history, health) {
                     <div class="metric-label">Duration</div>
                 </div>
                 <div class="metric">
-                    <div class="metric-value">${data.total_iterations || 0}</div>
+                    <div class="metric-value">${escapeHtml(data.total_iterations || 0)}</div>
                     <div class="metric-label">Iterations</div>
                 </div>
                 <div class="metric">
                     <div class="metric-value" style="color: ${(data.failed_iterations || 0) > 0 ? "var(--color-failure)" : "var(--color-success)"}">
-                        ${data.failed_iterations || 0}
+                        ${escapeHtml(data.failed_iterations || 0)}
                     </div>
                     <div class="metric-label">Failures</div>
                 </div>
@@ -815,6 +833,7 @@ function renderServiceCards(summary, history, health) {
 // Matches the compact rally run timestamp (also the run-directory name). Used
 // to gate the "Full Rally report" link: seed/placeholder timestamps like
 // "waiting_for_first_run" have no run directory, so no link is shown for them.
+// KEEP IN SYNC with serve.py RUN_REPORT_RE and render_report.py _RUN_TS_RE.
 const RUN_TIMESTAMP_RE = /^\d{8}T\d{6}Z$/;
 
 // Service-level failure reason (build_summary sets error/error_detail when a
@@ -853,11 +872,11 @@ function openModal(serviceName, data, runTimestamp) {
                         <div class="scenario-stat-label">Duration</div>
                     </div>
                     <div class="scenario-stat">
-                        <div class="scenario-stat-value">${s.iterations || 0}</div>
+                        <div class="scenario-stat-value">${escapeHtml(s.iterations || 0)}</div>
                         <div class="scenario-stat-label">Iters</div>
                     </div>
                     <div class="scenario-stat">
-                        <div class="scenario-stat-value" style="color: ${(s.failures || 0) > 0 ? "var(--color-failure)" : "var(--color-success)"}">${s.failures || 0}</div>
+                        <div class="scenario-stat-value" style="color: ${(s.failures || 0) > 0 ? "var(--color-failure)" : "var(--color-success)"}">${escapeHtml(s.failures || 0)}</div>
                         <div class="scenario-stat-label">Fails</div>
                     </div>
                     <span class="status-chip ${s.sla ? "passed" : "failed"}">${s.sla ? "SLA OK" : "SLA FAIL"}</span>

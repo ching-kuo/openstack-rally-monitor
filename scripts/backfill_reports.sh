@@ -48,6 +48,24 @@ for dir in "${RESULTS_DIR}"/*/; do
         [[ -f "${json}" ]] || continue
         svc="$(basename "${json}" .json)"
         [[ "${svc}" =~ ${SVC_RE} ]] || continue
+        # run_tests.sh's own bookkeeping files share the directory and the
+        # name pattern but are not Rally results: rendering them wrote junk,
+        # servable reports. Matching on "<svc>.html already exists" instead
+        # would drop the documented render-when-html-is-missing case.
+        # KEEP IN SYNC with the JSON files run_tests.sh writes into RUN_DIR:
+        # run_lib.sh::build_summary (summary.json) and run_tests.sh::main
+        # (task_args.json).
+        case "${svc}" in
+            summary|task_args)
+                # Earlier backfills rendered these into junk reports. Remove
+                # one only when its source JSON sits beside it (checked by the
+                # loop) and it carries our data-block marker, so an operator's
+                # own file is never touched.
+                if grep -q "${NEW_MARKER}" "${dir}${svc}.html" 2>/dev/null; then
+                    rm -f -- "${dir}${svc}.html"
+                fi
+                continue ;;
+        esac
         html="${dir}${svc}.html"
         scanned=$((scanned + 1))
         # Skip reports already rendered in the self-contained format.

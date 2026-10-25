@@ -82,7 +82,10 @@ def test_malformed_numeric_env_does_not_freeze_history(tmp_path: Path) -> None:
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr
-    history = json.loads((tmp_path / "health_history.json").read_text())
+    raw = (tmp_path / "health_history.json").read_text()
+    history = json.loads(raw)
     assert len(history["checks"]) == 1
     assert history["uptime"]["window_days"] == 30
+    # Compact (jq -c): the dashboard re-fetches this multi-MB file.
+    assert raw.count("\n") == 1
     assert "UPTIME_WINDOW_DAYS" in result.stderr

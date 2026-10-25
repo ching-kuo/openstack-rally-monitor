@@ -12,7 +12,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Webhook Notifications** — Optional outbound webhook on smoke-status transitions (`passed`↔`failed`), with generic / Slack / Discord payload formats
 - **7-Day History** — Results retained with automatic pruning
 - **Uptime Percentages** — API health and smoke-test uptime over a configurable window (default 30 days), shown as dashboard badges
-- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to a self-contained per-run full report (themed to match, works offline), and a live "test run in progress" indicator
+- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to a self-contained per-run full report (themed to match, works offline, opens on the first failed scenario, linkable per scenario), and a live "test run in progress" indicator
 
 ## Dashboard Customization
 
@@ -64,7 +64,7 @@ Three processes run inside a single container, managed by `scripts/entrypoint.sh
 | Process | Port | Description |
 |---------|------|-------------|
 | `rally_exporter.py` | `9101` | Flask app; reads JSON from `/results/` and exposes Prometheus metrics |
-| `serve.py` (dashboard) | `8080` | Serves static HTML/JS/CSS dashboard with security headers, backed by symlinked JSON files |
+| `serve.py` (dashboard) | `8080` | Serves static HTML/JS/CSS dashboard with security headers, backed by symlinked JSON files; supports `HEAD`, `ETag`/`Last-Modified` revalidation (`304`) and gzip, and uses relative paths so it works behind a sub-path reverse proxy |
 | Cron | — | Schedules Rally test runs and lightweight API health checks |
 
 The entrypoint starts as root (with every capability except `SETUID`/`SETGID` dropped, plus `no-new-privileges`) only to write `/rally/rally_env`, the cron table and the dashboard symlinks; everything else runs as the unprivileged `rally` user, including the boot-time seeding of `/results` and `/rally/logs` (`scripts/init_state.sh`) and log rotation. Code and config (`/scripts`, `/exporter`, `/dashboard`, `/rally`) are root-owned and read-only to `rally`; only `/results`, `/rally/data`, `/rally/logs` and rally's home (`/home/rally`) are writable by it.
@@ -464,7 +464,8 @@ openstack-rally-monitor/
 │   ├── serve.py
 │   ├── themes/
 │   │   └── default/
-│   └── test_serve.py
+│   ├── test_serve.py
+│   └── test_serve_http.py
 ├── docs/
 │   └── CUSTOMIZING.md
 └── env.sample

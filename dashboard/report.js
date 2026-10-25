@@ -10,8 +10,13 @@
  * table, per-scenario detail with an atomic-action duration chart, the input
  * config, and error tracebacks.
  *
+ * Views are routed by the URL hash (#overview, #input, #scenario=<idx>), so a
+ * scenario view is linkable and back/forward work. With no hash the report
+ * opens on the first failed scenario, or the overview when everything passed.
+ *
  * The pure helpers below (groupScenarios / scenarioStatus / formatSeconds /
- * atomicBars) are self-contained top-level functions so the Node contract tests
+ * atomicBars / parseHash / selectionHash / initialSelection / routeFor) are
+ * self-contained top-level functions so the Node contract tests
  * can extract and evaluate them in isolation, mirroring app.js.
  */
 
@@ -57,6 +62,34 @@ function atomicBars(atomics) {
   return { labels, data };
 }
 
+function parseHash(hash, count) {
+  // URL hash -> view selection, or null for an unknown/out-of-range hash.
+  const h = String(hash || "").replace(/^#/, "");
+  if (h === "overview") return { view: "overview" };
+  if (h === "input") return { view: "input" };
+  const m = /^scenario=(\d+)$/.exec(h);
+  if (m && Number(m[1]) < count) return { view: "scenario", idx: Number(m[1]) };
+  return null;
+}
+
+function selectionHash(sel) {
+  if (sel.view === "scenario") return `#scenario=${sel.idx}`;
+  if (sel.view === "input") return "#input";
+  return "#overview";
+}
+
+function initialSelection(scenarios) {
+  // Open on the first failed scenario: that is what a reader came to see.
+  const idx = (scenarios || []).findIndex((s) => scenarioStatus(s) === "failed");
+  return idx >= 0 ? { view: "scenario", idx } : { view: "overview" };
+}
+
+function routeFor(hash, scenarios) {
+  // One fallback for the initial render AND hashchange, so going Back to the
+  // original hashless entry shows the view the page first opened on.
+  return parseHash(hash, (scenarios || []).length) || initialSelection(scenarios);
+}
+
 // --- DOM rendering ----------------------------------------------------------
 
 function cssVar(name, fallback) {
@@ -87,12 +120,12 @@ function readPayload() {
 
 let activeChart = null;
 
-function buildNav(navEl, payload, select) {
+function buildNav(navEl, payload, go) {
   navEl.textContent = "";
 
   const fixed = el("div", "report-nav-fixed");
-  fixed.appendChild(navButton("Task overview", () => select({ view: "overview" })));
-  fixed.appendChild(navButton("Input file", () => select({ view: "input" })));
+  fixed.appendChild(navButton("Task overview", () => go({ view: "overview" })));
+  fixed.appendChild(navButton("Input file", () => go({ view: "input" })));
   navEl.appendChild(fixed);
 
   groupScenarios(payload.scenarios).forEach((group) => {
@@ -106,11 +139,15 @@ function buildNav(navEl, payload, select) {
 
     const list = el("div", "report-nav-list");
     group.scenarios.forEach((s) => {
-      const btn = navButton(s.method, () => select({ view: "scenario", idx: s._idx }));
+      const btn = navButton(s.method, () => go({ view: "scenario", idx: s._idx }));
       btn.classList.add("report-nav-scenario");
       btn.dataset.idx = String(s._idx);
-      const dot = el("span", `report-nav-dot status-${scenarioStatus(s)}`);
+      const status = scenarioStatus(s);
+      const dot = el("span", `report-nav-dot status-${status}`);
+      dot.setAttribute("aria-hidden", "true");
       btn.insertBefore(dot, btn.firstChild);
+      // The dot's color is not the only signal: screen readers get the word.
+      btn.appendChild(el("span", "visually-hidden", status === "passed" ? " (passed)" : " (failed)"));
       list.appendChild(btn);
     });
 
@@ -134,13 +171,20 @@ function navButton(label, onClick) {
 }
 
 function highlightNav(navEl, sel) {
-  navEl.querySelectorAll(".report-nav-item").forEach((b) => b.classList.remove("active"));
+  navEl.querySelectorAll(".report-nav-item").forEach((b) => {
+    b.classList.remove("active");
+    b.removeAttribute("aria-current");
+  });
   const items = navEl.querySelectorAll(".report-nav-fixed .report-nav-item");
-  if (sel.view === "overview" && items[0]) items[0].classList.add("active");
-  if (sel.view === "input" && items[1]) items[1].classList.add("active");
+  let active = null;
+  if (sel.view === "overview") active = items[0];
+  if (sel.view === "input") active = items[1];
   if (sel.view === "scenario") {
-    const btn = navEl.querySelector(`.report-nav-scenario[data-idx="${sel.idx}"]`);
-    if (btn) btn.classList.add("active");
+    active = navEl.querySelector(`.report-nav-scenario[data-idx="${sel.idx}"]`);
+  }
+  if (active) {
+    active.classList.add("active");
+    active.setAttribute("aria-current", "true");
   }
 }
 
@@ -157,7 +201,7 @@ function errorHeading(payload) {
   return payload.error_code ? `Service error: ${payload.error_code}` : "Service error";
 }
 
-function renderOverview(mainEl, payload) {
+function renderOverview(mainEl, payload, go) {
   mainEl.appendChild(el("h1", "report-h1", "Task overview"));
   if (payload.error || payload.error_code) {
     // Service-level failure (e.g. the Rally task never started): show the
@@ -181,9 +225,20 @@ function renderOverview(mainEl, payload) {
   table.appendChild(thead);
 
   const tbody = el("tbody");
-  payload.scenarios.forEach((s) => {
-    const tr = el("tr");
-    tr.appendChild(el("td", "report-cell-name", s.name));
+  payload.scenarios.forEach((s, idx) => {
+    // The whole row opens the scenario; the name is also a real link so the
+    // row is reachable by keyboard and can be opened in a new tab.
+    const tr = el("tr", "report-row-link");
+    tr.addEventListener("click", (e) => {
+      // Selecting text to copy is not a request to navigate.
+      if (window.getSelection().toString()) return;
+      if (!e.target.closest("a")) go({ view: "scenario", idx });
+    });
+    const nameTd = el("td", "report-cell-name");
+    const link = el("a", null, s.name);
+    link.setAttribute("href", selectionHash({ view: "scenario", idx }));
+    nameTd.appendChild(link);
+    tr.appendChild(nameTd);
     tr.appendChild(el("td", null, (Number(s.load_duration) || 0).toFixed(3)));
     tr.appendChild(el("td", null, (Number(s.full_duration) || 0).toFixed(3)));
     tr.appendChild(el("td", null, String(s.iterations || 0)));
@@ -341,7 +396,12 @@ function initReport() {
   const mainEl = document.getElementById("reportMain");
   if (!navEl || !mainEl) return;
 
-  function select(sel) {
+  // `navigated` is false only for the initial render, which must neither
+  // scroll nor move focus.
+  function render(sel, navigated) {
+    // Replacing <main> destroys the focused element (e.g. an overview link);
+    // remember that, so keyboard focus can land on the new view's heading.
+    const hadFocus = mainEl.contains(document.activeElement);
     destroyChart();
     mainEl.textContent = "";
     if (sel.view === "input") {
@@ -350,15 +410,35 @@ function initReport() {
       renderScenario(mainEl, payload.scenarios[sel.idx]);
     } else {
       sel = { view: "overview" };
-      renderOverview(mainEl, payload);
+      renderOverview(mainEl, payload, go);
     }
     highlightNav(navEl, sel);
+    if (!navigated) return;
+    // Desktop scrolls inside <main>; on narrow screens the window scrolls,
+    // so also bring the top of <main> into view when it is above the fold.
     mainEl.scrollTop = 0;
+    if (mainEl.getBoundingClientRect().top < 0) mainEl.scrollIntoView({ block: "start" });
+    const heading = hadFocus && mainEl.querySelector("h1");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      heading.focus({ preventScroll: true });
+    }
   }
 
-  buildNav(navEl, payload, select);
+  // Navigation goes through the hash, so back/forward replay it via hashchange.
+  function go(sel) {
+    const hash = selectionHash(sel);
+    if (window.location.hash === hash) render(sel, true);
+    else window.location.hash = hash;
+  }
+
+  window.addEventListener("hashchange", () => {
+    render(routeFor(window.location.hash, payload.scenarios), true);
+  });
+
+  buildNav(navEl, payload, go);
   pruneFailedThemeLinks();
-  select({ view: "overview" });
+  render(routeFor(window.location.hash, payload.scenarios), false);
 }
 
 function pruneFailedThemeLinks() {

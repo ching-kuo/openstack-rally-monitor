@@ -1,50 +1,11 @@
 """Unit tests for dashboard/serve.py."""
-import sys
-import threading
 import urllib.error
 import urllib.request
-from http.server import HTTPServer
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 import pytest
 
-# Add dashboard directory to sys.path for import
-sys.path.insert(0, str(Path(__file__).parent))
 import serve
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-@pytest.fixture
-def dirs(tmp_path):
-    """Set up temporary dashboard and results directories."""
-    dashboard_dir = tmp_path / "dashboard"
-    results_dir = tmp_path / "results"
-    dashboard_dir.mkdir()
-    results_dir.mkdir()
-    return dashboard_dir, results_dir
-
-
-@pytest.fixture
-def server(dirs, monkeypatch):
-    """Start a test HTTP server on an ephemeral port with patched roots."""
-    dashboard_dir, results_dir = dirs
-    monkeypatch.setattr(serve, "SERVE_ROOT", dashboard_dir)
-    monkeypatch.setattr(serve, "RESULTS_ROOT", results_dir)
-    monkeypatch.setattr(serve, "BRANDING_ROOT", (results_dir / "branding").resolve())
-
-    srv = HTTPServer(("127.0.0.1", 0), serve.SecureStaticHandler)
-    port = srv.server_address[1]
-    t = threading.Thread(target=srv.serve_forever)
-    t.daemon = True
-    t.start()
-
-    base = f"http://127.0.0.1:{port}"
-    yield base, dashboard_dir, results_dir
-
-    srv.shutdown()
 
 
 def get(base, path):
@@ -101,18 +62,26 @@ class TestAllowlist:
         if expected_fragment is not None:
             assert expected_fragment in body
 
+    def test_query_string_is_ignored_by_the_allowlist(self, server):
+        """Reports load report.css/report.js with a ?v= cache-buster."""
+        base, dashboard_dir, _ = server
+        (dashboard_dir / "report.js").write_text("// report")
+        code, _, body = get(base, "/report.js?v=20261026a")
+        assert code == 200
+        assert body == b"// report"
+
     def test_unknown_file_blocked(self, server):
         base, dashboard_dir, _ = server
         (dashboard_dir / "secrets.txt").write_text("password123")
         code, _, _ = get(base, "/secrets.txt")
-        assert code == 403
+        assert code == 404
 
     def test_serve_py_itself_blocked(self, server):
         """serve.py must not be served even when it exists in SERVE_ROOT."""
         base, dashboard_dir, _ = server
         (dashboard_dir / "serve.py").write_text("# server source")
         code, _, _ = get(base, "/serve.py")
-        assert code == 403
+        assert code == 404
 
     def test_nonexistent_file_returns_404(self, server):
         base, _, _ = server
@@ -148,14 +117,14 @@ class TestAllowlist:
         code, _, _ = get(base, "/run_state.json")
         assert code == 404
 
-    def test_run_state_has_no_store_cache_control(self, server):
+    def test_run_state_has_no_cache_cache_control(self, server):
         base, dashboard_dir, results_dir = server
         (results_dir / "run_state.json").write_text('{"state": "running"}')
         (dashboard_dir / "run_state.json").symlink_to(
             results_dir / "run_state.json"
         )
         _, headers, _ = get(base, "/run_state.json")
-        assert "no-store" in headers.get("cache-control", "")
+        assert headers.get("cache-control") == "no-cache"
         assert headers["content-type"].startswith("application/json")
 
     def test_announcement_state_dangling_symlink_returns_404(self, server):
@@ -169,14 +138,14 @@ class TestAllowlist:
         code, _, _ = get(base, "/announcement-state.json")
         assert code == 404
 
-    def test_announcement_state_has_no_store_cache_control(self, server):
+    def test_announcement_state_has_no_cache_cache_control(self, server):
         base, dashboard_dir, results_dir = server
         (results_dir / "announcement-state.json").write_text('{"announcements": []}')
         (dashboard_dir / "announcement-state.json").symlink_to(
             results_dir / "announcement-state.json"
         )
         _, headers, _ = get(base, "/announcement-state.json")
-        assert "no-store" in headers.get("cache-control", "")
+        assert headers.get("cache-control") == "no-cache"
         assert headers["content-type"].startswith("application/json")
 
     def test_arbitrary_results_json_not_widened_by_allowlist(self, server):
@@ -186,7 +155,7 @@ class TestAllowlist:
         (results_dir / "secrets.json").write_text('{"token": "leak"}')
         (dashboard_dir / "secrets.json").symlink_to(results_dir / "secrets.json")
         code, _, _ = get(base, "/secrets.json")
-        assert code == 403
+        assert code == 404
 
     def test_symlink_pointing_outside_results_is_blocked(self, server):
         """Symlink to a file outside both SERVE_ROOT and RESULTS_ROOT is denied."""
@@ -195,7 +164,7 @@ class TestAllowlist:
         outside.write_text('{"secret": true}')
         (dashboard_dir / "results.json").symlink_to(outside)
         code, _, _ = get(base, "/results.json")
-        assert code == 403
+        assert code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +237,7 @@ class TestThemeAllowlist:
 
         code, _, _ = get(base, path)
 
-        assert code == 403
+        assert code == 404
 
     def test_theme_traversal_is_blocked(self, server):
         base, _, _ = server
@@ -284,7 +253,7 @@ class TestThemeAllowlist:
 
         code, _, _ = get(base, "/themes/custom/tokens.css")
 
-        assert code == 403
+        assert code == 404
 
     def test_custom_theme_symlink_outside_results_is_blocked(self, server):
         base, dashboard_dir, _ = server
@@ -296,7 +265,7 @@ class TestThemeAllowlist:
 
         code, _, _ = get(base, "/themes/custom/tokens.css")
 
-        assert code == 403
+        assert code == 404
 
     def test_custom_theme_symlink_inside_branding_uses_requested_suffix(self, server):
         base, dashboard_dir, results_dir = server
@@ -415,7 +384,7 @@ class TestRunReports:
     def test_disallowed_report_paths_are_blocked(self, server, path):
         base, dashboard_dir, results_dir = server
         # Materialize a real file at the traversal target / each bad path so the
-        # 403 is the allowlist's doing, not a 404. Build it under whichever root
+        # denial is the allowlist's doing, not a missing file. Build it under whichever root
         # the (pre-normalization) path would resolve to.
         runs_link = dashboard_dir / "runs"
         if not runs_link.exists():
@@ -432,27 +401,18 @@ class TestRunReports:
         (good_dir / "Nova.html").write_text("<html>ok</html>")
         (good_dir / "sub").mkdir(exist_ok=True)
         (good_dir / "sub" / "nova.html").write_text("<html>ok</html>")
-        # A real file under a NON-timestamp dir, so the bad-timestamp case is a
-        # hard allowlist 403 rather than a 404 on a missing file.
+        # A real file under a NON-timestamp dir, so the bad-timestamp case is
+        # denied by the allowlist rather than by a missing file.
         evil_dir = results_dir / "evil"
         evil_dir.mkdir(parents=True, exist_ok=True)
         (evil_dir / "nova.html").write_text("<html>evil</html>")
 
         code, _, _ = get(base, path)
-        # Either is acceptable (both deny the file); but the cases where a real
-        # file exists at the requested location must be a hard allowlist 403,
-        # proving the regex/containment — not an incidental 404.
-        assert code in (403, 404), f"{path} must not be served (got {code})"
-        hard_deny = {
-            "/runs/../secret.html",                 # blocked pre-resolve (.. guard)
-            "/runs/evil/nova.html",                 # real file, bad timestamp dir
-            "/runs/20260612T120000Z/nova.json",     # real file, wrong suffix
-            "/runs/20260612T120000Z/no..dots.html", # real file, bad name chars
-            "/runs/20260612T120000Z/Nova.html",     # real file, uppercase name
-            "/runs/20260612T120000Z/sub/nova.html", # real file, extra segment
-        }
-        if path in hard_deny:
-            assert code == 403, f"{path} should be a hard 403 (got {code})"
+        # The ".." guard rejects on the path alone (403, no file lookup); every
+        # other denial is the allowlist's uniform 404, the same answer as for a
+        # missing file, so status codes never reveal which files exist.
+        expected = 403 if path == "/runs/../secret.html" else 404
+        assert code == expected, f"{path} must not be served (got {code})"
 
     def test_report_symlink_escaping_results_root_is_blocked(self, server):
         """A run directory replaced by a symlink that escapes RESULTS_ROOT must
@@ -471,7 +431,7 @@ class TestRunReports:
         (run_dir / "nova.html").symlink_to(outside)
 
         code, _, _ = get(base, f"/runs/{self.VALID_TS}/nova.html")
-        assert code == 403
+        assert code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -529,12 +489,12 @@ class TestSecurityHeaders:
 # ---------------------------------------------------------------------------
 
 class TestCacheHeaders:
-    def test_json_symlink_has_no_store(self, server):
+    def test_json_symlink_has_no_cache(self, server):
         base, dashboard_dir, results_dir = server
         (results_dir / "results.json").write_text("{}")
         (dashboard_dir / "results.json").symlink_to(results_dir / "results.json")
         _, headers, _ = get(base, "/results.json")
-        assert "no-store" in headers.get("cache-control", "")
+        assert headers.get("cache-control") == "no-cache"
 
     @pytest.mark.parametrize(
         ("request_path", "filename", "content"),

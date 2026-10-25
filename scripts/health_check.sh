@@ -92,7 +92,8 @@ MAX_ENTRIES=$(( UPTIME_WINDOW_DAYS * 24 * 60 / CHECK_INTERVAL ))
 if (( MAX_ENTRIES < 672 )); then MAX_ENTRIES=672; fi
 
 [ -f "${HISTORY_FILE}" ] || echo '{"checks": []}' > "${HISTORY_FILE}"
-jq --slurpfile cur "${HEALTH_FILE}" \
+# Compact (-c): the dashboard re-fetches this multi-MB file every refresh.
+jq -c --slurpfile cur "${HEALTH_FILE}" \
     --argjson max "${MAX_ENTRIES}" \
     --argjson days "${UPTIME_WINDOW_DAYS}" \
     -f "${SCRIPT_DIR}/health_history_filter.jq" \

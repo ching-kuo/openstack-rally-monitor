@@ -127,3 +127,68 @@ def test_error_heading_is_generic_with_code():
 
 def test_error_heading_without_code():
     assert _eval("errorHeading", 'errorHeading({error: "x"})') == "Service error"
+
+
+# --- routing: parseHash / selectionHash / initialSelection -----------------
+
+def test_parse_hash_routes_known_views():
+    out = _eval_json(
+        "parseHash",
+        '["#overview","#input","#scenario=1","#scenario=2","#scenario=x","","#junk"]'
+        ".map((h) => parseHash(h, 2))",
+    )
+    assert out == [
+        {"view": "overview"},
+        {"view": "input"},
+        {"view": "scenario", "idx": 1},
+        None,  # out of range for 2 scenarios
+        None,
+        None,
+        None,
+    ]
+
+
+def test_selection_hash_round_trips_through_parse_hash():
+    fns = _extract("parseHash") + "\n" + _extract("selectionHash")
+    out = json.loads(_run_node(
+        f"{fns}\nconst sels=[{{view:'overview'}},{{view:'input'}},{{view:'scenario',idx:3}}];"
+        "process.stdout.write(JSON.stringify(sels.map((s) => parseHash(selectionHash(s), 5))));"
+    ))
+    assert out == [{"view": "overview"}, {"view": "input"}, {"view": "scenario", "idx": 3}]
+
+
+def _initial(scenarios_js: str):
+    fns = _extract("scenarioStatus") + "\n" + _extract("initialSelection")
+    return json.loads(_run_node(
+        f"{fns}\nprocess.stdout.write(JSON.stringify(initialSelection({scenarios_js})));"
+    ))
+
+
+def test_initial_selection_opens_first_failed_scenario():
+    scenarios = (
+        "[{iterations:1,errors:0,sla_passed:true},"
+        "{iterations:1,errors:2,sla_passed:true},"
+        "{iterations:1,errors:0,sla_passed:false}]"
+    )
+    assert _initial(scenarios) == {"view": "scenario", "idx": 1}
+
+
+def test_initial_selection_is_overview_when_all_passed_or_empty():
+    assert _initial("[{iterations:1,errors:0,sla_passed:true}]") == {"view": "overview"}
+    assert _initial("[]") == {"view": "overview"}
+
+
+def test_route_for_falls_back_to_initial_selection():
+    """Initial load and hashchange share one fallback, so Back to the original
+    (hashless) entry shows the same view the page opened on."""
+    fns = "\n".join(_extract(n) for n in ("scenarioStatus", "parseHash", "initialSelection", "routeFor"))
+    out = json.loads(_run_node(
+        f"{fns}\nconst sc=[{{iterations:1,errors:0}},{{iterations:1,errors:1}}];"
+        "process.stdout.write(JSON.stringify([routeFor('', sc), routeFor('#input', sc),"
+        " routeFor('#scenario=9', sc)]));"
+    ))
+    assert out == [
+        {"view": "scenario", "idx": 1},
+        {"view": "input"},
+        {"view": "scenario", "idx": 1},
+    ]

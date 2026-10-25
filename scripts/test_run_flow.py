@@ -121,8 +121,9 @@ def test_abort_run_publishes_failure_and_exits_nonzero(tmp_path: Path) -> None:
     assert summary["error"] == "task_args_write_failed"
     assert summary["error_detail"] == "could not write task_args.json"
     assert summary["services"] == {}
-    ledger = json.loads((tmp_path / "smoke_history.json").read_text())
-    assert [r["status"] for r in ledger["runs"]] == ["failed"]
+    ledger_raw = (tmp_path / "smoke_history.json").read_text()
+    assert [r["status"] for r in json.loads(ledger_raw)["runs"]] == ["failed"]
+    assert ledger_raw.count("\n") == 1  # compact (jq -c)
     results = json.loads((tmp_path / "results.json").read_text())
     assert results["summary"]["error"] == "task_args_write_failed"
 
@@ -152,7 +153,9 @@ def test_history_stays_one_document_when_xargs_splits(tmp_path: Path) -> None:
     result = run_harness(tmp_path, "publish_dashboard_files",
                          {"UPTIME_WINDOW_DAYS": "30"}, bin_dir)
     assert result.returncode == 0, result.stderr
-    history = json.loads((tmp_path / "history.json").read_text())
+    raw = (tmp_path / "history.json").read_text()
+    assert raw.count("\n") == 1  # compact (jq -c): the dashboard re-fetches it
+    history = json.loads(raw)
     # The harness's own (summary-less) run dir is ignored; order is by name.
     assert [r["timestamp"] for r in history["runs"]] == stamps
 
