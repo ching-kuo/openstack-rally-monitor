@@ -9,6 +9,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
+from shell_testlib import write_shim
+
 # macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4.
 BASH = shutil.which("bash") or "/bin/bash"
 SCRIPT = Path(__file__).resolve().parent / "init_state.sh"
@@ -50,6 +54,80 @@ def test_first_boot_seeds_state_locks_and_logs(tmp_path: Path) -> None:
     for name in ("rally-run.lock", "rally-health.lock", "rally-cleanup.lock"):
         assert (logs / name).is_file(), name
     assert (results / ".announce.lock").is_file()
+
+
+def test_boot_writes_dashboard_thresholds_matching_the_exporter(tmp_path: Path) -> None:
+    """dashboard_config.json carries the thresholds the exporter and alerts use:
+    the cron spacing of both schedules (metrics_common.cron_spacing_seconds) and
+    health_metrics.stale_after_seconds = max(3I, I + HEALTH_CHECK_TIMEOUT + 60)."""
+    assert run_init(tmp_path).returncode == 0
+    config_file = tmp_path / "results" / "dashboard_config.json"
+    assert json.loads(config_file.read_text()) == {
+        "schedule_interval_seconds": 14400,
+        "health_check_interval_seconds": 900,
+        "health_stale_after_seconds": 2700,
+    }
+
+    # Rewritten on every boot, so a config change takes effect on restart. A
+    # short interval with a long checker timeout takes the floor.
+    result = run_init(
+        tmp_path,
+        RALLY_SCHEDULE_INTERVAL="90",
+        HEALTH_CHECK_INTERVAL="1",
+        HEALTH_CHECK_TIMEOUT="600",
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config_file.read_text()) == {
+        "schedule_interval_seconds": 7200,
+        "health_check_interval_seconds": 60,
+        "health_stale_after_seconds": 720,
+    }
+
+
+@pytest.mark.parametrize("name", ["dashboard_config.json", "run_state.json"])
+def test_squatter_on_a_published_name_is_replaced(tmp_path: Path, name: str) -> None:
+    """A directory (or a symlink to one) squatting on a file init_state.sh
+    publishes would make `mv` drop the file INSIDE it; the dashboard would
+    then 404 the name. init_state.sh runs as the owner, so it replaces it."""
+    results = tmp_path / "results"
+    (results / name).mkdir(parents=True)
+    (results / name / "planted").write_text("x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    result = run_init(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (results / name).is_file() and not (results / name).is_symlink()
+    json.loads((results / name).read_text())
+
+    (results / name).unlink()
+    (results / name).symlink_to(elsewhere)
+    result = run_init(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert (results / name).is_file() and not (results / name).is_symlink()
+    assert list(elsewhere.iterdir()) == []  # nothing written through the link
+
+
+def test_failed_producer_keeps_the_previous_file(tmp_path: Path) -> None:
+    """publish_json used to sit on the right of a pipe, so a failing jq still
+    moved its empty output over the target: a 0-byte latest_summary.json that
+    the seed-if-missing check then never replaced."""
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "dashboard_config.json").write_text('{"old": true}')
+    bin_dir = tmp_path / "bin"
+    write_shim(bin_dir, "jq", "exit 1\n")
+
+    result = run_init(tmp_path, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    assert result.returncode == 0, result.stderr
+    assert json.loads((results / "dashboard_config.json").read_text()) == {"old": True}
+    assert not (results / "latest_summary.json").exists()
+    assert list(results.glob("*.tmp")) == []
+
+    # The next boot with a working jq seeds what is missing.
+    assert run_init(tmp_path).returncode == 0
+    summary = json.loads((results / "latest_summary.json").read_text())
+    assert summary["timestamp"] == "waiting_for_first_run"
 
 
 def test_reboot_keeps_state_but_resets_run_state(tmp_path: Path) -> None:

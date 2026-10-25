@@ -68,7 +68,7 @@ RUN chmod 0644 /etc/logrotate.d/rally-monitor
 # SHA-256 hashes pinned at vendoring time; verified after download to detect supply-chain tampering.
 # Dependabot cannot see these two pins: bump them by hand (check npm for a
 # release at least two weeks old, read the Chart.js changelog against the line
-# and bar charts in dashboard/app.js and dashboard/report.js, and recompute the
+# and bar charts in dashboard/js/charts.js and dashboard/report.js, and recompute the
 # hash from the downloaded file, cross-checked against the npm tarball).
 RUN mkdir -p /dashboard/vendor && \
     curl -fsSL "https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.3.0/files/inter-latin-wght-normal.woff2" \

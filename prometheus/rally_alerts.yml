@@ -246,6 +246,8 @@ groups:
       # when runs routinely outlast the interval.
       # `rally_last_run_end_timestamp > 0` skips a fresh container that has not
       # finished its first run (RallyDataInvalid covers that).
+      # KEEP IN SYNC with dashboard/js/status.js::runOverdue (the dashboard's
+      # "Last run ... (overdue)" hint applies the same rule).
       # -----------------------------------------------------------------------
       - alert: RallyStaleResults
         expr: >-

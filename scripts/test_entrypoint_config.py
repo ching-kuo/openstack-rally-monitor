@@ -50,6 +50,21 @@ def test_make_cron_schedule_returns_one_expression(minutes: str, expression: str
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize(
+    ("minutes", "seconds"),
+    [("1", "60"), ("15", "900"), ("60", "3600"), ("61", "7200"), ("90", "7200"),
+     ("1439", "86400"), ("1440", "86400")],
+)
+def test_cron_spacing_seconds_is_the_longest_cron_gap(minutes: str, seconds: str) -> None:
+    """Same values as exporter metrics_common.cron_spacing_seconds: below an
+    hour the step itself, from an hour up the rounded-up whole hours."""
+    result = run_function("cron_spacing_seconds", minutes)
+
+    assert result.returncode == 0
+    assert result.stdout == f"{seconds}\n"
+    assert result.stderr == ""
+
+
 def test_non_hour_interval_warns_on_stderr_without_corrupting_expression() -> None:
     result = run_function("make_cron_schedule", "61")
 
@@ -258,3 +273,48 @@ def test_or_default_day_count_is_never_fatal() -> None:
     result = run_snippet('or_default normalize_days "abc" 30 UPTIME_WINDOW_DAYS', {})
     assert result.returncode == 0
     assert result.stdout == "30\n"
+
+
+def test_entrypoint_dashboard_links_never_dereference_their_destination() -> None:
+    """Root creates the /dashboard links. Plain `ln -sf` follows a destination
+    that is already a symlink to a directory and creates the new link INSIDE
+    it, i.e. root writing into the rally-writable /results. `-T` (GNU; the
+    image is Debian) treats the destination as a plain name, `-n` never
+    dereferences it."""
+    links = [
+        line.strip()
+        for line in ENTRYPOINT.read_text().splitlines()
+        if line.strip().startswith("ln ")
+    ]
+    assert len(links) >= 8
+    for line in links:
+        flags = line.split()[1]
+        assert flags.startswith("-") and {"s", "n", "T"} <= set(flags[1:]), line
+
+
+def _gnu_ln() -> str | None:
+    for name in ("ln", "gln"):
+        path = shutil.which(name)
+        if path and "GNU" in subprocess.run(
+            [path, "--version"], capture_output=True, text=True, check=False
+        ).stdout:
+            return path
+    return None
+
+
+@pytest.mark.skipif(_gnu_ln() is None, reason="GNU ln (as in the Debian image) not available")
+def test_ln_sfnT_replaces_a_link_to_a_directory_instead_of_writing_into_it(
+    tmp_path: Path,
+) -> None:
+    """The flag semantics the entrypoint relies on (runs in CI, ubuntu)."""
+    squatted = tmp_path / "results" / "results.json"
+    squatted.mkdir(parents=True)  # rally turned the target into a directory
+    link = tmp_path / "results.json"
+    link.symlink_to(squatted)  # the link from the previous boot
+
+    result = subprocess.run(
+        [_gnu_ln(), "-sfnT", str(squatted), str(link)], capture_output=True, check=False
+    )
+    assert result.returncode == 0
+    assert link.is_symlink()
+    assert list(squatted.iterdir()) == []

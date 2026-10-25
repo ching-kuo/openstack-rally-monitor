@@ -15,11 +15,23 @@ from urllib.parse import unquote
 
 SERVE_ROOT = Path(os.getcwd()).resolve()
 
-# Deny-by-default allowlists. Update ALLOWED_STATIC for new dashboard assets;
-# theme assets are gated by THEME_PREFIX + ALLOWED_THEME_SUFFIXES + BRANDING_ROOT.
-ALLOWED_STATIC = {
+# Module scripts are refused unless served with a JavaScript MIME type; pin it
+# rather than trust the host's mime.types.
+mimetypes.add_type("text/javascript", ".js")
+
+def _dashboard_modules(root: Path) -> frozenset[str]:
+    """The dashboard's ES modules, "js/<name>.js" (entry point js/main.js).
+    Built once at startup from the directory: /dashboard is root-owned and not
+    writable at runtime, so the set cannot change under a running server."""
+    return frozenset(f"js/{path.name}" for path in (root / "js").glob("*.js"))
+
+
+# Deny-by-default allowlists. Update STATIC_ASSETS for new dashboard assets
+# (modules under js/ are picked up automatically); theme assets are gated by
+# THEME_PREFIX + ALLOWED_THEME_SUFFIXES + BRANDING_ROOT.
+DASHBOARD_MODULES = _dashboard_modules(SERVE_ROOT)
+STATIC_ASSETS = frozenset({
     "index.html",
-    "app.js",
     "style.css",
     # Self-contained report renderer assets (loaded by runs/<ts>/<service>.html
     # via relative ../../ paths). Same-origin, so reports serve under the strict
@@ -28,10 +40,17 @@ ALLOWED_STATIC = {
     "report.js",
     "vendor/chart.umd.min.js",
     "vendor/inter-variable.woff2",
-}
+    # Stylesheets split by section; loaded in this order by index.html.
+    "cards.css",
+    "overlays.css",
+})
+ALLOWED_STATIC = STATIC_ASSETS | DASHBOARD_MODULES
 ALLOWED_JSON_SYMLINKS = {
     "results.json",
     "history.json",
+    # Boot-time thresholds (schedule spacing, health stale-after) written by
+    # init_state.sh, so the dashboard's overdue hints match the exporter.
+    "dashboard_config.json",
     "health.json",
     "health_history.json",
     "announcement-state.json",
@@ -50,7 +69,7 @@ ALLOWED_THEME_SUFFIXES = {".css", ".svg", ".png", ".ico"}
 # token. Anchored ^...$, no path separators inside the captures, so it cannot be
 # coaxed into traversal or into matching anything but a report file. Containment
 # in RESULTS_ROOT is re-checked on the resolved target below. KEEP IN SYNC with
-# backfill_reports.sh TS_RE/SVC_RE, render_report.py _RUN_TS_RE and app.js
+# backfill_reports.sh TS_RE/SVC_RE, render_report.py _RUN_TS_RE and js/status.js
 # RUN_TIMESTAMP_RE.
 RUN_REPORT_RE = re.compile(r"^runs/[0-9]{8}T[0-9]{6}Z/[a-z0-9_-]+\.html$")
 RESULTS_ROOT = Path(os.environ.get("RESULTS_DIR", "/results")).resolve()
@@ -76,8 +95,8 @@ SECURITY_HEADERS = [
         # attributes. The reports' embedded data lives in a
         # <script type="application/json"> block, which browsers never execute
         # and CSP script-src does not govern. JS runs only from same-origin files
-        # (app.js, report.js, vendor/). style-src KEEPS 'unsafe-inline' because
-        # app.js writes inline style="" attributes via innerHTML; CSP has no
+        # (js/*.js, report.js, vendor/). style-src KEEPS 'unsafe-inline' because
+        # the dashboard modules write inline style="" attributes via innerHTML; CSP has no
         # per-attribute hashing for those. base-uri/form-action/frame-ancestors
         # do not fall back to default-src, so they are locked separately.
         "Content-Security-Policy",
@@ -264,7 +283,7 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
 
         if not_modified:
             self.send_response(304)
-            self._send_cache_headers(suffix, etag, st.st_mtime)
+            self._send_cache_headers(rel_str, suffix, etag, st.st_mtime)
             self.end_headers()
             return
 
@@ -287,7 +306,7 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(length))
         if use_gzip:
             self.send_header("Content-Encoding", "gzip")
-        self._send_cache_headers(suffix, etag, st.st_mtime)
+        self._send_cache_headers(rel_str, suffix, etag, st.st_mtime)
         self.end_headers()
         if send_body:
             self.wfile.write(data)
@@ -300,14 +319,17 @@ class SecureStaticHandler(BaseHTTPRequestHandler):
         if_modified_since = self.headers.get("If-Modified-Since")
         return if_modified_since is not None and _not_modified_since(if_modified_since, mtime)
 
-    def _send_cache_headers(self, suffix, etag, mtime):
+    def _send_cache_headers(self, rel_str, suffix, etag, mtime):
         self.send_header("ETag", etag)
         self.send_header("Last-Modified", formatdate(mtime, usegmt=True))
         if suffix in COMPRESSIBLE_SUFFIXES:
             self.send_header("Vary", "Accept-Encoding")
-        if suffix == ".json":
+        if suffix == ".json" or rel_str in DASHBOARD_MODULES or rel_str == "index.html":
             # Always revalidate (the data changes every run/check), but let the
-            # browser reuse its copy on a 304 instead of re-downloading.
+            # browser reuse its copy on a 304 instead of re-downloading. The
+            # modules too: their import specifiers carry no ?v= cache-buster,
+            # so a max-age could run a new main.js against old imports; and
+            # index.html, so a cached page never pairs with newer modules.
             self.send_header("Cache-Control", "no-cache")
         else:
             self.send_header("Cache-Control", "public, max-age=300")

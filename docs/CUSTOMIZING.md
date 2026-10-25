@@ -40,6 +40,10 @@ services:
 
 Then rebuild or restart the container. The entrypoint recreates `/dashboard/themes/custom -> /results/branding` on each boot.
 
+### Seeing Your Changes
+
+`index.html` loads `themes/custom/tokens.css` and `overrides.css` with a fixed `?v=` query, and the dashboard server sends static assets with `Cache-Control: public, max-age=300`. After you edit a custom theme file, a browser that already loaded the page can keep the old copy for up to 5 minutes. Do a hard refresh (Ctrl+Shift+R, or Cmd+Shift+R on macOS) to see the change at once. The logo and favicon are probed with `cache: "no-store"` when the page loads, so swapping in or removing those files shows on the next reload, though the image itself is cached like other assets.
+
 ## Minimum Theme
 
 `my-theme/tokens.css`:
@@ -65,7 +69,7 @@ Custom themes may override these names. Maintainers should keep them stable acro
 
     --color-text-primary: #f1f5f9;
     --color-text-secondary: #94a3b8;
-    --color-text-muted: #64748b;
+    --color-text-muted: #8190a6;
 
     --color-success: #10b981;
     --color-failure: #ef4444;
@@ -87,7 +91,7 @@ Custom themes may override these names. Maintainers should keep them stable acro
     --chart-series-6: #8b5cf6;
     --chart-series-7: #ec4899;
     --chart-axis-label: #94a3b8;
-    --chart-axis-tick: #64748b;
+    --chart-axis-tick: #8190a6;
     --chart-grid: rgba(255,255,255,0.04);
 }
 ```

@@ -24,14 +24,14 @@ rally_maintenance_mode = Gauge(
 )
 
 # Operator-announcement types. Enum-only: never derive labels from body/id text.
-# Mirrors TYPE_LABELS in dashboard/app.js and VALID_TYPES_RE in announce.sh.
+# Mirrors TYPE_LABELS in dashboard/js/announcements.js and VALID_TYPES_RE in announce.sh.
 ANNOUNCEMENT_TYPES = ("incident", "maintenance", "scheduled")
 
 
 def is_announcement_active(rec: dict, now_ms: float) -> bool:
     """Return whether an announcement record is currently active.
 
-    KEEP IN SYNC with dashboard/app.js::isAnnouncementActive — both encode the
+    KEEP IN SYNC with dashboard/js/announcements.js::isAnnouncementActive — both encode the
     same active-ness semantics (the repo uses this convention for
     ALL_GREEN_PREDICATE across announce.sh/run_tests.sh):
       - unknown type            -> not active

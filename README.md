@@ -12,7 +12,7 @@ Automated OpenStack cloud health testing using **Rally**, with a live dark-theme
 - **Webhook Notifications** — Optional outbound webhook on smoke-status transitions (`passed`↔`failed`), with generic / Slack / Discord payload formats
 - **7-Day History** — Results retained with automatic pruning
 - **Uptime Percentages** — API health and smoke-test uptime over a configurable window (default 30 days), shown as dashboard badges
-- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh, per-scenario failure causes, links to a self-contained per-run full report (themed to match, works offline, opens on the first failed scenario, linkable per scenario), and a live "test run in progress" indicator
+- **Live Dashboard** — Dark-theme glassmorphism UI with status timelines, latency charts, auto-refresh (paused while the tab is hidden, plus a manual refresh button), per-scenario failure causes, an explanation card when a run fails before any service is tested, data-age hints that turn amber when runs or health checks are overdue, a "can't reach server" notice, links to a self-contained per-run full report (themed to match, works offline, opens on the first failed scenario, linkable per scenario), `#run=<timestamp>` permalinks to a historical run, a live "test run in progress" indicator, and keyboard/screen-reader access (focusable cards and timelines, an accessible detail dialog, reduced-motion support)
 
 ## Dashboard Customization
 
@@ -406,6 +406,32 @@ docker exec rally-monitor tail -f /rally/logs/health-check.log
 
 > **Orphan prefixes:** `s_rally_*` resources are created by scenario plugins and cleaned up during the test. `c_rally_*` resources are created by context plugins (projects, users, networks) and cleaned up after the task completes. Both are detected by `cleanup_monitor.sh` and removable via `purge_orphans.sh`, but reported at different severities — see the alert table above.
 
+## Troubleshooting
+
+### Red dashboard or empty service cards
+
+A red header with no service cards, or a "The run failed before any service was tested" card, usually means the run could not set up its Rally deployment (`deployment_setup_failed`), most often because Keystone rejected the credentials. Work through these in order:
+
+1. **Container logs.** `docker logs rally-monitor` shows startup validation (missing `OS_*` variables stop the container and are named there) and the cron jobs' output.
+2. **The run's deployment log.** The error card names the file; it is `<RUN_DIR>/deployment.log`, where `<RUN_DIR>` is `/results/<run timestamp>`:
+
+   ```bash
+   docker exec rally-monitor ls /results | tail -3            # newest run directories
+   docker exec rally-monitor cat /results/<timestamp>/deployment.log
+   docker exec rally-monitor cat /results/<timestamp>/run.log # the whole run
+   ```
+
+   A `401` / `Unauthorized` there is Keystone refusing the token request: check `OS_AUTH_URL`, the user/project names and domains, and the password. Intermittent 401s that come and go between runs point at Keystone itself, not at the monitor.
+3. **Placeholder credentials.** If `.env` still holds the `env.sample` values (`OS_PASSWORD=changeme`, an `OS_AUTH_URL` containing `your-openstack-api`), the boot log carries a `WARNING` saying so. Fill in real values and recreate the container (`docker compose up -d`).
+4. **File ownership.** Run every script with `docker exec -u rally ...`. Run directories that a root run of an older image left root-owned cannot be pruned or rewritten by the `rally` user; the boot log names them, and one host-side command fixes them:
+
+   ```bash
+   docker volume ls | grep rally-results
+   docker run --rm -v <volume>:/results busybox chown -R 1500:0 /results
+   ```
+
+After fixing the cause, trigger a run (`docker exec -u rally rally-monitor /scripts/run_tests.sh`) instead of waiting for the next scheduled one. If the dashboard shows "Can't reach server", the browser could not load `results.json` and is showing the last data it had; check that the container is running and its dashboard port is reachable.
+
 ## Continuous Integration
 
 `.github/workflows/build-push.yml` runs two gate jobs before the build. The `test` job runs `shellcheck` and the full pytest suite (`exporter/`, `dashboard/`, `scripts/`) on Python 3.13 — matching the `python:3.13-slim` runtime — with a pinned, checksum-verified `promtool` installed so the alert-rule unit tests run too. The `audit` job runs `pip-audit` (itself installed from a hashed lock, `.github/ci/requirements-audit.txt`) against the image's hashed lockfile and fails on any known vulnerability; it also runs weekly on a schedule, which only audits and never builds or pushes. The test dependencies are installed constrained to the image lock, so the suites run against the image's transitive versions. The `build-push` job declares `needs: [test, audit]`, so a failure in either blocks the image build and publication entirely. Images are pushed to GitHub Container Registry (`ghcr.io/<owner>/<repo>`) on push to `main`, on `v*` tags, and via manual dispatch; pull requests build only (no push). Every action is pinned to a full commit SHA (the release tag is in a trailing comment).
@@ -457,15 +483,14 @@ openstack-rally-monitor/
 │   └── rally_alerts_test.yml
 ├── dashboard/
 │   ├── index.html
-│   ├── style.css
-│   ├── app.js
+│   ├── style.css, cards.css, overlays.css
+│   ├── js/                   (ES modules; main.js is the entry point)
 │   ├── report.css
 │   ├── report.js
 │   ├── serve.py
 │   ├── themes/
 │   │   └── default/
-│   ├── test_serve.py
-│   └── test_serve_http.py
+│   ├── test_*.py, conftest.py, node_testlib.py
 ├── docs/
 │   └── CUSTOMIZING.md
 └── env.sample

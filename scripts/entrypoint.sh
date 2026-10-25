@@ -89,30 +89,37 @@ su -s /bin/bash rally -c "RESULTS_DIR=${_safe_results_dir} /scripts/init_state.s
 
 # Symlink JSON data files into /dashboard so the HTTP server can serve them.
 # Recreated on every startup since /dashboard is ephemeral (not a volume).
-ln -sf "${RESULTS_DIR}/results.json"            /dashboard/results.json
-ln -sf "${RESULTS_DIR}/history.json"            /dashboard/history.json
-ln -sf "${RESULTS_DIR}/health.json"             /dashboard/health.json
-ln -sf "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
+# Every link uses `ln -sfnT` (GNU coreutils; the image is Debian): plain
+# `ln -sf` follows a destination that is already a symlink to a directory and
+# creates the new link INSIDE it -- root writing into the rally-writable
+# ${RESULTS_DIR} if rally turned a target into a directory. -n never
+# dereferences the destination, -T never treats it as a directory.
+ln -sfnT "${RESULTS_DIR}/results.json"            /dashboard/results.json
+ln -sfnT "${RESULTS_DIR}/history.json"            /dashboard/history.json
+# Thresholds for the dashboard's overdue hints, written by init_state.sh above.
+ln -sfnT "${RESULTS_DIR}/dashboard_config.json"   /dashboard/dashboard_config.json
+ln -sfnT "${RESULTS_DIR}/health.json"             /dashboard/health.json
+ln -sfnT "${RESULTS_DIR}/health_history.json"     /dashboard/health_history.json
 # Operator-announcement state. The symlink is unconditional; the target file
 # appears lazily on the first announce.sh post. serve.py's target.exists()
 # check 404s on the dangling symlink until then.
-ln -sf "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
+ln -sfnT "${RESULTS_DIR}/announcement-state.json" /dashboard/announcement-state.json
 # Run-progress state, seeded to idle just above. Same lazy/atomic pattern.
-ln -sf "${RESULTS_DIR}/run_state.json"          /dashboard/run_state.json
+ln -sfnT "${RESULTS_DIR}/run_state.json"          /dashboard/run_state.json
 # Expose per-run directories so the dashboard can link to the generated Rally
 # HTML reports (/dashboard/runs/<TIMESTAMP>/<service>.html). serve.py gates this
 # behind a strict regex + RESULTS_ROOT containment, so the symlink only widens
 # what that allowlist branch explicitly permits. The source tree ships no
-# dashboard/runs, so this is a plain symlink; `-n` keeps a re-run from nesting a
+# dashboard/runs, so this is a plain symlink; `-nT` keeps a re-run from nesting a
 # link inside a pre-existing one.
-ln -sfn "${RESULTS_DIR}"                        /dashboard/runs
-# `ln -sfn` cannot overwrite an existing directory, so if the image was built
-# with a preview `dashboard/themes/custom/` staged in the source tree (e.g.
-# operator-side scaffolding), the symlink would silently turn into a child
-# entry and the dashboard would serve the baked-in files instead of the
-# operator's runtime branding. Remove first, then link.
+ln -sfnT "${RESULTS_DIR}"                       /dashboard/runs
+# `ln -snT` refuses to replace an existing directory (and set -e would stop
+# the container), so if the image was built with a preview
+# `dashboard/themes/custom/` staged in the source tree (e.g. operator-side
+# scaffolding), it is removed first. /dashboard is root-owned, so this never
+# touches the rally-writable branding directory itself.
 rm -rf /dashboard/themes/custom
-ln -s "${RESULTS_DIR}/branding"                 /dashboard/themes/custom
+ln -snT "${RESULTS_DIR}/branding"               /dashboard/themes/custom
 log "Custom theme slot: ${RESULTS_DIR}/branding"
 log "Dashboard symlinks updated"
 

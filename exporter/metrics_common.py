@@ -18,7 +18,9 @@ def cron_spacing_seconds(raw: str | None, default_minutes: int) -> int:
     """Return the longest gap, in seconds, between runs of a minute interval.
 
     KEEP IN SYNC with scripts/entrypoint_config.sh::make_cron_schedule, which
-    turns the same interval into the cron entry: below 60 minutes it is a
+    turns the same interval into the cron entry, and with its shell twin
+    entrypoint_config.sh::cron_spacing_seconds (written into
+    dashboard_config.json by init_state.sh for the dashboard): below 60 minutes it is a
     `*/N` minute step (longest gap N), from 60 up it rounds UP to whole hours
     (longest gap = the rounded value). Invalid or out-of-range input falls back
     to the default, matching the entrypoint, which refuses to start on a bad

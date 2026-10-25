@@ -35,7 +35,8 @@ def stale_after_seconds(interval_seconds: int) -> int:
     intervals, where one slow check (killed at the timeout) would otherwise
     read as stale. The timestamp is written when a check finishes, so the next
     one lands at most an interval plus the timeout later; the extra minute
-    absorbs cron jitter.
+    absorbs cron jitter. KEEP IN SYNC with scripts/init_state.sh, which
+    writes the same value as dashboard_config.json's health_stale_after_seconds.
     """
     return max(3 * interval_seconds, interval_seconds + HEALTH_CHECK_TIMEOUT_SECONDS + 60)
 

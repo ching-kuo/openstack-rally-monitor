@@ -159,9 +159,8 @@ make_cron_schedule() {
         return 0
     fi
 
-    rounded="${minutes}"
+    rounded=$(( $(cron_spacing_seconds "${minutes}") / 60 ))
     if (( minutes % 60 != 0 )); then
-        rounded=$(( ((minutes + 59) / 60) * 60 ))
         _entrypoint_config_log WARNING \
             "Interval ${minutes}m is not a multiple of 60. Rounding up to ${rounded}m for cron."
     fi
@@ -173,4 +172,19 @@ make_cron_schedule() {
 
     hours=$(( rounded / 60 ))
     printf '0 */%d * * *\n' "${hours}"
+}
+
+# Longest gap, in seconds, between two runs of the cron entry make_cron_schedule
+# builds for the same minute interval: below an hour the step itself, from an
+# hour up the rounded-up whole hours. Silent (make_cron_schedule already warns
+# about the rounding). init_state.sh writes it into dashboard_config.json for
+# the dashboard's overdue hints; make_cron_schedule uses it for its own
+# round-up. KEEP IN SYNC with exporter/metrics_common.py::cron_spacing_seconds.
+cron_spacing_seconds() {
+    local minutes
+    minutes=$(normalize_interval "${1-}" "Schedule interval") || return 1
+    if (( minutes >= 60 )); then
+        minutes=$(( (minutes + 59) / 60 * 60 ))
+    fi
+    printf '%d\n' $(( minutes * 60 ))
 }

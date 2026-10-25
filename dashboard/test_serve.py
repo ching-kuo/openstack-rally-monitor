@@ -1,7 +1,7 @@
 """Unit tests for dashboard/serve.py."""
 import urllib.error
 import urllib.request
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -41,7 +41,6 @@ class TestAllowlist:
         [
             ("/index.html", "index.html", "<html><body>ok</body></html>", b"ok"),
             ("/", "index.html", "<html></html>", None),
-            ("/app.js", "app.js", "// ok", None),
             ("/style.css", "style.css", "body {}", None),
             ("/report.js", "report.js", "// report", None),
             ("/report.css", "report.css", ".report {}", None),
@@ -56,6 +55,7 @@ class TestAllowlist:
         expected_fragment,
     ):
         base, dashboard_dir, _ = server
+        (dashboard_dir / filename).parent.mkdir(exist_ok=True)
         (dashboard_dir / filename).write_text(content)
         code, _, body = get(base, request_path)
         assert code == 200
@@ -70,22 +70,20 @@ class TestAllowlist:
         assert code == 200
         assert body == b"// report"
 
-    def test_unknown_file_blocked(self, server):
+    @pytest.mark.parametrize(
+        ("existing_file", "request_path"),
+        [
+            ("secrets.txt", "/secrets.txt"),
+            # serve.py must not be served even when it exists in SERVE_ROOT.
+            ("serve.py", "/serve.py"),
+            (None, "/nonexistent.html"),
+        ],
+    )
+    def test_unlisted_or_missing_file_returns_404(self, server, existing_file, request_path):
         base, dashboard_dir, _ = server
-        (dashboard_dir / "secrets.txt").write_text("password123")
-        code, _, _ = get(base, "/secrets.txt")
-        assert code == 404
-
-    def test_serve_py_itself_blocked(self, server):
-        """serve.py must not be served even when it exists in SERVE_ROOT."""
-        base, dashboard_dir, _ = server
-        (dashboard_dir / "serve.py").write_text("# server source")
-        code, _, _ = get(base, "/serve.py")
-        assert code == 404
-
-    def test_nonexistent_file_returns_404(self, server):
-        base, _, _ = server
-        code, _, _ = get(base, "/nonexistent.html")
+        if existing_file:
+            (dashboard_dir / existing_file).write_text("not public")
+        code, _, _ = get(base, request_path)
         assert code == 404
 
     def test_all_json_symlinks_served(self, server):
@@ -106,45 +104,23 @@ class TestAllowlist:
             if name == "results.json":
                 assert b"ok" in body
 
-    def test_run_state_dangling_symlink_returns_404(self, server):
-        """Like announcement-state.json, the run_state.json symlink is created
-        unconditionally at boot but its target is seeded by entrypoint.sh and
-        rewritten by run_tests.sh; a dangling symlink must 404, not 5xx."""
+    @pytest.mark.parametrize("name", ["run_state.json", "announcement-state.json"])
+    def test_dangling_state_symlink_returns_404(self, server, name):
+        """Both symlinks are created unconditionally at container start; the
+        targets appear later (run_state.json is seeded by init_state.sh and
+        rewritten by run_tests.sh, announcement-state.json after the first
+        post). A dangling symlink must 404, not 5xx."""
         base, dashboard_dir, results_dir = server
-        (dashboard_dir / "run_state.json").symlink_to(
-            results_dir / "run_state.json"
-        )
-        code, _, _ = get(base, "/run_state.json")
+        (dashboard_dir / name).symlink_to(results_dir / name)
+        code, _, _ = get(base, f"/{name}")
         assert code == 404
 
-    def test_run_state_has_no_cache_cache_control(self, server):
+    @pytest.mark.parametrize("name", ["results.json", "run_state.json", "announcement-state.json"])
+    def test_json_symlink_has_no_cache(self, server, name):
         base, dashboard_dir, results_dir = server
-        (results_dir / "run_state.json").write_text('{"state": "running"}')
-        (dashboard_dir / "run_state.json").symlink_to(
-            results_dir / "run_state.json"
-        )
-        _, headers, _ = get(base, "/run_state.json")
-        assert headers.get("cache-control") == "no-cache"
-        assert headers["content-type"].startswith("application/json")
-
-    def test_announcement_state_dangling_symlink_returns_404(self, server):
-        """The symlink is created unconditionally at container start; the
-        target file appears only after the first post. A dangling symlink
-        must 404, not 5xx."""
-        base, dashboard_dir, results_dir = server
-        (dashboard_dir / "announcement-state.json").symlink_to(
-            results_dir / "announcement-state.json"
-        )
-        code, _, _ = get(base, "/announcement-state.json")
-        assert code == 404
-
-    def test_announcement_state_has_no_cache_cache_control(self, server):
-        base, dashboard_dir, results_dir = server
-        (results_dir / "announcement-state.json").write_text('{"announcements": []}')
-        (dashboard_dir / "announcement-state.json").symlink_to(
-            results_dir / "announcement-state.json"
-        )
-        _, headers, _ = get(base, "/announcement-state.json")
+        (results_dir / name).write_text("{}")
+        (dashboard_dir / name).symlink_to(results_dir / name)
+        _, headers, _ = get(base, f"/{name}")
         assert headers.get("cache-control") == "no-cache"
         assert headers["content-type"].startswith("application/json")
 
@@ -469,7 +445,8 @@ class TestSecurityHeaders:
         """Regression: script-src must not permit inline scripts. index.html
         ships zero inline <script> blocks and zero inline event handlers, so
         'unsafe-inline' was dropped from script-src. style-src must KEEP it
-        because app.js writes inline style="" attributes via innerHTML."""
+        because the dashboard modules write inline style="" attributes via
+        innerHTML."""
         base, dashboard_dir, _ = server
         (dashboard_dir / "index.html").write_text("<html></html>")
         _, headers, _ = get(base, "/")
@@ -489,18 +466,11 @@ class TestSecurityHeaders:
 # ---------------------------------------------------------------------------
 
 class TestCacheHeaders:
-    def test_json_symlink_has_no_cache(self, server):
-        base, dashboard_dir, results_dir = server
-        (results_dir / "results.json").write_text("{}")
-        (dashboard_dir / "results.json").symlink_to(results_dir / "results.json")
-        _, headers, _ = get(base, "/results.json")
-        assert headers.get("cache-control") == "no-cache"
-
     @pytest.mark.parametrize(
         ("request_path", "filename", "content"),
         [
-            ("/", "index.html", "<html></html>"),
-            ("/app.js", "app.js", "// ok"),
+            ("/style.css", "style.css", "body {}"),
+            ("/report.js", "report.js", "// report"),
         ],
     )
     def test_static_assets_have_max_age(self, server, request_path, filename, content):
@@ -508,3 +478,34 @@ class TestCacheHeaders:
         (dashboard_dir / filename).write_text(content)
         _, headers, _ = get(base, request_path)
         assert "max-age=300" in headers.get("cache-control", "")
+
+    def test_index_html_revalidates(self, server):
+        """index.html must not outlive the no-cache modules it loads: a cached
+        page could pair an old markup with new modules after a deploy."""
+        base, dashboard_dir, _ = server
+        (dashboard_dir / "index.html").write_text("<html></html>")
+        for path in ("/", "/index.html"):
+            _, headers, _ = get(base, path)
+            assert headers["cache-control"] == "no-cache", path
+
+
+def test_every_dashboard_module_is_served(server, monkeypatch):
+    """Every module in dashboard/js/ is allowlisted (the set is built from the
+    directory at startup), served with a JavaScript MIME type (browsers refuse
+    a module script without one) and no-cache (imports carry no ?v=)."""
+    base, _, _ = server
+    real_root = Path(__file__).resolve().parent
+    modules = serve._dashboard_modules(real_root)
+    assert "js/main.js" in modules and len(modules) > 1
+    # The handler reads these globals per request, so re-pointing them after
+    # the fixture started the server takes effect.
+    monkeypatch.setattr(serve, "DASHBOARD_MODULES", modules)
+    monkeypatch.setattr(serve, "ALLOWED_STATIC", serve.STATIC_ASSETS | modules)
+    monkeypatch.setattr(serve, "SERVE_ROOT", real_root)
+    for module in sorted(modules):
+        code, headers, _ = get(base, f"/{module}")
+        assert code == 200, module
+        assert headers["content-type"].startswith("text/javascript"), module
+        assert headers["cache-control"] == "no-cache", module
+    # Nothing else under js/ (e.g. the node package marker) is served.
+    assert get(base, "/js/package.json")[0] == 404

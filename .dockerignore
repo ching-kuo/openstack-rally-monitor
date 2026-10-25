@@ -37,11 +37,14 @@ grafana/
 prometheus/
 
 # Test-only files: nothing at runtime imports them (conftest.py,
-# exporter_testlib.py and shell_testlib.py are used only by the pytest suites,
-# which CI runs from the repository, not the image)
+# exporter_testlib.py, shell_testlib.py and node_testlib.py are used only by
+# the pytest suites, which CI runs from the repository, not the image;
+# dashboard/js/package.json only tells node the modules are ESM)
 **/test_*.py
 **/conftest.py
 exporter/exporter_testlib.py
 scripts/shell_testlib.py
+dashboard/node_testlib.py
+dashboard/js/package.json
 exporter/requirements-test.txt
 **/.pytest_cache/

@@ -4,14 +4,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
     <title>Rally OpenStack Monitor</title>
     <meta name="description"
         content="Read-only dashboard for OpenStack Rally test results with a historical run-status timeline">
     <link id="favicon" rel="icon" type="image/svg+xml" href="themes/default/favicon.svg?v=20260504a">
-    <link rel="stylesheet" href="themes/default/tokens.css?v=20260504a">
-    <link rel="stylesheet" href="style.css?v=20261026a">
+    <link rel="stylesheet" href="themes/default/tokens.css?v=20261026b">
+    <!-- Dashboard styles, split by section; keep this order (overlays.css holds
+         the responsive overrides of the other two). -->
+    <link rel="stylesheet" href="style.css?v=20261026d">
+    <link rel="stylesheet" href="cards.css?v=20261026c">
+    <link rel="stylesheet" href="overlays.css?v=20261026f">
     <!-- Optional custom-theme stylesheets; absent installs 404 and fall through
-         to the defaults above. Dangling <link>s are pruned by app.js
+         to the defaults above. Dangling <link>s are pruned by js/theme.js
          (pruneFailedThemeLinks) rather than an inline onerror= handler, so the
          CSP can drop 'unsafe-inline' from script-src. -->
     <link rel="stylesheet" class="custom-theme-css" href="themes/custom/tokens.css?v=20260504a">
@@ -35,14 +40,20 @@
             </div>
         </div>
         <div class="header-right">
-            <!-- Pulsing chip shown by app.js (renderRunState) only while a Rally
-                 run is in progress; hidden when idle. -->
-            <div class="run-state-chip" id="runStateChip" role="status" style="display:none;"></div>
-            <div class="health-badge" id="healthBadge">
+            <!-- Shown by js/header.js only when results.json could not be loaded
+                 (the page keeps showing the last good copy). -->
+            <div class="connection-chip" id="connectionChip" role="status" hidden></div>
+            <!-- Pulsing chip shown by js/header.js (renderRunState) only while a
+                 Rally run is in progress; hidden when idle. -->
+            <div class="run-state-chip" id="runStateChip" role="status" hidden></div>
+            <div class="health-badge" id="healthBadge" role="status">
                 <span class="health-dot"></span>
                 <span class="health-text">Loading...</span>
             </div>
-            <div class="last-run" id="lastRun">—</div>
+            <div class="freshness">
+                <div class="last-run" id="lastRun">—</div>
+                <div class="last-run" id="healthAge" hidden></div>
+            </div>
         </div>
     </header>
 
@@ -50,7 +61,7 @@
     <!-- Operator Announcement Banner (rendered when state file is non-empty) -->
     <!-- ================================================================== -->
     <div id="announcementBanner" class="announcement-banner" role="region"
-        aria-label="Operator announcement" style="display:none;"></div>
+        aria-label="Operator announcement" hidden></div>
 
     <!-- ================================================================== -->
     <!-- Run Status Timeline -->
@@ -59,17 +70,20 @@
         <div class="section-header">
             <div class="section-heading">
                 <h2>Run Status Timeline</h2>
-                <!-- Covered span is filled by app.js from the first/last run
+                <!-- Covered span is filled by js/timeline.js from the first/last run
                      timestamps; the dashboard does not know
                      RALLY_RESULTS_RETENTION_DAYS so it must not hardcode "7-Day". -->
                 <span class="section-subhead" id="timelineSpan"></span>
             </div>
             <div class="section-badges">
-                <span class="section-badge" id="smokeUptimeBadge" style="display:none;"></span>
+                <span class="section-badge" id="smokeUptimeBadge" hidden></span>
                 <span class="section-badge" id="timelineCount">0 runs</span>
             </div>
         </div>
-        <div class="timeline-container" id="timeline">
+        <!-- One Tab stop for the row; arrow keys move between runs, Enter or
+             Space pins one (js/dom.js initRovingFocus). -->
+        <div class="timeline-container" id="timeline" role="group"
+            aria-label="Rally runs, oldest to newest">
             <div class="timeline-loading">Loading history...</div>
         </div>
         <div class="timeline-legend">
@@ -89,27 +103,31 @@
                 <span class="section-subhead" id="healthTimelineSpan"></span>
             </div>
             <div class="section-badges">
-                <span class="section-badge" id="apiUptimeBadge" style="display:none;"></span>
+                <span class="section-badge" id="apiUptimeBadge" hidden></span>
                 <span class="section-badge" id="healthTimelineCount">0 checks</span>
             </div>
         </div>
-        <div class="timeline-container htl-container" id="healthTimeline">
+        <div class="timeline-container htl-container" id="healthTimeline" role="group"
+            aria-label="API health checks, oldest to newest">
             <div class="timeline-loading">Loading health data...</div>
         </div>
         <div class="timeline-legend">
             <span class="legend-item"><span class="legend-dot legend-passed"></span>All Up</span>
+            <span class="legend-item"><span class="legend-dot legend-degraded"></span>Degraded (slow)</span>
             <span class="legend-item"><span class="legend-dot legend-failed"></span>Service Down</span>
         </div>
     </section>
 
     <!-- Historical run banner (hidden by default, shown when a past run is selected) -->
-    <div id="historicalBanner" class="historical-banner" style="display:none;">
+    <div id="historicalBanner" class="historical-banner" hidden>
         <div class="historical-banner-inner">
             <span class="historical-banner-icon">🕓</span>
             <span id="historicalBannerText">Viewing historical run</span>
             <button id="backToLatestBtn" class="back-to-latest-btn">← Back to Latest</button>
         </div>
     </div>
+    <!-- Shown when a #run=<ts> permalink names a run that is no longer retained. -->
+    <div id="runNotice" class="run-notice" role="status" hidden></div>
 
     <!-- ================================================================== -->
     <!-- Service Cards Grid -->
@@ -133,11 +151,15 @@
         <div class="charts-grid">
             <div class="chart-card">
                 <h3>Duration Over Time</h3>
-                <canvas id="durationChart"></canvas>
+                <canvas id="durationChart" role="img"
+                    aria-label="Line chart of Rally run duration per service over time"></canvas>
+                <p class="chart-empty" hidden>Not enough data yet</p>
             </div>
             <div class="chart-card">
                 <h3>API Health Check Latency Over Time</h3>
-                <canvas id="healthLatencyChart"></canvas>
+                <canvas id="healthLatencyChart" role="img"
+                    aria-label="Line chart of API health check latency per service over time"></canvas>
+                <p class="chart-empty" hidden>Not enough data yet</p>
             </div>
         </div>
     </section>
@@ -148,8 +170,9 @@
     <section class="cleanup-section">
         <div class="section-header">
             <h2>Cleanup Status</h2>
-            <span class="section-badge" id="cleanupBadge">OK</span>
+            <span class="section-badge" id="cleanupBadge">—</span>
         </div>
+        <p class="cleanup-note" id="cleanupNote" hidden></p>
         <div class="cleanup-grid" id="cleanupGrid">
             <!-- Injected by JS -->
         </div>
@@ -158,11 +181,11 @@
     <!-- ================================================================== -->
     <!-- Detail Modal -->
     <!-- ================================================================== -->
-    <div class="modal-overlay" id="modalOverlay">
-        <div class="modal">
+    <div class="modal-overlay" id="modalOverlay" aria-hidden="true">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
             <div class="modal-header">
                 <h2 id="modalTitle">Service Details</h2>
-                <button class="modal-close" id="modalClose">&times;</button>
+                <button class="modal-close" id="modalClose" aria-label="Close details">&times;</button>
             </div>
             <div class="modal-body" id="modalBody">
                 <!-- Injected by JS -->
@@ -174,10 +197,17 @@
     <!-- Footer -->
     <!-- ================================================================== -->
     <footer class="footer">
-        <p>Rally OpenStack Monitor &middot; Auto-refresh every 5m &middot; Read-only dashboard</p>
+        <p>
+            Rally OpenStack Monitor &middot; Auto-refresh every 5m &middot;
+            <span id="lastUpdated">Not updated yet</span> &middot;
+            <button type="button" class="refresh-btn" id="refreshBtn">Refresh now</button>
+            &middot; Read-only dashboard
+        </p>
     </footer>
 
-    <script src="app.js?v=20261026a"></script>
+    <!-- ES modules (dashboard/js/); serve.py sends them no-cache so a deploy
+         never mixes module versions. -->
+    <script type="module" src="js/main.js"></script>
 </body>
 
 </html>

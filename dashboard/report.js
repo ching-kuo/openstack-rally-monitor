@@ -17,7 +17,8 @@
  * The pure helpers below (groupScenarios / scenarioStatus / formatSeconds /
  * atomicBars / parseHash / selectionHash / initialSelection / routeFor) are
  * self-contained top-level functions so the Node contract tests
- * can extract and evaluate them in isolation, mirroring app.js.
+ * can extract and evaluate them in isolation (report.js stays a classic
+ * script, unlike the dashboard's ES modules in js/).
  */
 
 // --- Pure helpers (Node-testable) -------------------------------------------
@@ -196,7 +197,8 @@ function destroyChart() {
 }
 
 // Heading for a service-level failure: generic text plus the machine code
-// (e.g. task_failed_to_start) rather than a second copy of app.js's labels.
+// (e.g. task_failed_to_start) rather than a second copy of the dashboard's labels (js/status.js
+// serviceErrorText).
 function errorHeading(payload) {
   return payload.error_code ? `Service error: ${payload.error_code}` : "Service error";
 }
@@ -443,8 +445,10 @@ function initReport() {
 
 function pruneFailedThemeLinks() {
   // A dangling custom-theme <link> (no custom theme installed) 404s; the browser
-  // ignores it, but we drop the node to keep the DOM clean -- same approach as
-  // app.js, and it avoids an inline onerror handler so the strict CSP holds.
+  // ignores it, but we drop the node to keep the DOM clean. A listener added
+  // here instead of an inline onerror handler keeps the strict CSP. (The
+  // dashboard's js/theme.js probes the files with fetch instead, because its
+  // error events may fire before the module runs.)
   document.querySelectorAll("link.custom-theme-css").forEach((link) => {
     if (link.sheet === null) {
       // Sheet may still be loading; only prune once clearly failed.
