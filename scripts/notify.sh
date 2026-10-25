@@ -31,6 +31,12 @@
 # ==============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# curl_config_quote and reexec_as_rally (a root run would leave a root-owned
+# .last_notified_status).
+source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
+
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 SUMMARY_FILE="${RESULTS_DIR}/latest_summary.json"
 STATE_FILE="${RESULTS_DIR}/.last_notified_status"
@@ -83,14 +89,17 @@ main() {
     }
 
     # --fail: non-2xx HTTP is a curl error. --silent --show-error: quiet but
-    # surface the error on failure. Never echo NOTIFY_WEBHOOK_URL.
+    # surface the error on failure. Never echo NOTIFY_WEBHOOK_URL. The URL goes
+    # in through a -K config on a process-substitution fd, not argv, which any
+    # local user can read from /proc/<pid>/cmdline; stdin carries the payload.
     if printf '%s' "${payload}" | curl \
             --fail --silent --show-error \
             --max-time "${NOTIFY_CURL_TIMEOUT}" \
             -X POST \
             -H "Content-Type: application/json" \
             --data-binary @- \
-            "${NOTIFY_WEBHOOK_URL}" >/dev/null 2>&1; then
+            -K <(printf 'url = "%s"\n' "$(curl_config_quote "${NOTIFY_WEBHOOK_URL}")") \
+            >/dev/null 2>&1; then
         # Persist the new status only on success, atomically, so a failed send
         # leaves the prior baseline intact and the next run retries.
         write_state_atomic "${new_status}"

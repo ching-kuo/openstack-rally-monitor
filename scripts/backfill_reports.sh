@@ -27,6 +27,9 @@ set -uo pipefail
 
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# A root run would leave root-owned reports the rally user cannot replace.
+source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
 
 # Compact UTC rally timestamp (YYYYMMDDTHHMMSSZ); matches run_tests.sh TIMESTAMP
 # and serve.py RUN_REPORT_RE. Anchored so branding/ and other dirs are ignored.

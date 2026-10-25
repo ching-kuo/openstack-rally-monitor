@@ -12,14 +12,29 @@ services:
     cap_add:
       - SETUID
       - SETGID
+    # Blocks gaining privileges through setuid binaries or file capabilities.
+    # Dropping from root to rally (su, cron) still works: that uses the
+    # SETUID/SETGID capabilities root already holds.
+    security_opt:
+      - no-new-privileges:true
     env_file:
       - ../.env
+    # In-container ports are fixed: the healthcheck and the port mappings
+    # below assume them, and `environment:` overrides an EXPORTER_PORT or
+    # DASHBOARD_PORT left in ../.env. Change the HOST side instead.
+    environment:
+      EXPORTER_PORT: "9101"
+      DASHBOARD_PORT: "8080"
     volumes:
       - rally-data:/rally/data
       - rally-results:/results
+    # Host ports come from the shell or docker/.env (Compose interpolation;
+    # ../.env is only the container's env_file), e.g. EXPORTER_HOST_PORT=19101.
+    # EXPORTER_PORT / DASHBOARD_PORT are still honored there as the older
+    # spelling of the host port, so existing remaps keep working.
     ports:
-      - "127.0.0.1:${EXPORTER_PORT:-9101}:9101"
-      - "127.0.0.1:${DASHBOARD_PORT:-8080}:8080"
+      - "127.0.0.1:${EXPORTER_HOST_PORT:-${EXPORTER_PORT:-9101}}:9101"
+      - "127.0.0.1:${DASHBOARD_HOST_PORT:-${DASHBOARD_PORT:-8080}}:8080"
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:9101/health" ]

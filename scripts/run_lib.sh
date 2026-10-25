@@ -235,7 +235,21 @@ publish_dashboard_files() {
 # --------------------------------------------------------------------------
 prune_old_results() {
     log "Pruning results older than ${RETENTION_DAYS} days..."
-    find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}" -exec rm -rf {} + 2>/dev/null || true
+    # A run directory a root run left root-owned cannot be deleted by rally.
+    # Check BEFORE deleting and skip it whole: a partial rm -rf would remove
+    # the deletable files, bump the directory's mtime out of the -mtime
+    # window and silence this warning on every later run. init_state.sh
+    # prints the one-off chown fix at boot.
+    local dir sub stuck
+    while IFS= read -r dir; do
+        stuck=0
+        while IFS= read -r -d '' sub; do
+            [[ -w "${sub}" ]] || { stuck=1; break; }
+        done < <(find "${dir}" -type d -print0)
+        if (( stuck )) || ! rm -rf "${dir}" 2>/dev/null; then
+            log "WARNING: could not prune ${dir} (not deletable by $(id -un); see the init-state chown fix)"
+        fi
+    done < <(find "${RESULTS_DIR}" -maxdepth 1 -type d -name '????????T??????Z' -mtime +"${RETENTION_DAYS}")
     # The provenance ledger is pruned on its own longer window (see below).
     log "Pruning Rally project ledger older than ${PROVENANCE_RETENTION_DAYS} days..."
     prune_rally_project_ledger

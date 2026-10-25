@@ -9,9 +9,12 @@ main guard makes sourcing side-effect-free). External commands (`rally`,
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
+
+from shell_testlib import write_shim
 
 # macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
 BASH = shutil.which("bash") or "/bin/bash"
@@ -19,12 +22,6 @@ SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 TIMESTAMP = "20260612T120000Z"
 BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 UUID = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"
-
-
-def write_shim(bin_dir: Path, name: str, body: str) -> None:
-    path = bin_dir / name
-    path.write_text("#!/usr/bin/env bash\n" + body)
-    path.chmod(0o755)
 
 
 def run_harness(tmp_path: Path, command: str, extra_env: dict | None = None,
@@ -309,15 +306,43 @@ def test_provenance_ledger_pruned_on_its_own_window(tmp_path: Path) -> None:
     assert "45 days ago" in (tmp_path / "date.log").read_text()
 
 
-def test_cleanup_metrics_seed_is_shared_with_entrypoint(tmp_path: Path) -> None:
-    """One seed (os_helpers.sh::seed_cleanup_metrics) for run_lib.sh and
-    entrypoint.sh; it must read as a healthy, not-yet-scanned state."""
+def test_cleanup_metrics_seed_is_shared_with_boot_init(tmp_path: Path) -> None:
+    """One seed (os_helpers.sh::seed_cleanup_metrics) for run_lib.sh and the
+    boot-time init_state.sh; it must read as a healthy, not-yet-scanned state."""
     result = run_harness(tmp_path, "ensure_cleanup_metrics_file")
     assert result.returncode == 0, result.stderr
     seed = json.loads((tmp_path / "cleanup_metrics.json").read_text())
     assert seed["timestamp"] == "waiting_for_first_run"
     assert seed["openstack_scan_status"] == "ok"
     assert seed["rgw_scan_status"] == "skipped"
-    entrypoint = (SCRIPT.parent / "entrypoint.sh").read_text()
-    assert "seed_cleanup_metrics" in entrypoint
-    assert '"rgw_orphaned_objects"' not in entrypoint
+    init_state = (SCRIPT.parent / "init_state.sh").read_text()
+    assert "seed_cleanup_metrics" in init_state
+    assert '"rgw_orphaned_objects"' not in init_state
+
+
+def test_prune_failure_is_logged_not_swallowed(tmp_path: Path) -> None:
+    """A run directory rally cannot fully delete (left root-owned by a root
+    run) used to fail silently under `2>/dev/null || true`; it must be named,
+    and checked BEFORE deleting: a partial rm -rf removes the deletable files,
+    bumps the directory's mtime out of the -mtime window and so silences the
+    warning on every later run."""
+    old = tmp_path / "20200101T000000Z"
+    stuck = old / "sub"
+    stuck.mkdir(parents=True)
+    (old / "nova.json").write_text("{}")
+    (stuck / "nova.html").write_text("x")
+    stuck.chmod(0o555)
+    os.utime(old, (946684800, 946684800))
+    try:
+        result = run_harness(
+            tmp_path,
+            'date() { if [[ "$*" == *"days ago"* ]]; then echo 2000-01-01T00:00:00Z; '
+            'else command date "$@"; fi; }; prune_old_results',
+            {"RALLY_RESULTS_RETENTION_DAYS": "1"},
+        )
+    finally:
+        stuck.chmod(0o755)
+    assert result.returncode == 0, result.stderr
+    assert f"WARNING: could not prune {old}" in result.stdout
+    assert (old / "nova.json").exists()
+    assert old.stat().st_mtime == 946684800

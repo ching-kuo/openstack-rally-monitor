@@ -17,6 +17,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from shell_testlib import write_curl_config_shim
+
 # macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
 BASH = shutil.which("bash") or "/bin/bash"
 
@@ -28,19 +30,13 @@ SCRIPT = Path(__file__).resolve().parent / "notify.sh"
 # ---------------------------------------------------------------------------
 
 def make_curl_shim(bin_dir: Path, exit_code: int = 0) -> tuple[Path, Path]:
-    """Write a fake `curl` into bin_dir that records argv + stdin and exits
-    with exit_code. Returns the (argv_file, stdin_file) paths it writes to."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
+    """Write a fake `curl` into bin_dir that records argv, its -K config
+    (bin_dir/curl_config.txt; the webhook URL never travels in argv) and
+    stdin, and exits with exit_code. Returns (argv_file, stdin_file)."""
     argv_file = bin_dir / "curl_argv.txt"
     stdin_file = bin_dir / "curl_stdin.txt"
-    shim = bin_dir / "curl"
-    shim.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" > "{argv_file}"\n'
-        f'cat > "{stdin_file}"\n'
-        f"exit {exit_code}\n"
-    )
-    shim.chmod(0o755)
+    write_curl_config_shim(bin_dir, argv_file, bin_dir / "curl_config.txt",
+                           f'cat > "{stdin_file}"\nexit {exit_code}\n')
     return argv_file, stdin_file
 
 
@@ -303,14 +299,27 @@ class TestFailureHandling:
 
     def test_url_never_logged(self, tmp_path: Path) -> None:
         """The webhook URL may embed a secret token; it must never appear in
-        notify.sh's own log output (curl gets it as an argv, but our logs
-        must not echo it)."""
+        notify.sh's own log output."""
         bin_dir = tmp_path / "bin"
         make_curl_shim(bin_dir, exit_code=0)
         write_summary(tmp_path, {"services": {"nova": {"status": "failed"}}})
         result = run_notify(tmp_path, "failed", bin_dir=bin_dir, webhook_url=SECRET_URL)
         assert "SECRET-TOKEN" not in result.stdout
         assert "SECRET-TOKEN" not in result.stderr
+
+    def test_url_never_in_curl_argv(self, tmp_path: Path) -> None:
+        """argv is world-readable via /proc/<pid>/cmdline; the URL (which may
+        embed a token) must reach curl only through its -K config."""
+        bin_dir = tmp_path / "bin"
+        argv_file, _ = make_curl_shim(bin_dir, exit_code=0)
+        write_summary(tmp_path, {"services": {"nova": {"status": "failed"}}})
+        url = 'https://hooks.example.com/x?token=SECRET-TOKEN&q="a\\b"'
+        result = run_notify(tmp_path, "failed", bin_dir=bin_dir, webhook_url=url)
+        assert result.returncode == 0, result.stderr
+        assert "SECRET-TOKEN" not in argv_file.read_text()
+        config = (bin_dir / "curl_config.txt").read_text()
+        assert config == 'url = "https://hooks.example.com/x?token=SECRET-TOKEN&q=\\"a\\\\b\\""\n'
+        assert read_state(tmp_path) == "failed"
 
     def test_whitespace_in_state_file_is_tolerated(self, tmp_path: Path) -> None:
         """A state file with stray whitespace/newlines should still be parsed

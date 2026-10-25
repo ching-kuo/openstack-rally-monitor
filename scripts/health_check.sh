@@ -13,15 +13,22 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# HEALTH_LOCKFILE (the lock path; a test-only override) and reexec_as_rally.
+source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
+source "${SCRIPT_DIR}/entrypoint_config.sh"
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 HEALTH_FILE="${RESULTS_DIR}/health.json"
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [health-check] $*" >&2; }
 
+# Validated up front: bad values used to abort the history arithmetic below
+# AFTER health.json was written, silently freezing health_history.json.
+UPTIME_WINDOW_DAYS=$(or_default normalize_days "${UPTIME_WINDOW_DAYS-}" 30 UPTIME_WINDOW_DAYS)
+CHECK_INTERVAL=$(or_default normalize_interval "${HEALTH_CHECK_INTERVAL-}" 15 HEALTH_CHECK_INTERVAL)
+
 log "Starting health checks..."
-# HEALTH_LOCKFILE overrides the lock path (tests run outside the container).
-LOCKFILE="${HEALTH_LOCKFILE:-/rally/logs/rally-health.lock}"
-exec 200>"${LOCKFILE}"
+exec 200>"${HEALTH_LOCKFILE}"
 flock -n 200 || { log "Another health check is already in progress, exiting."; exit 0; }
 
 # Run the single-session checker. It prints the full health.json document on
@@ -41,7 +48,7 @@ flock -n 200 || { log "Another health check is already in progress, exiting."; e
 # exporter, whose staleness threshold is never shorter than an interval plus
 # this; the 300 fallback only covers a direct invocation without it
 # (KEEP IN SYNC with entrypoint.sh and health_metrics.py::parse_check_timeout).
-CHECK_TIMEOUT_SECONDS="${HEALTH_CHECK_TIMEOUT:-300}"
+CHECK_TIMEOUT_SECONDS=$(or_default normalize_timeout "${HEALTH_CHECK_TIMEOUT-}" 300 HEALTH_CHECK_TIMEOUT)
 if timeout "${CHECK_TIMEOUT_SECONDS}" python3 "${SCRIPT_DIR}/api_health_check.py" \
         > "${HEALTH_FILE}.tmp" 2>>/dev/null \
         && jq empty "${HEALTH_FILE}.tmp" 2>/dev/null; then
@@ -81,8 +88,7 @@ log "Health check complete. Overall: ${OVERALL}"
 # window at the configured check interval, floored at 672 entries (7 days at
 # 15-min intervals) so the dashboard health timeline never loses data.
 HISTORY_FILE="${RESULTS_DIR}/health_history.json"
-UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
-MAX_ENTRIES=$(( UPTIME_WINDOW_DAYS * 24 * 60 / ${HEALTH_CHECK_INTERVAL:-15} ))
+MAX_ENTRIES=$(( UPTIME_WINDOW_DAYS * 24 * 60 / CHECK_INTERVAL ))
 if (( MAX_ENTRIES < 672 )); then MAX_ENTRIES=672; fi
 
 [ -f "${HISTORY_FILE}" ] || echo '{"checks": []}' > "${HISTORY_FILE}"

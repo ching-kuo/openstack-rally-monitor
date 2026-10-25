@@ -25,6 +25,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # RALLY_SERVICES parsing (parse_rally_services) and the shared OpenStack
 # listing helpers live in os_helpers.sh.
 source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
+# or_default/normalize_days: the day counts below are validated after log().
+source "${SCRIPT_DIR}/entrypoint_config.sh"
 
 mapfile -t SERVICES < <(parse_rally_services "${RALLY_SERVICES:-}")
 
@@ -38,6 +41,13 @@ log() {
         echo "${msg}" >> "${RUN_LOG}" 2>/dev/null || true
     fi
 }
+
+# A malformed value ("30d") would otherwise break find -mtime, date -d and
+# jq --argjson mid-run; the entrypoint already refuses one at boot, this
+# covers direct invocations.
+RETENTION_DAYS=$(or_default normalize_retention_days "${RETENTION_DAYS}" 7 RALLY_RESULTS_RETENTION_DAYS)
+PROVENANCE_RETENTION_DAYS=$(or_default normalize_provenance_days "${PROVENANCE_RETENTION_DAYS}" 90 PROVENANCE_RETENTION_DAYS)
+UPTIME_WINDOW_DAYS=$(or_default normalize_days "${UPTIME_WINDOW_DAYS}" 30 UPTIME_WINDOW_DAYS)
 
 source "${SCRIPT_DIR}/rgw_helpers.sh"
 # Summary, ledger, publish, prune, run-state and abort helpers.

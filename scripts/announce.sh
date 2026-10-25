@@ -6,23 +6,21 @@
 # State lives at ${RESULTS_DIR}/announcement-state.json and is read by the
 # dashboard on its existing 5-minute refresh cycle.
 #
-# Usage:
-#   announce.sh post   --type <incident|maintenance|scheduled> --body <text>
-#                      [--expires-at <ISO8601-Z>] [--effective-from <ISO8601-Z>]
-#   announce.sh update <id> --body <text>
-#   announce.sh clear  <id>
-#   announce.sh list
-#   announce.sh auto-clear-if-all-green --summary-file <path>
+# Usage: `announce.sh --help` (the usage() text below is the single copy).
 #
 # Invoke via `docker exec -u rally rally-monitor /scripts/announce.sh ...`.
-# The cron user is `rally`; running as a different UID can leave a root-owned
-# state file that the next cron-driven auto-clear cannot rewrite.
+# Started as root it re-executes itself as `rally` (reexec_as_rally), so a
+# forgotten `-u rally` cannot leave a root-owned state or lock file that the
+# next cron-driven auto-clear cannot rewrite.
 # ==============================================================================
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
+
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 STATE_FILE="${RESULTS_DIR}/announcement-state.json"
-LOCK_FILE="${RESULTS_DIR}/.announce.lock"
 MAX_BODY_LEN=500
 ISO8601_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
 VALID_TYPES_RE='^(incident|maintenance|scheduled)$'
@@ -56,8 +54,26 @@ Usage:
   announce.sh update <id> --body <text>
   announce.sh clear  <id>
   announce.sh list
-  announce.sh auto-clear-if-all-green --summary-file <path>
+  announce.sh auto-clear-if-all-green [--summary-file <path>]
+
+Types:
+  incident     no timestamps; auto-cleared after the next all-green test run
+  maintenance  maintenance requires --expires-at; sets rally_maintenance_mode
+  scheduled    scheduled requires --expires-at and --effective-from; no updates
+
+Times are UTC in the form YYYY-MM-DDTHH:MM:SSZ. Bodies are plain text, at most
+500 characters. post prints the new id; list shows every record.
+
+Example:
+  announce.sh post --type maintenance --body "Nova upgrade" \
+      --expires-at 2026-01-31T18:00:00Z
 EOF
+}
+
+# Every value-taking flag goes through this so a trailing flag with no value
+# is a clear error instead of set -u's "$2: unbound variable".
+need_value() {
+    [[ $# -ge 2 ]] || die "$1 requires a value"
 }
 
 now_iso() {
@@ -149,7 +165,7 @@ with_state_lock() {
         "$@"
         return $?
     fi
-    mkdir -p "$(dirname "${LOCK_FILE}")"
+    mkdir -p "$(dirname "${ANNOUNCE_LOCK_FILE}")"
     # Bash function can't be exec'd by flock directly; acquire the lock on a
     # dedicated FD inside a subshell, then call the function while holding it.
     # The subshell inherits LOCK_HELD=1 so nested calls don't re-lock.
@@ -157,7 +173,7 @@ with_state_lock() {
         LOCK_HELD=1
         flock 9
         "$@"
-    ) 9>"${LOCK_FILE}"
+    ) 9>"${ANNOUNCE_LOCK_FILE}"  # os_helpers.sh
 }
 
 # --------------------------------------------------------------------------
@@ -168,10 +184,10 @@ cmd_post() {
     local type="" body="" expires_at="" effective_from=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --type)            type="$2"; shift 2 ;;
-            --body)            body="$2"; shift 2 ;;
-            --expires-at)      expires_at="$2"; shift 2 ;;
-            --effective-from)  effective_from="$2"; shift 2 ;;
+            --type)            need_value "$@"; type="$2"; shift 2 ;;
+            --body)            need_value "$@"; body="$2"; shift 2 ;;
+            --expires-at)      need_value "$@"; expires_at="$2"; shift 2 ;;
+            --effective-from)  need_value "$@"; effective_from="$2"; shift 2 ;;
             *) die "unknown post flag: $1" ;;
         esac
     done
@@ -235,7 +251,7 @@ cmd_update() {
     local body=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --body) body="$2"; shift 2 ;;
+            --body) need_value "$@"; body="$2"; shift 2 ;;
             *) die "unknown update flag: $1" ;;
         esac
     done
@@ -281,15 +297,20 @@ cmd_clear() {
     local id="${1:-}"
     [[ -n "${id}" ]] || die "clear requires an announcement id"
 
-    # No state file means nothing to clear — succeed silently.
-    [[ -f "${STATE_FILE}" ]] || return 0
-
+    # Clearing an absent id stays idempotent (exit 0), but says so on stderr
+    # so a typo'd id does not read as a successful clear.
     local current_state new_state
     current_state=$(read_state_or_empty)
+    if ! jq -e --arg id "${id}" 'any(.announcements[]; .id == $id)' \
+            <<<"${current_state}" >/dev/null; then
+        echo "announce.sh: no announcement with id ${id}; nothing cleared" >&2
+        return 0
+    fi
     new_state=$(jq --arg id "${id}" '
         .announcements |= map(select(.id != $id))
     ' <<<"${current_state}")
     write_state_atomic "${new_state}"
+    echo "announce.sh: cleared ${id}" >&2
 }
 
 cmd_list() {
@@ -314,7 +335,7 @@ cmd_auto_clear_if_all_green() {
     local summary_file=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --summary-file) summary_file="$2"; shift 2 ;;
+            --summary-file) need_value "$@"; summary_file="$2"; shift 2 ;;
             *) die "unknown auto-clear-if-all-green flag: $1" ;;
         esac
     done
@@ -357,13 +378,20 @@ main() {
     [[ $# -gt 0 ]] || { usage; exit 64; }
     local subcommand="$1"; shift
     case "${subcommand}" in
+        post|update|clear|list|auto-clear-if-all-green)
+            if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+                usage; exit 0
+            fi
+            ;;
+    esac
+    case "${subcommand}" in
         post)                     with_state_lock cmd_post "$@" ;;
         update)                   with_state_lock cmd_update "$@" ;;
         clear)                    with_state_lock cmd_clear "$@" ;;
         list)                     cmd_list "$@" ;;
         auto-clear-if-all-green)  with_state_lock cmd_auto_clear_if_all_green "$@" ;;
         -h|--help)                usage; exit 0 ;;
-        *) usage; die "unknown subcommand: ${subcommand}" ;;
+        *) usage; echo "announce.sh: unknown subcommand: ${subcommand}" >&2; exit 64 ;;
     esac
 }
 

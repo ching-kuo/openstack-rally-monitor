@@ -18,6 +18,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import rally_project_tracker as tracker_mod  # noqa: E402
+from shell_testlib import write_shim  # noqa: E402
 
 BASH = shutil.which("bash") or "/bin/bash"
 SCRIPTS = Path(__file__).resolve().parent
@@ -197,12 +198,6 @@ def connect(**kwargs):
         return SimpleNamespace(status_code=200, json=lambda: body)
     return SimpleNamespace(identity=SimpleNamespace(get=get))
 '''
-
-
-def write_shim(bin_dir: Path, name: str, body: str) -> None:
-    path = bin_dir / name
-    path.write_text("#!/usr/bin/env bash\n" + body)
-    path.chmod(0o755)
 
 
 def run_service(tmp_path: Path, rally_start_body: str, with_sdk: bool = True,

@@ -19,11 +19,12 @@ set -euo pipefail
 
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 CLEANUP_METRICS_FILE="${RESULTS_DIR}/cleanup_metrics.json"
-CLEANUP_LOCK_FILE="${CLEANUP_LOCK_FILE:-/rally/logs/rally-cleanup.lock}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
+# Also defines CLEANUP_LOCK_FILE (test-only override; init_state.sh heals it at boot).
 source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
 
 log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [cleanup-monitor] $*"

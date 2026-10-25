@@ -6,6 +6,11 @@
 # (with purge_rgw.sh) and run_tests.sh (auto_purge_rgw, at the bottom of this file). Talks to the RGW
 # admin REST API via curl + AWS SigV4 so no Ceph CLI is needed.
 
+# curl_config_quote. Sourced here too (idempotent: defaults and functions
+# only) because tests and callers may source this library on its own.
+# shellcheck source=os_helpers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/os_helpers.sh"
+
 RGW_RESULTS_DIR="${RESULTS_DIR:-/results}"
 RGW_LEDGER_FILE="${RGW_LEDGER_FILE:-${RGW_RESULTS_DIR}/rally_project_ids.log}"
 RGW_CURL_TIMEOUT="${RGW_CURL_TIMEOUT:-30}"
@@ -95,7 +100,6 @@ rgw_curl() {
         --max-time "${RGW_CURL_TIMEOUT}"
         --output "${body_file}"
         --write-out '%{http_code}'
-        --user "${RGW_ACCESS_KEY}:${RGW_SECRET_KEY}"
         --aws-sigv4 "$(rgw_sigv4_spec)"
     )
 
@@ -112,7 +116,12 @@ rgw_curl() {
 
     rgw_log "DEBUG: ${method} ${path} -> ${url}"
     local _rc_http_code _rc
-    _rc_http_code=$(curl "${curl_args[@]}" "${url}" 2>&1)
+    # The key pair goes in through a -K config on a process-substitution fd:
+    # argv (`--user KEY:SECRET`) is readable by any local user via /proc.
+    _rc_http_code=$(curl "${curl_args[@]}" \
+        -K <(printf 'user = "%s"\n' \
+            "$(curl_config_quote "${RGW_ACCESS_KEY}:${RGW_SECRET_KEY}")") \
+        "${url}" 2>&1)
     _rc=$?
     RGW_LAST_CURL_RC="${_rc}"
 

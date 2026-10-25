@@ -31,28 +31,29 @@ HEALTH_CHECK_TIMEOUT=$(normalize_timeout "${HEALTH_CHECK_TIMEOUT:-300}" "HEALTH_
 export HEALTH_CHECK_TIMEOUT
 EXPORTER_PORT=$(normalize_port "${EXPORTER_PORT}" "EXPORTER_PORT")
 DASHBOARD_PORT=$(normalize_port "${DASHBOARD_PORT}" "DASHBOARD_PORT")
+# Day counts: normalized here so a malformed value ("30d") cannot break
+# find/date/jq arithmetic mid-run, but never fatal -- values that ran before
+# validation existed must not crash-loop the container: out-of-range values
+# are clamped and a non-number falls back to the default, both with a
+# WARNING (the same policy health_check.sh and run_tests.sh apply). Exported
+# so cron (via rally_env) and the initial run see the normalized digits.
+UPTIME_WINDOW_DAYS=$(or_default normalize_days "${UPTIME_WINDOW_DAYS-}" 30 UPTIME_WINDOW_DAYS)
+RALLY_RESULTS_RETENTION_DAYS=$(or_default normalize_retention_days "${RALLY_RESULTS_RETENTION_DAYS-}" 7 RALLY_RESULTS_RETENTION_DAYS)
+PROVENANCE_RETENTION_DAYS=$(or_default normalize_provenance_days "${PROVENANCE_RETENTION_DAYS-}" 90 PROVENANCE_RETENTION_DAYS)
+export UPTIME_WINDOW_DAYS RALLY_RESULTS_RETENTION_DAYS PROVENANCE_RETENTION_DAYS
+# Missing credentials exit here (names only, never values); env.sample
+# placeholders only warn.
+check_os_credentials
 
 # --------------------------------------------------------------------------
 # Initialize
 # --------------------------------------------------------------------------
-mkdir -p "${RESULTS_DIR}"
-mkdir -p "${RESULTS_DIR}/branding"
-mkdir -p /rally/logs
-
-# Pre-create the run lock. run_tests.sh (cron, as rally) opens it for
-# writing; purge_orphans.sh --confirm opens it read-only and refuses when it is
-# missing, so it must exist. CAP_CHOWN/CAP_FOWNER are dropped, so follow the
-# group-permission pattern used below: a root-owned file is made 0660 and the
-# rally user (GID 0) writes it via the group. This also repairs a 0644 copy
-# root created earlier. A rally-owned copy (created by run_tests.sh) is left
-# alone -- rally can already write it. RALLY_RUN_LOCK_FILE: os_helpers.sh.
+# Root (with every capability but SETUID/SETGID dropped) only writes where it
+# owns the directory: /rally (rally_env), /dashboard, /etc/cron.d. Everything
+# under the rally-writable /results and /rally/logs is created by
+# init_state.sh running as rally, so root never follows a symlink the rally
+# user could have planted there. os_helpers.sh: shared helpers.
 source "${SCRIPT_DIR}/os_helpers.sh"
-if [[ ! -e "${RALLY_RUN_LOCK_FILE}" ]]; then
-    : > "${RALLY_RUN_LOCK_FILE}"
-    chmod 0660 "${RALLY_RUN_LOCK_FILE}"
-elif [[ -O "${RALLY_RUN_LOCK_FILE}" ]]; then
-    chmod 0660 "${RALLY_RUN_LOCK_FILE}"
-fi
 
 # Initialize Rally's ephemeral SQLite database as the rally user.
 # rally db recreate was removed from the Dockerfile build step because it ran
@@ -76,67 +77,15 @@ if [[ -n "${_RALLY_UID}" && -n "${_RESULTS_UID}" && "${_RESULTS_UID}" != "${_RAL
 fi
 unset _RALLY_UID _RESULTS_UID
 
-# Create a seed summary if none exists (so dashboard works on first boot).
-# Generate the pending cards from RALLY_SERVICES rather than a hardcoded six so a
-# trimmed deployment (e.g. a Swift-less cloud) doesn't show a phantom pending
-# card forever. The list comes from parse_rally_services (os_helpers.sh), so the
-# seed shows exactly the services run_tests.sh will run. Seed-only-if-missing.
-if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
-    parse_rally_services "${RALLY_SERVICES:-}" | jq -R . | jq -s '
-        {
-            timestamp: "waiting_for_first_run",
-            services: (map({(.): {status: "pending", duration: 0, total_iterations: 0,
-                                  failed_iterations: 0, sla_passed: true, scenarios: []}})
-                | add)
-        }' \
-        > "${RESULTS_DIR}/latest_summary.json.tmp" \
-        && mv "${RESULTS_DIR}/latest_summary.json.tmp" "${RESULTS_DIR}/latest_summary.json"
-    log "Created seed summary"
-fi
-
-if seed_cleanup_metrics "${RESULTS_DIR}/cleanup_metrics.json"; then
-    log "Created seed cleanup_metrics.json"
-fi
-
-# Seed dashboard JSON files into the persistent results volume if missing
-if [[ ! -f "${RESULTS_DIR}/results.json" ]]; then
-    jq -n \
-        --slurpfile summary "${RESULTS_DIR}/latest_summary.json" \
-        --slurpfile cleanup "${RESULTS_DIR}/cleanup_metrics.json" \
-        '{
-            summary: $summary[0],
-            cleanup: $cleanup[0]
-        }' \
-        > "${RESULTS_DIR}/results.json"
-    log "Created seed results.json"
-fi
-
-if [[ ! -f "${RESULTS_DIR}/history.json" ]]; then
-    echo '{"runs": []}' > "${RESULTS_DIR}/history.json"
-    log "Created seed history.json"
-fi
-
-if [[ ! -f "${RESULTS_DIR}/health.json" ]]; then
-    echo '{"timestamp":"waiting","overall":"unknown","services":{}}' \
-        > "${RESULTS_DIR}/health.json"
-    log "Created seed health.json"
-fi
-
-if [[ ! -f "${RESULTS_DIR}/health_history.json" ]]; then
-    echo '{"checks":[]}' > "${RESULTS_DIR}/health_history.json"
-    log "Created seed health_history.json"
-fi
-
-# Reset run-progress state to idle on EVERY boot (not just when missing). A run
-# that was SIGKILL'd by a container stop/crash would have left state="running"
-# in the persistent volume; nothing else would clear it, so the dashboard would
-# show a phantom "Test run in progress" forever. The running run is necessarily
-# dead after a restart, so idle is always correct here. run_tests.sh flips it
-# back to "running" under its flock when a real run starts.
-echo '{"state":"idle","finished_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}' \
-    > "${RESULTS_DIR}/run_state.json.tmp" \
-    && mv "${RESULTS_DIR}/run_state.json.tmp" "${RESULTS_DIR}/run_state.json"
-log "Reset run_state.json to idle"
+# Locks, repair of root-owned leftovers, first-boot JSON seeds and the idle
+# run_state.json reset.
+# %q-quote RESULTS_DIR so a value with shell metacharacters can't break out of
+# the su -c command string (same hardening as the rally_env export below).
+_safe_results_dir="$(printf '%q' "${RESULTS_DIR}")"
+su -s /bin/bash rally -c "RESULTS_DIR=${_safe_results_dir} /scripts/init_state.sh" || {
+    log "ERROR: Failed to initialize state under ${RESULTS_DIR} and /rally/logs"
+    exit 1
+}
 
 # Symlink JSON data files into /dashboard so the HTTP server can serve them.
 # Recreated on every startup since /dashboard is ephemeral (not a volume).
@@ -177,11 +126,7 @@ log "Dashboard symlinks updated"
 # and best-effort. Backgrounded as the rally user so it never delays
 # dashboard/exporter startup and keeps regenerated files volume-owned.
 log "Backfilling historical Rally reports (background)..."
-# %q-quote RESULTS_DIR so a value with shell metacharacters can't break out of
-# the su -c command string (same hardening as the rally_env export below).
-_safe_results_dir="$(printf '%q' "${RESULTS_DIR}")"
 su -s /bin/bash rally -c "RESULTS_DIR=${_safe_results_dir} /scripts/backfill_reports.sh" &
-unset _safe_results_dir
 
 # --------------------------------------------------------------------------
 # Start Prometheus Exporter (background)
@@ -211,6 +156,8 @@ HEALTH_CRON=$(make_cron_schedule "${HEALTH_CHECK_INTERVAL}")
 # preventing shell injection if a variable value contains special characters.
 # File contains OS_PASSWORD -- permissions kept 0640 (root:root, group-readable).
 # CAP_CHOWN is dropped; use group permissions so the rally user (GID 0) can source it.
+# /rally itself is root-owned and not rally-writable (Dockerfile), so the
+# rally user cannot swap rally_env or plant a symlink at rally_env.tmp.
 RALLY_ENV_VARS=(
     OS_AUTH_URL OS_USERNAME OS_PASSWORD OS_PROJECT_NAME
     OS_PROJECT_DOMAIN_NAME OS_USER_DOMAIN_NAME
@@ -251,15 +198,14 @@ ${HEALTH_CRON} rally set -a; . /rally/rally_env; set +a; /scripts/mirror_job_log
 EOF_CRON
 chmod 0644 /etc/cron.d/rally-tests
 
-# Create log files before cron writes to them.
-# Owned by root:root, group-writable so the rally user (GID 0) can append via cron redirection.
-touch /rally/logs/rally-tests.log  && chmod 0660 /rally/logs/rally-tests.log
-touch /rally/logs/health-check.log && chmod 0660 /rally/logs/health-check.log
-
 # Forward cron job logs into `docker logs` (cron jobs run as rally and can't
 # write to PID 1's stdout). `-F` handles the `copytruncate` rotation used in
 # docker/logrotate.conf — re-reading from offset 0 when the file shrinks.
-tail -F -n 0 -q /rally/logs/rally-tests.log /rally/logs/health-check.log &
+# The log files live in the rally-writable /rally/logs, so they are created
+# and tailed as rally: as root, touch/tail would follow a planted symlink
+# (and print any root-readable file into docker logs).
+su -s /bin/bash rally -c "touch /rally/logs/rally-tests.log /rally/logs/health-check.log \
+    && exec tail -F -n 0 -q /rally/logs/rally-tests.log /rally/logs/health-check.log" &
 LOG_TAIL_PID=$!
 
 # Start cron in the foreground as a supervised child: if it dies, `wait -n`
@@ -274,11 +220,17 @@ log "Health checks scheduled: ${HEALTH_CRON} (every ${HEALTH_CHECK_INTERVAL} min
 # --------------------------------------------------------------------------
 # Run initial test if no results exist
 # --------------------------------------------------------------------------
-if [[ "$(jq -r '.timestamp' "${RESULTS_DIR}/latest_summary.json")" == "waiting_for_first_run" ]]; then
+# Read as rally: latest_summary.json sits in the rally-writable RESULTS_DIR,
+# where root must not follow a planted symlink.
+_first_ts=$(su -s /bin/bash rally -c \
+    "jq -r '.timestamp' ${_safe_results_dir}/latest_summary.json" 2>/dev/null || true)
+unset _safe_results_dir
+if [[ "${_first_ts}" == "waiting_for_first_run" ]]; then
     log "Running initial test suite..."
     su -s /bin/bash rally -c "/scripts/mirror_job_logs.sh /rally/logs/rally-tests.log /scripts/run_tests.sh" &
     log "Initial test started in background"
 fi
+unset _first_ts
 
 # --------------------------------------------------------------------------
 # Keep container alive, monitor child processes

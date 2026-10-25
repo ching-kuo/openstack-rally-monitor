@@ -1,5 +1,6 @@
 # Credentials
 .env
+**/.env
 .env.*
 
 # Vendored frontend assets (downloaded at build time via curl — never copy local copies)
@@ -22,3 +23,25 @@ venv/
 
 # Logs
 *.log
+
+# Repository, tooling and docs: never part of the image (COPY takes only
+# rally/, scripts/, exporter/, dashboard/ and two requirements files)
+.git/
+.github/
+.claude/
+.kiro/
+.omx/
+.code-review-graph/
+docs/
+grafana/
+prometheus/
+
+# Test-only files: nothing at runtime imports them (conftest.py,
+# exporter_testlib.py and shell_testlib.py are used only by the pytest suites,
+# which CI runs from the repository, not the image)
+**/test_*.py
+**/conftest.py
+exporter/exporter_testlib.py
+scripts/shell_testlib.py
+exporter/requirements-test.txt
+**/.pytest_cache/

@@ -261,6 +261,15 @@ class TestClear:
         write_state(tmp_path, {"announcements": []})
         result = run_cli(tmp_path, "clear", "no-such-id")
         assert result.returncode == 0
+        # Idempotent, but a typo'd id must not look like a successful clear.
+        assert "no announcement with id no-such-id" in result.stderr
+
+    def test_clear_reports_what_it_removed(self, tmp_path: Path) -> None:
+        record_id = run_cli(
+            tmp_path, "post", "--type", "incident", "--body", "x", expect_success=True,
+        ).stdout.strip()
+        result = run_cli(tmp_path, "clear", record_id, expect_success=True)
+        assert f"cleared {record_id}" in result.stderr
 
     def test_clear_missing_id_when_file_absent_is_idempotent(self, tmp_path: Path) -> None:
         result = run_cli(tmp_path, "clear", "no-such-id")
@@ -551,3 +560,37 @@ class TestUsage:
     def test_unknown_subcommand_rejected(self, tmp_path: Path) -> None:
         result = run_cli(tmp_path, "frobnicate")
         assert result.returncode != 0
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ("post", "--type"),
+            ("post", "--type", "incident", "--body"),
+            ("post", "--type", "maintenance", "--body", "x", "--expires-at"),
+            ("update", "some-id", "--body"),
+            ("auto-clear-if-all-green", "--summary-file"),
+        ],
+    )
+    def test_flag_without_value_is_a_clear_error(self, tmp_path: Path, argv: tuple) -> None:
+        result = run_cli(tmp_path, *argv)
+        assert result.returncode != 0
+        assert f"{argv[-1]} requires a value" in result.stderr
+        assert "unbound variable" not in result.stderr
+
+    @pytest.mark.parametrize("sub", ["post", "update", "clear", "auto-clear-if-all-green"])
+    def test_subcommand_help_prints_usage(self, tmp_path: Path, sub: str) -> None:
+        result = run_cli(tmp_path, sub, "--help")
+        assert result.returncode == 0
+        assert "Usage" in result.stderr
+        assert not (tmp_path / "announcement-state.json").exists()
+
+    def test_unknown_subcommand_with_help_is_still_an_error(self, tmp_path: Path) -> None:
+        result = run_cli(tmp_path, "frobnicate", "--help")
+        assert result.returncode == 64
+        assert "unknown subcommand" in result.stderr
+
+    def test_usage_documents_type_rules_and_auto_clear(self, tmp_path: Path) -> None:
+        result = run_cli(tmp_path, "--help")
+        assert "maintenance requires --expires-at" in result.stderr
+        assert "auto-cleared" in result.stderr
+        assert "UTC" in result.stderr

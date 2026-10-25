@@ -60,6 +60,7 @@ RESULTS_DIR="${RESULTS_DIR:-/results}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
 source "${SCRIPT_DIR}/os_helpers.sh"
+reexec_as_rally "$@"
 # RGW Phase 1/2 (purge_rgw, purge_rgw_delete) live in purge_rgw.sh.
 source "${SCRIPT_DIR}/purge_rgw.sh"
 for arg in "$@"; do

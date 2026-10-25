@@ -67,6 +67,8 @@ Three processes run inside a single container, managed by `scripts/entrypoint.sh
 | `serve.py` (dashboard) | `8080` | Serves static HTML/JS/CSS dashboard with security headers, backed by symlinked JSON files |
 | Cron | — | Schedules Rally test runs and lightweight API health checks |
 
+The entrypoint starts as root (with every capability except `SETUID`/`SETGID` dropped, plus `no-new-privileges`) only to write `/rally/rally_env`, the cron table and the dashboard symlinks; everything else runs as the unprivileged `rally` user, including the boot-time seeding of `/results` and `/rally/logs` (`scripts/init_state.sh`) and log rotation. Code and config (`/scripts`, `/exporter`, `/dashboard`, `/rally`) are root-owned and read-only to `rally`; only `/results`, `/rally/data`, `/rally/logs` and rally's home (`/home/rally`) are writable by it.
+
 ## Quick Start
 
 ### 1. Clone and Configure
@@ -127,8 +129,10 @@ If Prometheus runs on a **different host**, expose the port via a reverse proxy 
 
 ```yaml
 ports:
-  - "0.0.0.0:${EXPORTER_PORT:-9101}:9101"
+  - "0.0.0.0:${EXPORTER_HOST_PORT:-${EXPORTER_PORT:-9101}}:9101"
 ```
+
+To publish on different host ports, set `EXPORTER_HOST_PORT` / `DASHBOARD_HOST_PORT` in your shell or in `docker/.env` (Compose reads that file for `${...}` interpolation; the repository-root `.env` is only the container's `env_file`, so a port set there never reaches the `ports:` mapping). The older `EXPORTER_PORT` / `DASHBOARD_PORT` names are still honored there as host-port fallbacks (`${EXPORTER_HOST_PORT:-${EXPORTER_PORT:-9101}}`); nested defaults need Docker Compose v2 (v2.18 or later recommended), not the legacy `docker-compose` v1 or `docker stack deploy`. The in-container ports stay 9101/8080: the compose file pins them under `environment:`, which the healthcheck and port mappings depend on.
 
 Copy `prometheus/rally_alerts.yml` to your Prometheus rules directory and include it under `rule_files:`.
 
@@ -145,6 +149,8 @@ All settings are controlled via environment variables in `.env`.
 | `OS_PASSWORD` | OpenStack password |
 | `OS_PROJECT_NAME` | OpenStack project |
 
+The container exits at startup (naming the missing variables, never their values) when any of these four is empty, and logs a warning while `OS_AUTH_URL` or `OS_PASSWORD` still holds the `env.sample` placeholder.
+
 ### Optional
 
 | Variable | Default | Description |
@@ -157,9 +163,9 @@ All settings are controlled via environment variables in `.env`.
 | `HEALTH_CHECK_INTERVAL` | `15` | Requested cron interval for lightweight API health checks, in minutes; decimal integer `1..1440` with the same cron rounding policy |
 | `HEALTH_CHECK_TIMEOUT` | `300` | Seconds before a hung health check is killed and an all-down result published; also the floor of the exporter's `health.json` staleness threshold. Decimal integer `1..3600` |
 | `HEALTH_LATENCY_WARN_MS` | `5000` | Latency in ms above which a reachable service is reported `degraded`. Degraded counts as up for uptime/`rally_api_up`; the slowness shows in `rally_api_latency_milliseconds` |
-| `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning |
-| `PROVENANCE_RETENTION_DAYS` | `90` | Days to keep `rally_project_ids.log` (the RGW auto-purge authorization ledger). Deliberately decoupled from `RALLY_RESULTS_RETENTION_DAYS` |
-| `UPTIME_WINDOW_DAYS` | `30` | Window in days for the dashboard uptime percentages |
+| `RALLY_RESULTS_RETENTION_DAYS` | `7` | Days to keep results before pruning; decimal integer `0..36500` (larger values are clamped to `36500` with a warning) |
+| `PROVENANCE_RETENTION_DAYS` | `90` | Days to keep `rally_project_ids.log` (the RGW auto-purge authorization ledger). Deliberately decoupled from `RALLY_RESULTS_RETENTION_DAYS`; decimal integer `0..36500`, where `0` is raised to `1` with a warning (it would erase the ledger every run) |
+| `UPTIME_WINDOW_DAYS` | `30` | Window in days for the dashboard uptime percentages; decimal integer `1..36500` (`0` is raised to `1` and larger values clamped, with a warning) |
 | `RALLY_NOVA_FLAVOR` | `m1.tiny` | Flavor name for Nova scenarios |
 | `RALLY_NOVA_IMAGE` | `cirros-0.6.2-x86_64-disk` | Image name for Nova scenarios |
 | `RALLY_NEUTRON_NETWORK_CIDR` | `10.99.0.0/24` | CIDR for Neutron test networks |
@@ -171,8 +177,10 @@ All settings are controlled via environment variables in `.env`.
 | `NOTIFY_WEBHOOK_URL` | — | Webhook URL for smoke-status transition notifications (enables the feature). Treated as a secret — may embed a token and lands in `/rally/rally_env` (mode 0640) |
 | `NOTIFY_FORMAT` | `generic` | Webhook payload shape: `generic` (raw JSON), `slack` (`{"text": …}`), or `discord` (`{"content": …}`) |
 | `NOTIFY_DASHBOARD_URL` | — | Optional dashboard URL embedded in the notification payload / chat message |
-| `EXPORTER_PORT` | `9101` | Prometheus exporter port; decimal integer `1..65535` |
-| `DASHBOARD_PORT` | `8080` | Dashboard port; decimal integer `1..65535` |
+| `EXPORTER_HOST_PORT` / `DASHBOARD_HOST_PORT` | `9101` / `8080` | Compose-only host ports for the `127.0.0.1` mappings (falling back to `EXPORTER_PORT` / `DASHBOARD_PORT` from the same place). Set in the shell or `docker/.env`, not the root `.env` (see Configure Prometheus) |
+| `EXPORTER_PORT` / `DASHBOARD_PORT` | `9101` / `8080` | In-container listener ports, decimal integer `1..65535`. Pinned by the compose file; only meaningful when running the image without compose |
+
+The entrypoint validates every numeric setting above. A malformed schedule interval, timeout or port (for example `5m`) stops the container at startup. The three day counts never do: an out-of-range day count is clamped and a malformed one (for example `30d`) falls back to its default, both with a warning, so a value that ran before validation existed cannot crash-loop the container. Scripts started directly (cron, `docker exec`) apply the same fallbacks to day counts and to the health-check interval and timeout rather than aborting mid-run.
 
 Cron step fields reset at hour and day boundaries; these settings are schedule
 requests, not guaranteed elapsed-time delays. A minute step that does not divide
@@ -297,7 +305,7 @@ The dashboard renders a single banner above the 7-day timeline that operators ca
 | `maintenance` | amber    | Active until `--expires-at`, or until cleared manually |
 | `scheduled`   | blue     | Hidden until `--effective-from`, then visible until `--expires-at` |
 
-All examples below run as the `rally` user. Using a different UID can leave the state file owned by root and break subsequent cron-driven auto-clears.
+All examples below run as the `rally` user (started as root, the script re-executes itself as `rally`). `announce.sh --help` (or `<subcommand> --help`) lists the per-type flag rules and an example.
 
 ```bash
 # Publish an incident (clears automatically when the next Rally run is all-green)
@@ -324,7 +332,8 @@ docker exec -u rally rally-monitor /scripts/announce.sh \
 # List active announcements (returns the full state JSON)
 docker exec -u rally rally-monitor /scripts/announce.sh list
 
-# Clear an announcement explicitly (idempotent — succeeds even if the id is gone)
+# Clear an announcement explicitly (idempotent — exits 0 even if the id is gone,
+# but reports "cleared <id>" or "no announcement with id <id>" on stderr)
 docker exec -u rally rally-monitor /scripts/announce.sh clear <id>
 ```
 
@@ -357,9 +366,16 @@ Notes:
 
 - A missing notification state file (`/results/.last_notified_status`) baselines to `passed`, so a first-ever failed run notifies while a first-ever green run stays quiet.
 - The state is updated **only on a successful send** (HTTP 2xx). A failed POST leaves the prior status intact, so the next run retries the transition.
-- `NOTIFY_WEBHOOK_URL` may embed a token. Like `OS_PASSWORD` it lands in `/rally/rally_env` (mode 0640) so cron jobs can read it — treat it as a secret. The URL is never written to the logs.
+- `NOTIFY_WEBHOOK_URL` may embed a token. Like `OS_PASSWORD` it lands in `/rally/rally_env` (mode 0640) so cron jobs can read it — treat it as a secret. The URL is never written to the logs and never placed on curl's command line (it is passed through a `-K` config on a file descriptor, so it does not show in `ps`); the RGW admin key pair is handled the same way.
 
 ## Useful Commands
+
+Run scripts with `-u rally`. A script started as root (a `docker exec` without `-u rally`) re-executes itself as `rally` with a notice, so it can no longer leave root-owned lock or state files that break later cron runs. Leftovers from root runs of older images are repaired at boot where possible (unwritable lock and state files are replaced with rally-owned copies). Root-owned run directories cannot be fixed from inside the container (`CAP_CHOWN` is dropped); the boot log and every prune name them, and one host-side command fixes them:
+
+```bash
+docker volume ls | grep rally-results   # find your volume name
+docker run --rm -v <volume>:/results busybox chown -R 1500:0 /results
+```
 
 ```bash
 # Trigger a manual test run

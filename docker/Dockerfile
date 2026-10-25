@@ -16,7 +16,9 @@ RUN mkdir -p /rally/data /rally/config /results /exporter /scripts /dashboard
 # persistent Docker volumes after a rebuild. 1500 sits above the system-user
 # range (0-999) used by slim base images while staying low enough to avoid
 # bloating sparse lastlog/faillog files.
-RUN useradd -r -u 1500 -s /bin/false -d /rally -g 0 rally
+# HOME is its own rally-owned directory (Rally keeps ~/.rally/globals there)
+# so /rally itself can stay root-owned; see the ownership step at the end.
+RUN useradd -r -u 1500 -s /bin/false -d /home/rally -g 0 rally
 
 # Install system deps and Python packages in a single layer.
 # Build-only packages (gcc, libffi-dev, libssl-dev, python3-dev) are removed
@@ -62,7 +64,19 @@ RUN mkdir -p /dashboard/vendor && \
         -o /dashboard/vendor/chart.umd.min.js && \
     echo "206b6e8bb00fc7bba2c7ee80ca41db3e9e05ba7be0aa35abeba9cfd5357f5d0e  /dashboard/vendor/chart.umd.min.js" | sha256sum -c -
 
-RUN mkdir -p /rally/logs && chown -R rally:root /rally /results /exporter /dashboard /scripts && chmod -R g=u /rally /results /exporter /dashboard /scripts && chmod 0770 /rally/logs
+# Ownership: code and config stay root:root and not group/world-writable.
+# root runs entrypoint.sh (and sources entrypoint_config.sh/os_helpers.sh) on
+# every start, so a rally-writable /scripts would let the rally user escalate
+# to root on the next restart. Only the state directories are rally-owned
+# (group root, which is rally's primary group). /rally stays root-owned so
+# root's /rally/rally_env write cannot be redirected through a planted symlink.
+# Bytecode is precompiled because the runtime user cannot write __pycache__.
+RUN python3 -m compileall -q /exporter /dashboard /scripts && \
+    chmod -R a+rX,go-w /rally /scripts /exporter /dashboard && \
+    mkdir -p /rally/logs /home/rally && \
+    chown rally:root /rally/data /rally/logs /results /home/rally && \
+    chmod 0770 /rally/data /rally/logs /results && \
+    chmod 0750 /home/rally
 
 EXPOSE 9101 8080
 

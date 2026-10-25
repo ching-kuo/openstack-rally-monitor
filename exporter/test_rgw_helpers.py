@@ -1,11 +1,14 @@
 """Shell-level tests for scripts/rgw_helpers.sh, including auto_purge_rgw."""
 
 import os
+import sys
 import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from shell_testlib import write_curl_config_shim  # noqa: E402
 HELPERS = ROOT / "scripts" / "rgw_helpers.sh"
 RUN_TESTS = ROOT / "scripts" / "run_tests.sh"
 
@@ -554,3 +557,33 @@ def test_implicit_user_listing_rejects_newline_suffixed_uid():
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "b$b\n"
+
+
+def test_rgw_curl_keeps_credentials_out_of_argv(tmp_path):
+    """argv is world-readable via /proc/<pid>/cmdline, so the RGW key pair
+    must reach curl only through its -K config, never `--user KEY:SECRET`."""
+    bin_dir = tmp_path / "bin"
+    argv_file = tmp_path / "argv.txt"
+    config_file = tmp_path / "config.txt"
+    write_curl_config_shim(bin_dir, argv_file, config_file, "printf 200\n")
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_curl body code GET "/user" "format=json"
+        echo "code=$code"
+        """,
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "RGW_ADMIN_URL": "https://rgw.example.com/admin",
+            "RGW_ACCESS_KEY": "AKEY",
+            "RGW_SECRET_KEY": 'SECRET"KEY',
+        },
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "code=200" in proc.stdout
+    argv = argv_file.read_text()
+    assert "SECRET" not in argv and "AKEY" not in argv
+    assert "--aws-sigv4" in argv
+    assert config_file.read_text() == 'user = "AKEY:SECRET\\"KEY"\n'
+    assert "SECRET" not in proc.stderr

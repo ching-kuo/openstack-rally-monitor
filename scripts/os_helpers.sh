@@ -2,8 +2,8 @@
 # ==============================================================================
 # Shared helpers (source-only)
 # ==============================================================================
-# Sourced by run_tests.sh, cleanup_monitor.sh, purge_orphans.sh and
-# entrypoint.sh so the service-set parsing, the run-lock path, the
+# Sourced by every entry script (and by rgw_helpers.sh) so the service-set
+# parsing, the lock paths, the run-as-rally guard, curl_config_quote, the
 # cleanup_metrics.json seed and the OpenStack list -> validate -> filter path
 # (os_list_rally_resources) each exist exactly once.
 
@@ -35,11 +35,47 @@ parse_rally_services() {
 }
 
 # The Rally run lock: held by run_tests.sh for a whole run and by
-# purge_orphans.sh --confirm for a whole purge; entrypoint.sh pre-creates it
-# at boot, root-owned with mode 0660 so the rally user writes it through
-# GID 0 (CAP_CHOWN is dropped, so it cannot be chowned to rally). One setting for all three (override only for tests
-# or a non-standard layout; it is passed to cron via /rally/rally_env).
+# purge_orphans.sh --confirm for a whole purge. init_state.sh creates it (as
+# rally) at every boot, because purge_orphans.sh opens it read-only and
+# refuses when it is missing. One setting for all of them (override only for
+# tests or a non-standard layout; it is passed to cron via /rally/rally_env).
 RALLY_RUN_LOCK_FILE="${RALLY_RUN_LOCK_FILE:-/rally/logs/rally-run.lock}"
+# The health_check.sh and cleanup_monitor.sh single-instance locks, defined
+# here so init_state.sh can heal them at boot. The env overrides are TEST-ONLY
+# (the suites run outside the container), not user configuration: unlike
+# RALLY_RUN_LOCK_FILE they are not exported to cron via rally_env.
+HEALTH_LOCKFILE="${HEALTH_LOCKFILE:-/rally/logs/rally-health.lock}"
+CLEANUP_LOCK_FILE="${CLEANUP_LOCK_FILE:-/rally/logs/rally-cleanup.lock}"
+# announce.sh's state lock (not an env override; it follows RESULTS_DIR).
+# shellcheck disable=SC2034  # used by announce.sh and init_state.sh
+ANNOUNCE_LOCK_FILE="${RESULTS_DIR:-/results}/.announce.lock"
+
+# Escape a value for a double-quoted curl config string (backslash, quote,
+# newline), so it cannot end the string or start another directive. notify.sh
+# and rgw_helpers.sh hand secrets to curl as `-K <(printf 'key = "%s"\n' ...)`
+# because argv is readable by any local user via /proc/<pid>/cmdline.
+curl_config_quote() {
+    local v="${1//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '%s' "${v//$'\n'/\\n}"
+}
+
+# Usage (at a script's top level, not inside a function): reexec_as_rally "$@"
+# Re-execute the calling script (BASH_SOURCE[1], made absolute) with the given
+# args as the rally user when started as root, e.g. a `docker exec` without
+# `-u rally`. A root run would create root-owned locks and state files (cron
+# runs as rally and could no longer write them, failing silently) and would
+# run as root in the first place. No-op for any other user, or where no rally
+# account exists (local dev). su without --login keeps the caller's
+# environment and directory.
+reexec_as_rally() {
+    [[ "${EUID}" -eq 0 ]] || return 0
+    id rally >/dev/null 2>&1 || return 0
+    local self
+    self="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)/$(basename "${BASH_SOURCE[1]}")"
+    echo "NOTE: $(basename "${self}") started as root; re-running as the rally user (use docker exec -u rally)" >&2
+    exec su -s /bin/bash rally -c "$(printf '%q ' "${self}" "$@")"
+}
 
 # 0 when <service> is monitored: in the normalized RALLY_SERVICES set
 # (keystone always). Callers use it only to judge a missing catalog endpoint;
