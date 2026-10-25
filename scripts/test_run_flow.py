@@ -278,3 +278,46 @@ def test_abort_run_records_failed_even_if_latest_summary_is_stale(tmp_path: Path
     ledger = json.loads((tmp_path / "smoke_history.json").read_text())
     assert [r["status"] for r in ledger["runs"]] == ["failed"]
     assert "status=failed" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# prune_rally_project_ledger: its own PROVENANCE_RETENTION_DAYS window
+# ---------------------------------------------------------------------------
+
+def test_provenance_ledger_pruned_on_its_own_window(tmp_path: Path) -> None:
+    """Entries older than PROVENANCE_RETENTION_DAYS go; newer ones and legacy
+    one-field lines stay. The window must be PROVENANCE_RETENTION_DAYS, not
+    RALLY_RESULTS_RETENTION_DAYS (the ledger authorizes RGW auto-purge)."""
+    ledger = tmp_path / "rally_project_ids.log"
+    ledger.write_text(
+        "2026-01-01T00:00:00Z old-proj nova\n"
+        "legacy-proj\n"
+        "2026-05-01T00:00:00Z new-proj swift\n"
+    )
+    # GNU `date -d` is not portable to the test host; pin the cutoff and
+    # record which window was asked for.
+    date_shim = (
+        'date() { if [[ "$*" == *"days ago"* ]]; then echo "$*" >> "$RESULTS_DIR/date.log"; '
+        'echo 2026-03-01T00:00:00Z; else command date "$@"; fi; }; '
+    )
+    result = run_harness(
+        tmp_path, date_shim + "prune_rally_project_ledger",
+        {"PROVENANCE_RETENTION_DAYS": "45", "RALLY_RESULTS_RETENTION_DAYS": "7"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert ledger.read_text() == "legacy-proj\n2026-05-01T00:00:00Z new-proj swift\n"
+    assert "45 days ago" in (tmp_path / "date.log").read_text()
+
+
+def test_cleanup_metrics_seed_is_shared_with_entrypoint(tmp_path: Path) -> None:
+    """One seed (os_helpers.sh::seed_cleanup_metrics) for run_lib.sh and
+    entrypoint.sh; it must read as a healthy, not-yet-scanned state."""
+    result = run_harness(tmp_path, "ensure_cleanup_metrics_file")
+    assert result.returncode == 0, result.stderr
+    seed = json.loads((tmp_path / "cleanup_metrics.json").read_text())
+    assert seed["timestamp"] == "waiting_for_first_run"
+    assert seed["openstack_scan_status"] == "ok"
+    assert seed["rgw_scan_status"] == "skipped"
+    entrypoint = (SCRIPT.parent / "entrypoint.sh").read_text()
+    assert "seed_cleanup_metrics" in entrypoint
+    assert '"rgw_orphaned_objects"' not in entrypoint

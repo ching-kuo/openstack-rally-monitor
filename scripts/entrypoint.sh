@@ -39,6 +39,21 @@ mkdir -p "${RESULTS_DIR}"
 mkdir -p "${RESULTS_DIR}/branding"
 mkdir -p /rally/logs
 
+# Pre-create the run lock. run_tests.sh (cron, as rally) opens it for
+# writing; purge_orphans.sh --confirm opens it read-only and refuses when it is
+# missing, so it must exist. CAP_CHOWN/CAP_FOWNER are dropped, so follow the
+# group-permission pattern used below: a root-owned file is made 0660 and the
+# rally user (GID 0) writes it via the group. This also repairs a 0644 copy
+# root created earlier. A rally-owned copy (created by run_tests.sh) is left
+# alone -- rally can already write it. RALLY_RUN_LOCK_FILE: os_helpers.sh.
+source "${SCRIPT_DIR}/os_helpers.sh"
+if [[ ! -e "${RALLY_RUN_LOCK_FILE}" ]]; then
+    : > "${RALLY_RUN_LOCK_FILE}"
+    chmod 0660 "${RALLY_RUN_LOCK_FILE}"
+elif [[ -O "${RALLY_RUN_LOCK_FILE}" ]]; then
+    chmod 0660 "${RALLY_RUN_LOCK_FILE}"
+fi
+
 # Initialize Rally's ephemeral SQLite database as the rally user.
 # rally db recreate was removed from the Dockerfile build step because it ran
 # as root, creating /tmp/rally.sqlite owned by root and unwritable at runtime.
@@ -64,53 +79,22 @@ unset _RALLY_UID _RESULTS_UID
 # Create a seed summary if none exists (so dashboard works on first boot).
 # Generate the pending cards from RALLY_SERVICES rather than a hardcoded six so a
 # trimmed deployment (e.g. a Swift-less cloud) doesn't show a phantom pending
-# card forever. The normalization here -- split on commas, lowercase, strip ALL
-# whitespace, drop empty segments, dedupe preserving first-seen order -- mirrors
-# parse_rally_services in run_tests.sh and api_health_check.py; keep the three in
-# sync. An unset/empty value (or one that normalizes to nothing) falls back to
-# the same default. Seed-only-if-missing semantics are preserved.
-DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
+# card forever. The list comes from parse_rally_services (os_helpers.sh), so the
+# seed shows exactly the services run_tests.sh will run. Seed-only-if-missing.
 if [[ ! -f "${RESULTS_DIR}/latest_summary.json" ]]; then
-    jq -n \
-        --arg raw "${RALLY_SERVICES:-${DEFAULT_RALLY_SERVICES}}" \
-        --arg default "${DEFAULT_RALLY_SERVICES}" \
-        '
-        def normalize($s):
-            ($s | split(",") | map(ascii_downcase | gsub("\\s"; "")) | map(select(. != ""))
-             | reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end));
-        (normalize($raw)) as $parsed
-        | (if ($parsed | length) > 0 then $parsed else normalize($default) end) as $services
-        | {
+    parse_rally_services "${RALLY_SERVICES:-}" | jq -R . | jq -s '
+        {
             timestamp: "waiting_for_first_run",
-            services: ($services
-                | map({(.): {status: "pending", duration: 0, total_iterations: 0,
-                             failed_iterations: 0, sla_passed: true, scenarios: []}})
+            services: (map({(.): {status: "pending", duration: 0, total_iterations: 0,
+                                  failed_iterations: 0, sla_passed: true, scenarios: []}})
                 | add)
-          }' \
+        }' \
         > "${RESULTS_DIR}/latest_summary.json.tmp" \
         && mv "${RESULTS_DIR}/latest_summary.json.tmp" "${RESULTS_DIR}/latest_summary.json"
     log "Created seed summary"
 fi
 
-if [[ ! -f "${RESULTS_DIR}/cleanup_metrics.json" ]]; then
-    cat > "${RESULTS_DIR}/cleanup_metrics.json" <<'EOF_CLEANUP'
-{
-    "timestamp": "waiting_for_first_run",
-    "cleanup_failed": 0,
-    "context_cleanup_warning": 0,
-    "rgw_scan_status": "skipped",
-    "rgw_scan_errors": 0,
-    "rgw_orphaned_users": 0,
-    "rgw_orphaned_buckets": 0,
-    "rgw_orphaned_objects": 0,
-    "rgw_rally_owned_orphans": 0,
-    "rgw_unknown_owner_orphans": 0,
-    "orphaned_resources": {},
-    "context_orphaned_resources": {},
-    "details": {},
-    "context_details": {}
-}
-EOF_CLEANUP
+if seed_cleanup_metrics "${RESULTS_DIR}/cleanup_metrics.json"; then
     log "Created seed cleanup_metrics.json"
 fi
 
@@ -235,7 +219,8 @@ RALLY_ENV_VARS=(
     OS_AUTH_TYPE OS_ENDPOINT_TYPE OS_INTERFACE
     RALLY_SCHEDULE_INTERVAL RALLY_RESULTS_RETENTION_DAYS RALLY_SERVICES
     RALLY_NOVA_FLAVOR RALLY_NOVA_IMAGE RALLY_NEUTRON_NETWORK_CIDR RALLY_DEBUG
-    RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION
+    RGW_ADMIN_URL RGW_ACCESS_KEY RGW_SECRET_KEY RGW_REGION RGW_PURGE_TIMEOUT
+    RALLY_RUN_LOCK_FILE
     RALLY_CONFIG_DIR
     RESULTS_DIR EXPORTER_PORT DASHBOARD_PORT HEALTH_CHECK_INTERVAL
     HEALTH_LATENCY_WARN_MS HEALTH_CHECK_TIMEOUT

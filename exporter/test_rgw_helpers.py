@@ -1,4 +1,4 @@
-"""Shell-level tests for scripts/rgw_helpers.sh and auto_purge_rgw in run_tests.sh."""
+"""Shell-level tests for scripts/rgw_helpers.sh, including auto_purge_rgw."""
 
 import os
 import subprocess
@@ -85,13 +85,15 @@ def test_rgw_find_orphaned_users_skips_inconclusive_keystone_results():
 
         rgw_prefetch_keystone_projects() {{ return 1; }}
 
-        rgw_check_keystone_project() {{
-            case "$1" in
-                live-project) return 0 ;;
-                orphan-project) return 1 ;;
-                broken-project) return 2 ;;
-            esac
-            return 2
+        rgw_check_keystone_projects() {{
+            local id
+            while IFS= read -r id; do
+                case "$id" in
+                    live-project) echo "$id exists" ;;
+                    orphan-project) echo "$id gone" ;;
+                    broken-project) echo "$id error" ;;
+                esac
+            done
         }}
 
         output_file="$(mktemp)"
@@ -132,7 +134,7 @@ def test_rgw_list_implicit_users_parses_paginated_keys_response():
 
 
 # ---------------------------------------------------------------------------
-# auto_purge_rgw tests (function lives in run_tests.sh, sources rgw_helpers.sh)
+# auto_purge_rgw tests (function lives in rgw_helpers.sh, sourced by run_tests.sh)
 # ---------------------------------------------------------------------------
 
 def _auto_purge_env(tmp_path: Path) -> dict[str, str]:
@@ -165,7 +167,7 @@ def test_auto_purge_rgw_skips_when_not_configured(tmp_path):
     assert "Auto-purging" not in proc.stdout
 
 
-def test_auto_purge_rgw_deletes_rally_owned_orphans(tmp_path):
+def _rgw_env(tmp_path: Path, ledger_text: str) -> dict[str, str]:
     env = _auto_purge_env(tmp_path)
     env.update({
         "RGW_ADMIN_URL": "https://rgw.example.com/admin",
@@ -173,54 +175,38 @@ def test_auto_purge_rgw_deletes_rally_owned_orphans(tmp_path):
         "RGW_SECRET_KEY": "sk",
     })
     ledger = tmp_path / "results" / "rally_project_ids.log"
-    ledger.write_text(
-        "2026-04-05T00:00:00Z proj-aaa swift\n",
-        encoding="utf-8",
-    )
+    ledger.write_text(ledger_text, encoding="utf-8")
     env["RGW_LEDGER_FILE"] = str(ledger)
+    return env
 
+
+def test_auto_purge_rgw_deletes_rally_owned_orphans_with_purge_data(tmp_path):
+    env = _rgw_env(tmp_path, "2026-04-05T00:00:00Z proj-aaa swift\n")
     proc = run_bash(
         f"""
         set -euo pipefail
         source "{RUN_TESTS}"
 
-        # Mock: one rally-owned orphan with one bucket
         rgw_find_orphaned_users() {{
             printf '%s\\n' 'proj-aaa$proj-aaa'
         }}
-        rgw_list_user_buckets() {{
-            printf '[{{"name":"test-bucket","num_objects":5}}]\\n'
-        }}
-        deleted_buckets=""
         deleted_users=""
-        rgw_delete_bucket() {{ deleted_buckets="${{deleted_buckets}}$1,"; return 0; }}
-        rgw_delete_user() {{ deleted_users="${{deleted_users}}$1,"; return 0; }}
+        rgw_delete_user() {{ deleted_users="${{deleted_users}}$1:${{2:-false}},"; return 0; }}
 
         auto_purge_rgw
 
-        echo "BUCKETS=${{deleted_buckets}}"
         echo "USERS=${{deleted_users}}"
         """,
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "BUCKETS=test-bucket," in proc.stdout
-    assert "USERS=proj-aaa$proj-aaa," in proc.stdout
+    # Buckets go with the user (purge-data), never by bare bucket name.
+    assert "USERS=proj-aaa$proj-aaa:true," in proc.stdout
     assert "purged=1" in proc.stdout
 
 
 def test_auto_purge_rgw_skips_unknown_owner(tmp_path):
-    env = _auto_purge_env(tmp_path)
-    env.update({
-        "RGW_ADMIN_URL": "https://rgw.example.com/admin",
-        "RGW_ACCESS_KEY": "ak",
-        "RGW_SECRET_KEY": "sk",
-    })
-    # Empty ledger -- no project is rally-owned
-    ledger = tmp_path / "results" / "rally_project_ids.log"
-    ledger.write_text("", encoding="utf-8")
-    env["RGW_LEDGER_FILE"] = str(ledger)
-
+    env = _rgw_env(tmp_path, "")
     proc = run_bash(
         f"""
         set -euo pipefail
@@ -243,20 +229,8 @@ def test_auto_purge_rgw_skips_unknown_owner(tmp_path):
     assert "skipped_unknown=1" in proc.stdout
 
 
-def test_auto_purge_rgw_skips_user_on_bucket_failure(tmp_path):
-    env = _auto_purge_env(tmp_path)
-    env.update({
-        "RGW_ADMIN_URL": "https://rgw.example.com/admin",
-        "RGW_ACCESS_KEY": "ak",
-        "RGW_SECRET_KEY": "sk",
-    })
-    ledger = tmp_path / "results" / "rally_project_ids.log"
-    ledger.write_text(
-        "2026-04-05T00:00:00Z proj-bbb swift\n",
-        encoding="utf-8",
-    )
-    env["RGW_LEDGER_FILE"] = str(ledger)
-
+def test_auto_purge_rgw_counts_failed_user_deletion(tmp_path):
+    env = _rgw_env(tmp_path, "2026-04-05T00:00:00Z proj-bbb swift\n")
     proc = run_bash(
         f"""
         set -euo pipefail
@@ -265,23 +239,210 @@ def test_auto_purge_rgw_skips_user_on_bucket_failure(tmp_path):
         rgw_find_orphaned_users() {{
             printf '%s\\n' 'proj-bbb$proj-bbb'
         }}
-        rgw_list_user_buckets() {{
-            printf '[{{"name":"stuck-bucket","num_objects":10}}]\\n'
+        rgw_delete_user() {{ return 1; }}
+
+        auto_purge_rgw
+        """,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "deletion FAILED" in proc.stdout
+    assert "purged=0 failed=1" in proc.stdout
+
+
+def test_auto_purge_rgw_fails_closed_on_inconclusive_scan(tmp_path):
+    """Any inconclusive Keystone lookup skips the whole purge, even for an
+    orphan the ledger vouches for."""
+    env = _rgw_env(tmp_path, "2026-04-05T00:00:00Z proj-ccc swift\n")
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{RUN_TESTS}"
+
+        rgw_find_orphaned_users() {{
+            RGW_LAST_FIND_ERRORS=2
+            printf '%s\\n' 'proj-ccc$proj-ccc'
         }}
-        rgw_delete_bucket() {{ return 1; }}
         deleted_users=""
         rgw_delete_user() {{ deleted_users="${{deleted_users}}$1,"; return 0; }}
 
         auto_purge_rgw
 
-        echo "DELETED_USERS=${{deleted_users}}"
+        echo "DELETED=${{deleted_users}}"
         """,
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
-    assert "\nDELETED_USERS=\n" in proc.stdout or proc.stdout.strip().endswith("DELETED_USERS=")
-    assert "bucket deletion incomplete" in proc.stdout
-    assert "failed=" in proc.stdout
+    assert "skipping auto-purge (fail-closed)" in proc.stdout
+    assert proc.stdout.strip().endswith("DELETED=")
+
+
+def test_auto_purge_rgw_skips_when_scan_fails(tmp_path):
+    env = _rgw_env(tmp_path, "2026-04-05T00:00:00Z proj-ddd swift\n")
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{RUN_TESTS}"
+
+        rgw_find_orphaned_users() {{ printf '%s\\n' 'proj-ddd$proj-ddd'; return 1; }}
+        deleted_users=""
+        rgw_delete_user() {{ deleted_users="${{deleted_users}}$1,"; return 0; }}
+
+        auto_purge_rgw
+
+        echo "DELETED=${{deleted_users}}"
+        """,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "RGW orphan scan failed; skipping auto-purge" in proc.stdout
+    assert proc.stdout.strip().endswith("DELETED=")
+
+
+# ---------------------------------------------------------------------------
+# rgw_delete_user request shape
+# ---------------------------------------------------------------------------
+
+def _delete_user(status: str, purge: str) -> subprocess.CompletedProcess[str]:
+    return run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_curl() {{
+            local body_var="$1" status_var="$2"
+            shift 2
+            echo "CURL $*"
+            echo "TIMEOUT=${{RGW_CURL_TIMEOUT}}"
+            printf -v "${{body_var}}" '%s' ''
+            printf -v "${{status_var}}" '%s' '{status}'
+        }}
+        rgw_delete_user 'p$p' {purge} && echo RC=0 || echo RC=$?
+        """
+    )
+
+
+def test_rgw_delete_user_purge_data_flag():
+    proc = _delete_user("200", "true")
+    assert "CURL DELETE /user uid=p$p format=json purge-data=true" in proc.stdout
+    assert "RC=0" in proc.stdout
+    proc = _delete_user("200", "")
+    assert "CURL DELETE /user uid=p$p format=json\n" in proc.stdout
+
+
+def test_rgw_delete_user_404_is_distinct_and_logged():
+    # 404 = nothing deleted: a distinct code so callers do not count it.
+    proc = _delete_user("404", "true")
+    assert "RC=2" in proc.stdout
+    assert "already absent (HTTP 404)" in proc.stderr
+
+
+def test_purge_data_delete_gets_the_long_timeout():
+    proc = _delete_user("200", "true")
+    assert "TIMEOUT=600" in proc.stdout
+    proc = _delete_user("200", "")
+    assert "TIMEOUT=30" in proc.stdout
+
+
+def test_auto_purge_rgw_does_not_count_an_absent_user(tmp_path):
+    env = _rgw_env(tmp_path, "2026-04-05T00:00:00Z proj-eee swift\n")
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{RUN_TESTS}"
+        rgw_find_orphaned_users() {{ printf '%s\\n' 'proj-eee$proj-eee'; }}
+        rgw_delete_user() {{ return 2; }}
+        auto_purge_rgw
+        """,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "already absent" in proc.stdout
+    assert "purged=0 failed=0" in proc.stdout
+
+
+def test_rgw_delete_user_conflict_fails():
+    # RGW refuses (409) to drop a user that still owns buckets without
+    # purge-data -- the fail-closed path for empty unknown-owner orphans.
+    proc = _delete_user("409", "")
+    assert "RC=1" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# rgw_find_orphaned_users: bulk anti-join vs per-project fallback parity
+# ---------------------------------------------------------------------------
+
+PARITY_USERS = [
+    "live$live", "gone$gone", "Gone-2$Gone-2", "a$b", "dup$dup$dup", "$",
+    "x$", "$x", "bad_char$bad_char", "nodollar", "", "gone$gone",
+    "caf\u00e9$caf\u00e9", "live-2$live-2",
+]
+PARITY_PROJECTS = ["live", "live-2", "unrelated"]
+
+
+def _find_orphans(tmp_path: Path, bulk: bool) -> subprocess.CompletedProcess[str]:
+    users = tmp_path / "users.txt"
+    users.write_text("\n".join(PARITY_USERS) + "\n", encoding="utf-8")
+    projects = tmp_path / "projects.txt"
+    projects.write_text("\n".join(PARITY_PROJECTS) + "\n", encoding="utf-8")
+    prefetch = (
+        f'_RGW_KEYSTONE_PROJECTS_FILE=$(mktemp); cp "{projects}" "$_RGW_KEYSTONE_PROJECTS_FILE"'
+        if bulk else "return 1"
+    )
+    return run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_list_implicit_users() {{ cat "{users}"; }}
+        rgw_prefetch_keystone_projects() {{ {prefetch}; }}
+        rgw_check_keystone_projects() {{
+            local id
+            while IFS= read -r id; do
+                if grep -Fxq "$id" "{projects}"; then echo "$id exists"; else echo "$id gone"; fi
+            done
+        }}
+        rgw_find_orphaned_users
+        echo "ERRORS=$RGW_LAST_FIND_ERRORS"
+        """,
+        env={"LC_ALL": "en_US.UTF-8"},
+    )
+
+
+def test_bulk_anti_join_matches_per_project_fallback(tmp_path):
+    bulk = _find_orphans(tmp_path, bulk=True)
+    fallback = _find_orphans(tmp_path, bulk=False)
+    assert bulk.returncode == 0, bulk.stderr
+    assert fallback.returncode == 0, fallback.stderr
+    assert bulk.stdout == fallback.stdout
+    assert bulk.stdout.splitlines() == [
+        "gone$gone", "Gone-2$Gone-2", "gone$gone", "ERRORS=0",
+    ]
+
+
+def test_truncated_bulk_listing_falls_back_to_per_project_lookups(tmp_path):
+    """keystone_projects.py exits 3 on a truncated list; a partial bulk view
+    must never feed the anti-join (live projects would look gone)."""
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_list_keystone_project_ids() {{ echo live; return 3; }}
+        rgw_prefetch_keystone_projects && echo BULK || echo FALLBACK
+        """
+    )
+    assert proc.stdout.strip() == "FALLBACK"
+
+
+def test_empty_bulk_listing_falls_back_to_per_project_lookups(tmp_path):
+    """A successful-but-empty project list must not mark every user orphaned."""
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_list_keystone_project_ids() {{ :; }}
+        rgw_prefetch_keystone_projects && echo BULK || echo FALLBACK
+        """
+    )
+    assert proc.stdout.strip() == "FALLBACK"
 
 
 def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
@@ -297,3 +458,99 @@ def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
     assert main_body.index("auto_purge_rgw") < main_body.index("check_cleanup")
     # finish_run (run_lib.sh) prunes, records the duration, then publishes.
     assert main_body.index("check_cleanup") < main_body.index("finish_run")
+
+
+# ---------------------------------------------------------------------------
+# rgw_list_user_bucket_names: the stats-free inventory
+# ---------------------------------------------------------------------------
+
+def _names(status: str, body: str) -> subprocess.CompletedProcess[str]:
+    return run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_curl() {{
+            local body_var="$1" status_var="$2"
+            shift 2
+            echo "CURL $*" >&2
+            printf -v "${{body_var}}" '%s' '{body}'
+            printf -v "${{status_var}}" '%s' '{status}'
+        }}
+        rgw_list_user_bucket_names 'p$p' && echo RC=0 || echo RC=$?
+        """
+    )
+
+
+def test_bucket_names_listing_is_stats_free():
+    proc = _names("200", '["b1","b2"]')
+    assert proc.stdout.split() == ["b1", "b2", "RC=0"]
+    assert "stats" not in proc.stderr
+    assert "CURL GET /bucket uid=p$p format=json" in proc.stderr
+
+
+def test_bucket_names_listing_accepts_object_entries_and_404():
+    assert _names("200", '[{"bucket":"b1"}]').stdout.split() == ["b1", "RC=0"]
+    assert "RC=2" in _names("404", "").stdout
+
+
+def test_bucket_names_listing_rejects_unexpected_bodies():
+    assert "RC=1" in _names("200", '{"buckets":[]}').stdout
+    assert "RC=1" in _names("200", '[{"other":1}]').stdout
+    assert "RC=1" in _names("500", "[]").stdout
+
+
+def test_fallback_checker_failure_is_inconclusive_not_orphaned():
+    """A checker that dies (or skips IDs) leaves them unanswered: counted as
+    errors, never emitted as orphans."""
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_list_implicit_users() {{ printf '%s\\n' 'a$a' 'b$b' 'c$c'; }}
+        rgw_prefetch_keystone_projects() {{ return 1; }}
+        rgw_check_keystone_projects() {{ cat >/dev/null; echo "a gone"; return 1; }}
+        rgw_find_orphaned_users
+        echo "ERRORS=$RGW_LAST_FIND_ERRORS"
+        """
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.split() == ["a$a", "ERRORS=2"]
+
+
+def test_fallback_checks_each_project_once_over_one_checker_call():
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_list_implicit_users() {{ printf '%s\\n' 'a$a' 'b$b' 'a$a'; }}
+        rgw_prefetch_keystone_projects() {{ return 1; }}
+        calls=0
+        rgw_check_keystone_projects() {{
+            echo "CALL" >&2
+            local id; while IFS= read -r id; do echo "IN $id" >&2; echo "$id gone"; done
+        }}
+        rgw_find_orphaned_users
+        """
+    )
+    assert proc.stderr.count("CALL") == 1
+    assert proc.stderr.count("IN a") == 1
+    assert proc.stdout.split() == ["a$a", "b$b", "a$a"]
+
+
+def test_implicit_user_listing_rejects_newline_suffixed_uid():
+    """jq's `$` matches before a trailing newline; a uid "a$a\\n" printed raw
+    would become the line "a$a" and target a different user."""
+    proc = run_bash(
+        f"""
+        set -euo pipefail
+        source "{HELPERS}"
+        rgw_curl() {{
+            local body_var="$1" status_var="$2"
+            printf -v "${{body_var}}" '%s' '{{"keys":["a$a\\n","b$b"],"truncated":false}}'
+            printf -v "${{status_var}}" '%s' '200'
+        }}
+        rgw_list_implicit_users
+        """,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "b$b\n"

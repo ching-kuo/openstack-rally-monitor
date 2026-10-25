@@ -272,6 +272,36 @@ class TestUpdateMetrics:
         output = metrics_output()
         assert "rally_rgw_scan_ok 0.0" in output
 
+    def test_missing_or_corrupt_cleanup_file_is_not_a_healthy_scan(self, results_dir):
+        (results_dir / "latest_summary.json").write_text(json.dumps(make_summary()))
+        exporter.update_metrics()  # no cleanup_metrics.json at all
+        assert "rally_cleanup_scan_ok 0.0" in metrics_output()
+
+        cleanup_path = results_dir / "cleanup_metrics.json"
+        cleanup_path.write_text(json.dumps(make_cleanup()))
+        exporter.update_metrics()
+        assert "rally_cleanup_scan_ok 1.0" in metrics_output()
+
+        cleanup_path.write_text("{not json")
+        os.utime(cleanup_path, (time.time() + 5, time.time() + 5))
+        exporter.update_metrics()
+        assert "rally_cleanup_scan_ok 0.0" in metrics_output()
+
+    def test_openstack_scan_error_sets_cleanup_scan_ok_zero(self, results_dir):
+        (results_dir / "latest_summary.json").write_text(json.dumps(make_summary()))
+        cleanup_path = results_dir / "cleanup_metrics.json"
+        cleanup_path.write_text(json.dumps(make_cleanup(openstack_status="error")))
+        exporter.update_metrics()
+        assert "rally_cleanup_scan_ok 0.0" in metrics_output()
+
+        # Recovery flips it back; a pre-field file (no key) also reads as ok.
+        legacy = make_cleanup()
+        del legacy["openstack_scan_status"]
+        cleanup_path.write_text(json.dumps(legacy))
+        os.utime(cleanup_path, (time.time() + 5, time.time() + 5))
+        exporter.update_metrics()
+        assert "rally_cleanup_scan_ok 1.0" in metrics_output()
+
 
 class TestCronSpacing:
     """KEEP IN SYNC with entrypoint_config.sh::make_cron_schedule."""

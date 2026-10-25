@@ -10,9 +10,15 @@
 #   /scripts/purge_orphans.sh --confirm          # permanently delete orphaned resources
 #   /scripts/purge_orphans.sh --confirm --force  # bypass MAX_DELETE_THRESHOLD guard
 #
+# Exit codes: 0 ok; 1 a deletion failed or was indeterminate, or RGW purge was
+# skipped; 2 threshold exceeded; 3 a Phase 1 list call failed (count
+# incomplete; dry-run too);
+# 4 --confirm refused because a Rally test run holds the run lock, or the lock
+# file is missing or cannot be opened (the lock cannot be held).
+#
 # Via Docker:
-#   docker exec rally-monitor /scripts/purge_orphans.sh
-#   docker exec rally-monitor /scripts/purge_orphans.sh --confirm
+#   docker exec -u rally rally-monitor /scripts/purge_orphans.sh
+#   docker exec -u rally rally-monitor /scripts/purge_orphans.sh --confirm
 #
 # Two-phase design:
 #   Phase 1 (always): list orphaned resources, snapshot their IDs, count total.
@@ -28,7 +34,16 @@
 #   6. Images
 #   7. Users
 #   8. Projects     (last — users and resources may belong to them)
-#   9. RadosGW users (after Keystone projects are gone; buckets first, then user)
+#   9. RadosGW users (after Keystone projects are gone; one DELETE per user,
+#      with purge-data for rally-owned users so RGW removes their buckets --
+#      see rgw_delete_user for why buckets are never deleted by name)
+#
+# Run interlock: --confirm holds the run lock run_tests.sh takes
+# (RALLY_RUN_LOCK_FILE, os_helpers.sh) for its whole lifetime and refuses to start while a
+# test run holds it -- mid-run, live c_rally_*/s_rally_* resources look exactly
+# like orphans. Trade-off: a scheduled run that fires during a purge skips
+# itself (run_tests.sh logs that). A dry-run never touches the lock; it reads
+# run_state.json and warns.
 #
 # RadosGW orphan eligibility:
 #   - rally-owned (project ID in the provenance ledger): purged with its buckets.
@@ -44,6 +59,9 @@ FORCE=false
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
+source "${SCRIPT_DIR}/os_helpers.sh"
+# RGW Phase 1/2 (purge_rgw, purge_rgw_delete) live in purge_rgw.sh.
+source "${SCRIPT_DIR}/purge_rgw.sh"
 for arg in "$@"; do
     case "$arg" in
         --confirm) CONFIRM=true ;;
@@ -64,12 +82,12 @@ done
 # Prevents accidental mass deletion from name prefix collisions.
 MAX_DELETE_THRESHOLD="${MAX_DELETE_THRESHOLD:-50}"
 
-# jq filter matching both Rally resource name prefixes
-RALLY_FILTER='test("^[sc]_rally")'
-
 TOTAL_FOUND=0
 TOTAL_DELETED=0
 TOTAL_FAILED=0
+# RGW users whose deletion outcome could not be determined (see
+# _rgw_settle_failed_delete); neither deleted nor failed, but exit 1.
+TOTAL_INDETERMINATE=0
 
 # Tracks OpenStack list-call failures during Phase 1.
 # Any failure means TOTAL_FOUND is an undercount; we abort CONFIRM mode
@@ -93,6 +111,15 @@ declare -a _SNAP_USERS=()
 declare -a _SNAP_PROJECTS=()
 declare -a _SNAP_RGW_USERS=()
 declare -a _SNAP_RGW_BUCKETS=()
+# uid -> true for rally-owned users, deleted with purge-data in Phase 2.
+declare -A _RGW_PURGE_DATA=()
+# "uid|bucket" pairs Phase 2 actually removed (from the pre-delete re-list).
+declare -a _RGW_PURGED_BUCKETS=()
+# Users whose failed purge-data delete could not be re-checked (audit log).
+declare -a _RGW_INDETERMINATE=()
+# Buckets found by the Phase 2 re-list beyond the Phase 1 snapshot; they
+# count against MAX_DELETE_THRESHOLD like everything else.
+_RGW_PHASE2_EXTRA=0
 
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [purge-orphans] $*"; }
 
@@ -140,6 +167,7 @@ write_audit_log() {
         --argjson total_found "$found_in_listing" \
         --argjson total_deleted "$deleted" \
         --argjson total_failed "$failed" \
+        --argjson total_indeterminate "${TOTAL_INDETERMINATE}" \
         --argjson servers "$servers_json" \
         --argjson volumes "$volumes_json" \
         --argjson routers "$routers_json" \
@@ -154,6 +182,8 @@ write_audit_log() {
         --argjson rgw_skipped_unknown_owner "${_RGW_SKIPPED_UNKNOWN}" \
         --argjson rgw_empty_unknown_owner "${_RGW_EMPTY_ORPHANS}" \
         --argjson rgw_purge_skipped "$( $RGW_PURGE_SKIPPED && echo true || echo false )" \
+        --argjson rgw_buckets_purged "$(_pairs_to_json "${_RGW_PURGED_BUCKETS[@]+"${_RGW_PURGED_BUCKETS[@]}"}")" \
+        --argjson rgw_users_indeterminate "$(_arr_to_json "${_RGW_INDETERMINATE[@]+"${_RGW_INDETERMINATE[@]}"}")" \
         '{
             timestamp: $ts,
             hostname: $host,
@@ -163,10 +193,13 @@ write_audit_log() {
             total_found: $total_found,
             total_deleted: $total_deleted,
             total_failed: $total_failed,
+            total_indeterminate: $total_indeterminate,
             rgw_listing_errors: $rgw_listing_errors,
             rgw_skipped_unknown_owner: $rgw_skipped_unknown_owner,
             rgw_empty_unknown_owner: $rgw_empty_unknown_owner,
             rgw_purge_skipped: $rgw_purge_skipped,
+            rgw_buckets_purged: $rgw_buckets_purged,
+            rgw_users_indeterminate: $rgw_users_indeterminate,
             found_ids: {
                 servers: $servers,
                 volumes: $volumes,
@@ -184,37 +217,6 @@ write_audit_log() {
     log "Audit log written to ${audit_file}"
 }
 
-# Number of resources in a JSON array that match the Rally filter
-rally_count() {
-    echo "$1" | jq "[.[] | select(.Name | ${RALLY_FILTER})] | length" 2>/dev/null || echo 0
-}
-
-# Extract IDs (or alternate key) of matching resources, one per line
-rally_ids() {
-    local id_key="${2:-.ID}"
-    echo "$1" | jq -r ".[] | select(.Name | ${RALLY_FILTER}) | ${id_key}" 2>/dev/null || true
-}
-
-# Print "  Name  (ID)" for each matching resource
-rally_list() {
-    local id_key="${2:-.ID}"
-    echo "$1" | jq -r ".[] | select(.Name | ${RALLY_FILTER}) | \"  \(.Name)  (\(${id_key}))\"" 2>/dev/null || true
-}
-
-# Run an OpenStack list command and echo the JSON result.
-# On failure, increment _LISTING_ERRORS so main() can abort CONFIRM mode
-# with an incomplete count rather than risk exceeding the threshold silently.
-_os_list() {
-    local label="$1"; shift
-    local json
-    if ! json=$("$@" 2>/dev/null); then
-        log "${label}: WARNING — list call failed; threshold count may be incomplete"
-        _LISTING_ERRORS=$((_LISTING_ERRORS + 1))
-        return 1
-    fi
-    echo "$json"
-}
-
 # Delete a single resource by ID, updating TOTAL_DELETED / TOTAL_FAILED.
 _delete_resource() {
     local label="$1" id="$2"; shift 2
@@ -229,21 +231,38 @@ _delete_resource() {
 
 # --------------------------------------------------------------------------
 # Generic listing helper — records found resources into the named array.
-# Usage: _list_orphans LABEL SNAP_ARRAY_NAME openstack <subcommand> [args...]
+# Usage: _list_orphans LABEL SNAP_ARRAY_NAME SERVICE openstack <subcommand> [args...]
 # The trailing "-f json" flag is appended automatically; do not include it.
 # Requires bash 4.3+ for declare -n nameref support.
 # --------------------------------------------------------------------------
 _list_orphans() {
-    local label="$1" snap_var="$2"; shift 2
+    local label="$1" snap_var="$2" service="$3"; shift 3
     declare -n _arr="$snap_var"
-    local json count
-    json=$(_os_list "$label" "$@" -f json) || return 0
-    count=$(rally_count "$json")
+    local rows="" rc=0 count=0 id name listing=""
+    os_list_rally_resources rows "$@" || rc=$?
+    # A missing endpoint is "not applicable" only for an unmonitored service;
+    # for a monitored one (wrong OS_INTERFACE/region) it is a listing error.
+    if [[ "$rc" -eq 2 ]] && ! os_service_monitored "${service}"; then
+        log "${label}: skipped (no ${service} endpoint in the catalog; ${service} not in RALLY_SERVICES)"
+        return 0
+    fi
+    # A failed call or non-array output would otherwise read as "0 orphans".
+    if [[ "$rc" -ne 0 ]]; then
+        log "${label}: WARNING — list call failed or returned unparseable output; threshold count may be incomplete${OS_LIST_LAST_ERROR:+ (${OS_LIST_LAST_ERROR})}"
+        _LISTING_ERRORS=$((_LISTING_ERRORS + 1))
+        return 0
+    fi
+    # IDs are validated non-empty, whitespace-free strings (_os_rally_rows).
+    while IFS=$'\t' read -r id name; do
+        [[ -n "$id" ]] || continue
+        _arr+=("$id")
+        count=$((count + 1))
+        listing+="  ${name}  (${id})"$'\n'
+    done <<< "$rows"
     if [[ "$count" -eq 0 ]]; then log "${label}: none"; return; fi
     log "${label}: ${count} orphaned"
-    rally_list "$json"
+    printf '%s' "$listing"
     TOTAL_FOUND=$((TOTAL_FOUND + count))
-    while IFS= read -r id; do [[ -n "$id" ]] && _arr+=("$id"); done < <(rally_ids "$json")
 }
 
 # --------------------------------------------------------------------------
@@ -253,7 +272,7 @@ _list_orphans() {
 purge_servers() {
     # Rally orphans live in c_rally_* context projects, not OS_PROJECT_NAME.
     # Name-prefix matching already provides scope; admin role is required.
-    _list_orphans "Servers" _SNAP_SERVERS openstack server list --all-projects
+    _list_orphans "Servers" _SNAP_SERVERS nova openstack server list --all-projects
 }
 purge_servers_delete() {
     [[ "${#_SNAP_SERVERS[@]}" -eq 0 ]] && return
@@ -263,7 +282,7 @@ purge_servers_delete() {
 }
 
 purge_volumes() {
-    _list_orphans "Volumes" _SNAP_VOLUMES openstack volume list --all-projects
+    _list_orphans "Volumes" _SNAP_VOLUMES cinder openstack volume list --all-projects
 }
 purge_volumes_delete() {
     [[ "${#_SNAP_VOLUMES[@]}" -eq 0 ]] && return
@@ -283,7 +302,7 @@ purge_volumes_delete() {
 }
 
 purge_routers() {
-    _list_orphans "Routers" _SNAP_ROUTERS openstack router list
+    _list_orphans "Routers" _SNAP_ROUTERS neutron openstack router list
 }
 purge_routers_delete() {
     [[ "${#_SNAP_ROUTERS[@]}" -eq 0 ]] && return
@@ -306,7 +325,7 @@ purge_routers_delete() {
 }
 
 purge_security_groups() {
-    _list_orphans "Security groups" _SNAP_SECGROUPS openstack security group list
+    _list_orphans "Security groups" _SNAP_SECGROUPS neutron openstack security group list
 }
 purge_security_groups_delete() {
     [[ "${#_SNAP_SECGROUPS[@]}" -eq 0 ]] && return
@@ -316,7 +335,7 @@ purge_security_groups_delete() {
 }
 
 purge_networks() {
-    _list_orphans "Networks" _SNAP_NETWORKS openstack network list
+    _list_orphans "Networks" _SNAP_NETWORKS neutron openstack network list
 }
 purge_networks_delete() {
     [[ "${#_SNAP_NETWORKS[@]}" -eq 0 ]] && return
@@ -326,7 +345,7 @@ purge_networks_delete() {
 }
 
 purge_images() {
-    _list_orphans "Images" _SNAP_IMAGES openstack image list
+    _list_orphans "Images" _SNAP_IMAGES glance openstack image list
 }
 purge_images_delete() {
     [[ "${#_SNAP_IMAGES[@]}" -eq 0 ]] && return
@@ -337,7 +356,7 @@ purge_images_delete() {
 
 purge_users() {
     # Users are global in Keystone; match by name prefix only.
-    _list_orphans "Users" _SNAP_USERS openstack user list
+    _list_orphans "Users" _SNAP_USERS keystone openstack user list
 }
 purge_users_delete() {
     [[ "${#_SNAP_USERS[@]}" -eq 0 ]] && return
@@ -348,7 +367,7 @@ purge_users_delete() {
 
 purge_projects() {
     # Projects are global in Keystone; match by name prefix only.
-    _list_orphans "Projects" _SNAP_PROJECTS openstack project list
+    _list_orphans "Projects" _SNAP_PROJECTS keystone openstack project list
 }
 purge_projects_delete() {
     [[ "${#_SNAP_PROJECTS[@]}" -eq 0 ]] && return
@@ -357,119 +376,43 @@ purge_projects_delete() {
     done
 }
 
-purge_rgw() {
-    if ! rgw_available; then
-        log "RGW users: skipped (RGW admin credentials not configured)"
-        return
+# --------------------------------------------------------------------------
+# Run interlock with run_tests.sh (fd 200, as in run_tests.sh main)
+# --------------------------------------------------------------------------
+# --confirm: hold the lock for the rest of the script, or refuse (exit 4).
+# Opened READ-ONLY (flock(2) takes an exclusive lock on an O_RDONLY fd):
+# opening it for writing would create it root-owned with the default 0644
+# when an operator runs this as root, after which the rally user's cron
+# run_tests.sh could no longer open it and every scheduled run would die.
+# entrypoint.sh pre-creates it at boot (root-owned, mode 0660, so rally writes
+# it through GID 0), so a missing file is abnormal -- and proceeding
+# unlocked would let a cron run create and take it mid-purge. Missing or
+# unopenable both mean we cannot hold the lock: refuse (fail closed).
+acquire_run_lock() {
+    if [[ ! -e "${RALLY_RUN_LOCK_FILE}" ]]; then
+        log "ABORTED: run lock ${RALLY_RUN_LOCK_FILE} is missing, so a test run could start mid-purge."
+        log "entrypoint.sh creates it at boot; restart the container (or create it as the rally user) and retry."
+        exit 4
     fi
-
-    local orphans_file
-    orphans_file=$(mktemp)
-    if ! rgw_find_orphaned_users > "${orphans_file}"; then
-        _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + (RGW_LAST_FIND_ERRORS > 0 ? RGW_LAST_FIND_ERRORS : 1)))
-        log "RGW users: WARNING — orphan scan failed; RGW purge is disabled for this run"
-        rm -f "${orphans_file}"
-        return
+    if ! { exec 200<"${RALLY_RUN_LOCK_FILE}"; } 2>/dev/null; then
+        log "ABORTED: cannot open run lock ${RALLY_RUN_LOCK_FILE}; refusing to delete."
+        exit 4
     fi
-
-    _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + RGW_LAST_FIND_ERRORS))
-
-    local listed_any=0
-    local uid bucket_json bucket_count object_count ownership bucket_name
-    while IFS= read -r uid; do
-        [[ -n "${uid}" ]] || continue
-        listed_any=1
-        ownership=$(rgw_classify_owner "${uid}")
-
-        if ! bucket_json=$(rgw_list_user_buckets "${uid}"); then
-            _RGW_LISTING_ERRORS=$((_RGW_LISTING_ERRORS + 1))
-            log "RGW user ${uid}: WARNING — bucket listing failed; skipping from purge snapshot"
-            continue
-        fi
-
-        bucket_count=$(rgw_count_buckets "${bucket_json}")
-        object_count=$(rgw_count_objects "${bucket_json}")
-
-        if [[ "${ownership}" == "rally_owned" ]]; then
-            log "RGW user ${uid}: orphaned (rally-owned, ${bucket_count} buckets, ${object_count} objects)"
-            TOTAL_FOUND=$((TOTAL_FOUND + 1))
-            _SNAP_RGW_USERS+=("${uid}")
-            while IFS= read -r bucket_name; do
-                [[ -n "${bucket_name}" ]] || continue
-                log "  RGW bucket ${bucket_name}"
-                TOTAL_FOUND=$((TOTAL_FOUND + 1))
-                _SNAP_RGW_BUCKETS+=("${uid}|${bucket_name}")
-            done < <(echo "${bucket_json}" | jq -r '.[].name // empty' 2>/dev/null || true)
-        elif [[ "${bucket_count}" -eq 0 && "${object_count}" -eq 0 ]]; then
-            # Unknown provenance, but the Keystone project is confirmed gone
-            # (rgw_find_orphaned_users only emits authoritative 404s; inconclusive
-            # lookups raise _RGW_LISTING_ERRORS and abort the purge) AND the user
-            # holds zero buckets/objects — so there is no data to lose. Keystone
-            # implicit-tenant users self-heal: Ceph recreates them on the next
-            # authenticated access. An empty dangling user is therefore always
-            # safe to reap, which clears pre-provenance-ledger orphans the
-            # rally-owned gate cannot vouch for. Unknown-owner users WITH data are
-            # still skipped below — those need a human.
-            log "RGW user ${uid}: orphaned (unknown owner, EMPTY — project gone, 0 buckets/objects; eligible)"
-            TOTAL_FOUND=$((TOTAL_FOUND + 1))
-            _RGW_EMPTY_ORPHANS=$((_RGW_EMPTY_ORPHANS + 1))
-            _SNAP_RGW_USERS+=("${uid}")
-        else
-            _RGW_SKIPPED_UNKNOWN=$((_RGW_SKIPPED_UNKNOWN + 1))
-            log "RGW user ${uid}: SKIPPED (unknown owner WITH data, ${bucket_count} buckets, ${object_count} objects)"
-        fi
-    done < "${orphans_file}"
-
-    rm -f "${orphans_file}"
-
-    if [[ "${listed_any}" -eq 0 ]]; then
-        log "RGW users: none"
-    elif [[ "${#_SNAP_RGW_USERS[@]}" -eq 0 && "${_RGW_SKIPPED_UNKNOWN}" -gt 0 ]]; then
-        log "RGW users: no Rally-owned orphans eligible for purge"
+    if ! flock -n 200; then
+        log "ABORTED: a Rally test run is in progress (${RALLY_RUN_LOCK_FILE} is locked)."
+        log "Its live c_rally_*/s_rally_* resources would look like orphans; retry after it finishes."
+        exit 4
     fi
 }
 
-purge_rgw_delete() {
-    if [[ "${_RGW_LISTING_ERRORS}" -gt 0 ]]; then
-        RGW_PURGE_SKIPPED=true
-        log "RGW purge skipped: ${_RGW_LISTING_ERRORS} RGW listing error(s) occurred during Phase 1."
-        log "Investigate RGW or Keystone connectivity before retrying."
-        return
+# Dry-run: warn from run_state.json and never touch the lock -- even a brief
+# exclusive probe could make a cron run starting at that instant skip itself.
+warn_if_run_in_progress() {
+    local state
+    state=$(jq -r '.state // empty' "${RESULTS_DIR}/run_state.json" 2>/dev/null) || return 0
+    if [[ "${state}" == "running" ]]; then
+        log "WARNING: a Rally test run is in progress; resources listed below may be live, not orphaned."
     fi
-
-    [[ "${#_SNAP_RGW_USERS[@]}" -eq 0 ]] && return
-
-    local uid entry bucket_uid bucket_name user_failed
-    for uid in "${_SNAP_RGW_USERS[@]}"; do
-        user_failed=0
-        for entry in "${_SNAP_RGW_BUCKETS[@]}"; do
-            bucket_uid="${entry%%|*}"
-            bucket_name="${entry#*|}"
-            [[ "${bucket_uid}" == "${uid}" ]] || continue
-            if rgw_delete_bucket "${bucket_name}"; then
-                log "  RGW bucket ${bucket_name}: deleted"
-                TOTAL_DELETED=$((TOTAL_DELETED + 1))
-            else
-                log "  RGW bucket ${bucket_name}: deletion FAILED"
-                TOTAL_FAILED=$((TOTAL_FAILED + 1))
-                user_failed=1
-            fi
-        done
-
-        if [[ "${user_failed}" -ne 0 ]]; then
-            log "  RGW user ${uid}: deletion SKIPPED because bucket deletion did not fully succeed"
-            TOTAL_FAILED=$((TOTAL_FAILED + 1))
-            continue
-        fi
-
-        if rgw_delete_user "${uid}"; then
-            log "  RGW user ${uid}: deleted"
-            TOTAL_DELETED=$((TOTAL_DELETED + 1))
-        else
-            log "  RGW user ${uid}: deletion FAILED"
-            TOTAL_FAILED=$((TOTAL_FAILED + 1))
-        fi
-    done
 }
 
 # --------------------------------------------------------------------------
@@ -480,9 +423,11 @@ main() {
     # Populates ID snapshots and TOTAL_FOUND for threshold enforcement.
     _LISTING_ERRORS=0
     if $CONFIRM; then
+        acquire_run_lock
         log "Phase 1: listing orphaned resources..."
     else
         log "Dry-run mode — listing orphaned resources only (pass --confirm to delete)"
+        warn_if_run_in_progress
     fi
     echo
 
@@ -500,6 +445,10 @@ main() {
 
     if ! $CONFIRM; then
         log "Dry-run complete. Found ${TOTAL_FOUND} orphaned resources."
+        if [[ "${_LISTING_ERRORS}" -gt 0 || "${_RGW_LISTING_ERRORS}" -gt 0 ]]; then
+            log "WARNING: ${_LISTING_ERRORS} OpenStack and ${_RGW_LISTING_ERRORS} RGW list call(s) failed; the list above is incomplete."
+            exit 3
+        fi
         if [[ "${TOTAL_FOUND}" -gt 0 ]]; then
             echo
             log "To delete these resources run:"
@@ -546,7 +495,7 @@ main() {
     purge_rgw_delete
 
     echo
-    log "Done. Deleted ${TOTAL_DELETED} of ${found_in_listing} orphaned resources (${TOTAL_FAILED} failed)."
+    log "Done. Deleted ${TOTAL_DELETED} of ${found_in_listing} orphaned resources (${TOTAL_FAILED} failed, ${TOTAL_INDETERMINATE} RGW user(s) indeterminate)."
 
     if [[ "${TOTAL_FAILED}" -gt 0 ]]; then
         log "WARNING: ${TOTAL_FAILED} deletion(s) failed — check logs above for details."
@@ -564,7 +513,11 @@ main() {
     if $RGW_PURGE_SKIPPED; then
         exit 1
     fi
-    [[ "${TOTAL_FAILED}" -gt 0 ]] && exit 1
+    # An `if`, not `[[ ]] && exit 1`: as main's last command the latter made
+    # every fully successful --confirm run exit 1.
+    if [[ "${TOTAL_FAILED}" -gt 0 || "${TOTAL_INDETERMINATE}" -gt 0 ]]; then
+        exit 1
+    fi
 }
 
 # Skip the entry point when sourced for unit tests (PURGE_ORPHANS_NO_MAIN=1).

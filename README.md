@@ -167,6 +167,7 @@ All settings are controlled via environment variables in `.env`.
 | `RGW_ACCESS_KEY` | — | S3 access key for RGW admin user (`buckets=*;users=*` caps) |
 | `RGW_SECRET_KEY` | — | S3 secret key for RGW admin user |
 | `RGW_REGION` | — | Explicit SigV4 region for RGW (omit if not required) |
+| `RGW_PURGE_TIMEOUT` | `600` | Seconds allowed for one orphan-user delete with `purge-data` (it removes every bucket and object of that user in a single request) |
 | `NOTIFY_WEBHOOK_URL` | — | Webhook URL for smoke-status transition notifications (enables the feature). Treated as a secret — may embed a token and lands in `/rally/rally_env` (mode 0640) |
 | `NOTIFY_FORMAT` | `generic` | Webhook payload shape: `generic` (raw JSON), `slack` (`{"text": …}`), or `discord` (`{"content": …}`) |
 | `NOTIFY_DASHBOARD_URL` | — | Optional dashboard URL embedded in the notification payload / chat message |
@@ -207,6 +208,7 @@ All metrics are exposed on `:9101/metrics`. Alongside the existing `rally_task_*
 | `rally_run_setup_ok` | — | 0 when the last run aborted during setup, before any test (its summary carries a top-level `error`: `deployment_setup_failed` or `task_args_write_failed`), else 1. Such a run also clears the per-service series and sets `rally_overall_success` and `rally_run_duration_seconds` to 0. Only meaningful while `rally_data_valid` is 1 |
 | `rally_announcement_active` | `type` | Count of currently-active announcements per type; all three labels (`incident`, `maintenance`, `scheduled`) are always emitted (0 when none) |
 | `rally_maintenance_mode` | — | 1 when any `maintenance`-type announcement is active, else 0 (drives the optional alert inhibition below) |
+| `rally_cleanup_scan_ok` | — | 1 when every OpenStack orphan listing in the last `cleanup_monitor.sh` scan succeeded, 0 when any list call failed or returned unparseable output (`openstack_scan_status`/`openstack_scan_errors` in `cleanup_metrics.json`). A failed listing reads as 0 orphans for its type, so the orphan gauges cannot be trusted while this is 0; drives `RallyCleanupScanDegraded`. Resource types of services outside `RALLY_SERVICES` (keystone is always scanned), or with no endpoint in the service catalog, are skipped, not errors |
 
 Uptime is intentionally **dashboard-only** — derive it Prometheus-side with `avg_over_time(rally_api_up[30d])` rather than scraping a dedicated gauge.
 
@@ -222,6 +224,7 @@ Defined in `prometheus/rally_alerts.yml`.
 | `RallyRgwOrphanedUsers` | warning | Orphaned RGW implicit-tenant users detected |
 | `RallyRgwOrphanedBuckets` | warning | Orphaned RGW bucket count >5 |
 | `RallyRgwScanDegraded` | warning | RGW orphan scan is failing (API/auth issue) |
+| `RallyCleanupScanDegraded` | warning | An OpenStack orphan listing failed in the last cleanup scan for >15 min — the orphan counts for that type read as 0 and cannot be trusted |
 | `RallyTestFailure` | warning | A scenario failed |
 | `RallyServiceDown` | critical | Entire service is failing |
 | `RallySLABreach` | warning | SLA criteria not met |
@@ -274,7 +277,10 @@ radosgw-admin caps add --uid=<admin-uid> --caps="buckets=*;users=*"
 
 **How it works:**
 
-- `run_tests.sh` automatically purges **Rally-owned** RGW orphans after each test run via `auto_purge_rgw()`. Project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`). Non-Rally orphans are never touched.
+- `run_tests.sh` automatically purges **Rally-owned** RGW orphans after each test run via `auto_purge_rgw()` (in `rgw_helpers.sh`). Project IDs must appear in the provenance ledger (`/results/rally_project_ids.log`), which a per-task tracker (`scripts/rally_project_tracker.py`, one openstacksdk session polling every 5 s) fills with every `c_rally_*` project a task creates. If the tracker cannot take its pre-task snapshot it records nothing for that task (fail-closed: its orphans stay unknown-owner). Non-Rally orphans are never touched.
+- Deletion is one `DELETE /admin/user` per orphan; for Rally-owned users it sets `purge-data=true` so RGW removes the user's buckets from its own (tenant-correct) bucket listing. Buckets are never deleted by bare name: implicit-tenant buckets live in tenant `<project_id>`, and before Ceph Squid (19) the Remove Bucket op ignores the tenant and would target a same-named bucket in the global tenant. Empty unknown-owner users (manual purge only) are deleted *without* `purge-data`, so RGW refuses if one gained a bucket since the dry listing. The manual purge re-inventories each user's buckets just before deleting it from the stats-free bucket listing (the stats listing can silently omit buckets on Ceph Reef/Quincy; if the two disagree the user is skipped), so its counts, threshold check, and audit log (`rgw_buckets_purged`) reflect what was actually removed; an already-absent user (404) counts as nothing deleted, and after a failed purge-data request the user is re-checked and the actual outcome (deleted, partly purged, or `rgw_users_indeterminate`) is recorded. After a request timeout RGW may still be deleting, so the purge keeps re-checking with backoff for about 5 minutes and counts the user as deleted only if it disappears; otherwise it is recorded as indeterminate
+- The monitor's OpenStack credentials must be cloud-admin (see every project in every domain): orphan detection treats a project missing from the list as deleted. Malformed Keystone or OpenStack listings fail the whole scan rather than being partially trusted
+- Orphan detection only trusts a complete Keystone project list: the bulk list is read from the raw `GET /v3/projects` response (`scripts/keystone_projects.py`), and if Keystone's `list_limit` truncated it, the scan falls back to one authoritative existence check per project (all over one session) instead of treating unlisted projects as deleted
 - `cleanup_monitor.sh` then queries the RGW admin API for implicit-tenant users, cross-references against Keystone, and reports post-purge orphan counts in `cleanup_metrics.json` with a scan health status (`ok`/`skipped`/`error`)
 - `purge_orphans.sh` is available for manual bulk cleanup of all resource types (including RGW) when needed. Unlike the automatic purge, it also reaps **empty unknown-owner** RGW orphans (Keystone project confirmed gone + zero buckets/objects) — data-safe because empty implicit-tenant users self-heal — which clears pre-provenance-ledger orphans the ledger gate cannot vouch for. Unknown-owner users that still hold data are always skipped
 - All operations are **fail-closed**: scan errors or inconclusive Keystone lookups block destructive purge and surface as degraded scan status rather than false zeros
@@ -368,7 +374,12 @@ docker exec -u rally rally-monitor /scripts/cleanup_monitor.sh
 # Dry-run purge: list all orphaned resources without deleting anything
 docker exec -u rally rally-monitor /scripts/purge_orphans.sh
 
-# Purge orphaned resources (permanently deletes s_rally_* and c_rally_* resources)
+# Purge orphaned resources (permanently deletes s_rally_* and c_rally_* resources).
+# Refuses (exit 4) while a Rally test run holds the run lock, since a live run's
+# resources look exactly like orphans; a scheduled run that fires during the
+# purge is skipped (logged as SKIPPED). A dry run only warns, from
+# run_state.json, and never touches the lock. Exit 3 (dry run
+# too) means a list call failed and the listing is incomplete.
 docker exec -u rally rally-monitor /scripts/purge_orphans.sh --confirm
 
 # View live logs

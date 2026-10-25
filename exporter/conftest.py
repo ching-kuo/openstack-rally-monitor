@@ -59,6 +59,7 @@ def reset_module_state():
     exporter.rally_rgw_orphaned_buckets.set(0)
     exporter.rally_rgw_unknown_owner_orphans.set(0)
     exporter.rally_rgw_scan_ok.set(1)
+    exporter.rally_cleanup_scan_ok.set(1)
     # rally_api_overall_up is unlabeled: .clear() is unsupported, so reset to a
     # known baseline between tests. The gauge now FAILS CLOSED -- unknown/missing
     # overall sets 0 -- and several tests pre-set it to 1 to prove the flip.

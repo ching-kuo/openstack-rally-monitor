@@ -4,7 +4,7 @@
 #
 # The service set honors RALLY_SERVICES like the checker itself (keystone
 # always present), mirroring api_health_check.py::parse_rally_services and
-# run_tests.sh::parse_rally_services -- keep the three in sync. Normalization
+# os_helpers.sh::parse_rally_services -- keep the three in sync. Normalization
 # here is the subset that matters for this error path: split on commas, strip
 # whitespace, lowercase, drop empties, then drop any token failing the
 # ^[a-z0-9_-]+$ allowlist (path-traversal hardening, same as the other two
@@ -18,7 +18,7 @@
 def normalize:
   split(",")
   | map(gsub("\\s"; "") | ascii_downcase)
-  | map(select(length > 0 and test("^[a-z0-9_-]+$")));
+  | map(select(length > 0 and test("\\A[a-z0-9_-]+\\z")));
 
 ($ts) as $t
 | (($raw | normalize) as $named

@@ -132,6 +132,16 @@ rally_rgw_scan_ok = Gauge(
     registry=registry,
 )
 
+rally_cleanup_scan_ok = Gauge(
+    "rally_cleanup_scan_ok",
+    (
+        "Whether every OpenStack orphan listing in the last cleanup scan "
+        "succeeded: 1=ok, 0=error (a failed listing reads as 0 orphans for "
+        "its type, so the orphan gauges cannot be trusted while this is 0)"
+    ),
+    registry=registry,
+)
+
 rally_last_run_timestamp = Gauge(
     "rally_last_run_timestamp",
     "Epoch timestamp of the last Rally test run (its start time)",
@@ -285,6 +295,9 @@ def load_cleanup_metrics() -> dict:
             "details": {},
             "context_details": {},
             "rgw_scan_status": "skipped",
+            # entrypoint.sh seeds the file at boot, so missing/corrupt means
+            # the pipeline is broken: never report a healthy scan then.
+            "openstack_scan_status": "error",
             "rgw_orphaned_users": 0,
             "rgw_orphaned_buckets": 0,
             "rgw_unknown_owner_orphans": 0,
@@ -414,6 +427,10 @@ def _apply_cleanup_metrics(cleanup: dict) -> None:
     rally_rgw_orphaned_buckets.set(cleanup.get("rgw_orphaned_buckets", 0))
     rally_rgw_unknown_owner_orphans.set(cleanup.get("rgw_unknown_owner_orphans", 0))
     rally_rgw_scan_ok.set(0 if rgw_scan_status == "error" else 1)
+    # Files written before openstack_scan_status existed lack the field: ok.
+    rally_cleanup_scan_ok.set(
+        0 if cleanup.get("openstack_scan_status", "ok") == "error" else 1
+    )
 
 
 def update_metrics():

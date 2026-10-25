@@ -114,6 +114,24 @@ groups:
             on zero-orphan readings.
           runbook: "docker logs rally-monitor"
 
+      # A failed OpenStack orphan listing reads as 0 orphans for that type, so
+      # RallyCleanupFailure/RallyContextCleanupWarning go silent exactly when
+      # the scan is blind. This surfaces the blindness instead.
+      - alert: RallyCleanupScanDegraded
+        expr: rally_cleanup_scan_ok == 0
+        for: 15m
+        labels:
+          severity: warning
+          team: infra
+        annotations:
+          summary: "Rally orphan scan could not list some OpenStack resources"
+          description: |
+            At least one OpenStack list call in the last cleanup scan failed or
+            returned unparseable output (see openstack_scan_errors in
+            cleanup_metrics.json). Orphan counts for those resource types read
+            as 0 and cannot be trusted until a scan succeeds.
+          runbook: "docker logs rally-monitor"
+
   - name: rally_tests
     rules:
       # -----------------------------------------------------------------------

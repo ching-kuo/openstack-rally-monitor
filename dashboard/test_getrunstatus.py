@@ -11,6 +11,8 @@ context, and assert on their return values. This pins:
   - orderedServiceUnion: the duration chart now derives its series from the
     union of all runs (not just the oldest), so a newly-added service appears
     immediately.
+  - renderCleanup (with a stub `document`): a blind OpenStack orphan scan
+    (openstack_scan_status "error") must not render the badge as "OK".
 
 If node is unavailable the tests skip rather than fail (CI images that omit
 node still get a green run; the bash-side publish test covers the data path).
@@ -159,3 +161,26 @@ def test_service_error_text_falls_back_to_error_code():
 def test_service_error_text_empty_without_error():
     assert _eval_service_error('{"status":"passed"}') == ""
     assert _eval_service_error("null") == ""
+
+
+def _cleanup_badge(cleanup_js: str) -> str:
+    fn = _extract("renderCleanup")
+    stub = (
+        "const els = {cleanupGrid: {}, cleanupBadge: {}};"
+        "const document = {getElementById: (id) => els[id]};"
+    )
+    return _run_node(
+        f"{stub}\n{fn}\nrenderCleanup({cleanup_js});"
+        "process.stdout.write(els.cleanupBadge.textContent + '|' + els.cleanupBadge.className);"
+    )
+
+
+def test_cleanup_badge_flags_a_blind_openstack_scan():
+    # A failed listing reads as 0 orphans; the badge must not say OK.
+    assert _cleanup_badge(
+        '{"cleanup_failed":0,"details":{},"openstack_scan_status":"error"}'
+    ) == "SCAN ERROR|section-badge error"
+    assert _cleanup_badge('{"cleanup_failed":0,"details":{}}') == "OK|section-badge ok"
+    assert _cleanup_badge(
+        '{"cleanup_failed":1,"details":{},"openstack_scan_status":"error"}'
+    ) == "ISSUES|section-badge error"

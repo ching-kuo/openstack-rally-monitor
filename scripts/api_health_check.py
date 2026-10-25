@@ -57,13 +57,13 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_SERVICE_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+_SERVICE_NAME_RE = re.compile(r"[a-z0-9_-]+")  # fullmatch: `$` allows a trailing \n
 
 
 def parse_rally_services(raw, default=DEFAULT_RALLY_SERVICES) -> tuple:
     """Parse RALLY_SERVICES into a normalized, ordered tuple of service names.
 
-    Normalization mirrors run_tests.sh's parse_rally_services and
+    Normalization mirrors os_helpers.sh's parse_rally_services and
     health_check.sh's all-down jq fallback (keep the three in sync): split on
     commas, lowercase, strip ALL whitespace, drop empty segments, dedupe
     preserving first-seen order, then drop any token not matching the
@@ -90,7 +90,7 @@ def parse_rally_services(raw, default=DEFAULT_RALLY_SERVICES) -> tuple:
             name = "".join(token.split()).lower()
             if not name or name in seen:
                 continue
-            if not _SERVICE_NAME_RE.match(name):
+            if not _SERVICE_NAME_RE.fullmatch(name):
                 print(
                     f"api_health_check: dropping invalid service name "
                     f"'{name}' (allowlist ^[a-z0-9_-]+$)",

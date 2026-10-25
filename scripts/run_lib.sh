@@ -194,28 +194,10 @@ record_smoke_result() {
 # --------------------------------------------------------------------------
 ensure_cleanup_metrics_file() {
     local cleanup_file="${RESULTS_DIR}/cleanup_metrics.json"
-    [[ -f "${cleanup_file}" ]] && return 0
-
-    cat > "${cleanup_file}.tmp" <<'EOF'
-{
-    "timestamp": "waiting_for_first_run",
-    "cleanup_failed": 0,
-    "context_cleanup_warning": 0,
-    "rgw_scan_status": "skipped",
-    "rgw_scan_errors": 0,
-    "rgw_orphaned_users": 0,
-    "rgw_orphaned_buckets": 0,
-    "rgw_orphaned_objects": 0,
-    "rgw_rally_owned_orphans": 0,
-    "rgw_unknown_owner_orphans": 0,
-    "orphaned_resources": {},
-    "context_orphaned_resources": {},
-    "details": {},
-    "context_details": {}
-}
-EOF
-    mv "${cleanup_file}.tmp" "${cleanup_file}"
-    log "Seeded missing cleanup metrics file at ${cleanup_file}"
+    # Same seed entrypoint.sh writes at boot (os_helpers.sh).
+    if seed_cleanup_metrics "${cleanup_file}"; then
+        log "Seeded missing cleanup metrics file at ${cleanup_file}"
+    fi
 }
 
 publish_dashboard_files() {

@@ -19,41 +19,61 @@ set -euo pipefail
 
 RESULTS_DIR="${RESULTS_DIR:-/results}"
 CLEANUP_METRICS_FILE="${RESULTS_DIR}/cleanup_metrics.json"
+CLEANUP_LOCK_FILE="${CLEANUP_LOCK_FILE:-/rally/logs/rally-cleanup.lock}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
-
-S_FILTER='test("^s_rally")'
-C_FILTER='test("^c_rally")'
+source "${SCRIPT_DIR}/os_helpers.sh"
 
 log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [cleanup-monitor] $*"
 }
 
-# Count resources in a JSON array matching a jq filter expression
-count_match() {
-    echo "$1" | jq "[.[] | select(.Name | $2)] | length" 2>/dev/null || echo 0
-}
-
 # --------------------------------------------------------------------------
 # check_resource: generic helper used by all per-resource-type checks.
-# Runs the given openstack command, returns "s_count c_count" on stdout.
-# Usage: check_resource openstack <subcommand> [flags...] -f json
+# Prints "s_count c_count errors". Every type is scanned whatever
+# RALLY_SERVICES says (cross-service orphans). A failed list call or output
+# that is not a JSON array prints "0 0 1", so the caller records a scan error
+# instead of reading the failure as zero orphans. A missing catalog endpoint
+# prints "0 0 0" (not applicable) only for a service outside RALLY_SERVICES;
+# for a monitored service it is a scan error.
+# Errors travel on stdout because callers run this in a $(...) subshell.
+# Usage: check_resource <service> openstack <subcommand> [flags...]
 # --------------------------------------------------------------------------
 check_resource() {
-    local json
-    json=$("$@" -f json 2>/dev/null) || json="[]"
-    echo "$(count_match "$json" "$S_FILTER") $(count_match "$json" "$C_FILTER")"
+    local service="$1"; shift
+    local rows="" rc=0
+    os_list_rally_resources rows "$@" || rc=$?
+    if [[ "${rc}" -eq 2 ]]; then
+        if ! os_service_monitored "${service}"; then
+            log "'$*' skipped (no ${service} endpoint in the service catalog; ${service} not in RALLY_SERVICES)" >&2
+            echo "0 0 0"
+            return 0
+        fi
+        log "WARNING: '$*' found no ${service} endpoint although ${service} is monitored (check OS_INTERFACE/OS_REGION_NAME); counted as a scan error" >&2
+        echo "0 0 1"
+        return 0
+    fi
+    if [[ "${rc}" -ne 0 ]]; then
+        log "WARNING: '$*' list call failed or returned unparseable output; counted as a scan error${OS_LIST_LAST_ERROR:+ (${OS_LIST_LAST_ERROR})}" >&2
+        echo "0 0 1"
+        return 0
+    fi
+    awk -F'\t' '
+        $2 ~ /^s_rally/ { s++ }
+        $2 ~ /^c_rally/ { c++ }
+        END { print s + 0, c + 0, 0 }
+    ' <<< "${rows}"
 }
 
-check_servers()         { check_resource openstack server list --all-projects; }
-check_networks()        { check_resource openstack network list; }
-check_volumes()         { check_resource openstack volume list --all-projects; }
-check_images()          { check_resource openstack image list; }
-check_users()           { check_resource openstack user list; }
-check_projects()        { check_resource openstack project list; }
-check_routers()         { check_resource openstack router list; }
-check_security_groups() { check_resource openstack security group list; }
+check_servers()         { check_resource nova openstack server list --all-projects; }
+check_networks()        { check_resource neutron openstack network list; }
+check_volumes()         { check_resource cinder openstack volume list --all-projects; }
+check_images()          { check_resource glance openstack image list; }
+check_users()           { check_resource keystone openstack user list; }
+check_projects()        { check_resource keystone openstack project list; }
+check_routers()         { check_resource neutron openstack router list; }
+check_security_groups() { check_resource neutron openstack security group list; }
 
 check_rgw_cleanup() {
     RGW_SCAN_STATUS="skipped"
@@ -128,8 +148,7 @@ check_rgw_cleanup() {
 # --------------------------------------------------------------------------
 main() {
     log "Starting orphaned resource check..."
-    LOCKFILE="/rally/logs/rally-cleanup.lock"
-    exec 200>"${LOCKFILE}"
+    exec 200>"${CLEANUP_LOCK_FILE}"
     flock -n 200 || { log "Another cleanup check is already in progress, exiting."; exit 0; }
 
     local s_servers c_servers
@@ -141,15 +160,24 @@ main() {
     local s_routers c_routers
     local s_secgroups c_secgroups
 
-    read -r s_servers   c_servers   <<< "$(check_servers)"
-    read -r s_networks  c_networks  <<< "$(check_networks)"
-    read -r s_volumes   c_volumes   <<< "$(check_volumes)"
-    read -r s_images    c_images    <<< "$(check_images)"
-    read -r s_users     c_users     <<< "$(check_users)"
-    read -r s_projects  c_projects  <<< "$(check_projects)"
-    read -r s_routers   c_routers   <<< "$(check_routers)"
-    read -r s_secgroups c_secgroups <<< "$(check_security_groups)"
+    # A failed listing reads as 0 orphans for its type; openstack_scan_status
+    # tells consumers (exporter rally_cleanup_scan_ok, dashboard) not to
+    # trust those zeros.
+    local e scan_errors=0 scan_status="ok"
+    read -r s_servers   c_servers   e <<< "$(check_servers)";         scan_errors=$((scan_errors + e))
+    read -r s_networks  c_networks  e <<< "$(check_networks)";        scan_errors=$((scan_errors + e))
+    read -r s_volumes   c_volumes   e <<< "$(check_volumes)";         scan_errors=$((scan_errors + e))
+    read -r s_images    c_images    e <<< "$(check_images)";          scan_errors=$((scan_errors + e))
+    read -r s_users     c_users     e <<< "$(check_users)";           scan_errors=$((scan_errors + e))
+    read -r s_projects  c_projects  e <<< "$(check_projects)";        scan_errors=$((scan_errors + e))
+    read -r s_routers   c_routers   e <<< "$(check_routers)";         scan_errors=$((scan_errors + e))
+    read -r s_secgroups c_secgroups e <<< "$(check_security_groups)"; scan_errors=$((scan_errors + e))
     check_rgw_cleanup
+
+    if [[ "${scan_errors}" -gt 0 ]]; then
+        scan_status="error"
+        log "WARNING: ${scan_errors} OpenStack list call(s) failed; orphan counts are incomplete"
+    fi
 
     local s_total c_total
     s_total=$(( s_servers + s_networks + s_volumes + s_images + s_users + s_projects + s_routers + s_secgroups ))
@@ -184,6 +212,8 @@ main() {
     "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
     "cleanup_failed": ${cleanup_failed},
     "context_cleanup_warning": ${context_cleanup_warning},
+    "openstack_scan_status": "${scan_status}",
+    "openstack_scan_errors": ${scan_errors},
     "rgw_scan_status": "${RGW_SCAN_STATUS}",
     "rgw_scan_errors": ${RGW_SCAN_ERRORS},
     "rgw_orphaned_users": ${RGW_ORPHANED_USERS},
@@ -231,7 +261,7 @@ EOF
 
     log "Cleanup metrics written to ${CLEANUP_METRICS_FILE}"
 
-    if [[ "${cleanup_failed}" -eq 1 || "${RGW_SCAN_STATUS}" == "error" ]]; then
+    if [[ "${cleanup_failed}" -eq 1 || "${scan_status}" == "error" || "${RGW_SCAN_STATUS}" == "error" ]]; then
         return 1
     fi
 }

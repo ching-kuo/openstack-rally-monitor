@@ -22,31 +22,9 @@ UPTIME_WINDOW_DAYS="${UPTIME_WINDOW_DAYS:-30}"
 RUN_LOG="${RUN_DIR}/run.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# The monitored service set is configurable via RALLY_SERVICES (comma-separated).
-# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, then
-# drop any token not matching the ^[a-z0-9_-]+$ allowlist, order preserved);
-# the same parsing rules are mirrored in api_health_check.py's
-# parse_rally_services and health_check.sh's all-down jq fallback -- keep the
-# three in sync. The allowlist is path-traversal hardening: service names index
-# rally/scenarios/<name>.yaml and runs/<ts>/<name>.html, so a token like
-# "../etc" must never survive. A configured service with no
-# rally/scenarios/<name>.yaml still logs a SKIP in run_service_tests (the
-# operator's signal for a typo'd name); build_summary then reports it "skipped".
-DEFAULT_RALLY_SERVICES="keystone,nova,neutron,glance,cinder,swift"
-
-parse_rally_services() {
-    # Echo the normalized service list, one per line, preserving operator order.
-    # Reads $1 (the raw RALLY_SERVICES string). Falls back to the default when
-    # the input is unset/empty or normalizes to nothing (including when every
-    # token is dropped by the allowlist).
-    local raw="${1:-}"
-    [[ -n "${raw}" ]] || raw="${DEFAULT_RALLY_SERVICES}"
-    local out
-    out=$(printf '%s' "${raw}" | tr ',' '\n' | tr '[:upper:]' '[:lower:]' \
-        | awk '{ gsub(/[[:space:]]/, ""); if ($0 ~ /^[a-z0-9_-]+$/ && !seen[$0]++) print }')
-    [[ -n "${out}" ]] || out=$(printf '%s' "${DEFAULT_RALLY_SERVICES}" | tr ',' '\n')
-    printf '%s\n' "${out}"
-}
+# RALLY_SERVICES parsing (parse_rally_services) and the shared OpenStack
+# listing helpers live in os_helpers.sh.
+source "${SCRIPT_DIR}/os_helpers.sh"
 
 mapfile -t SERVICES < <(parse_rally_services "${RALLY_SERVICES:-}")
 
@@ -86,47 +64,103 @@ log_environment() {
     log "-------------------"
 }
 
-list_rally_context_project_ids() {
-    local json
-    json=$(openstack project list -f json 2>/dev/null) || return 1
-    echo "${json}" | jq -r '.[] | select(.Name | startswith("c_rally_")) | .ID' 2>/dev/null || return 1
+# Provenance tracker (rally_project_tracker.py), one per service task: one
+# long-lived process with one openstacksdk session instead of spawning
+# `openstack project list` (a fresh interpreter + token) every 5s; see the
+# script's docstring for the snapshot / poll / final-poll / ledger semantics.
+#
+# TRACKER_PID is set only while the tracker is our running child: it is
+# cleared as soon as the tracker is known to have exited (and been reaped),
+# and _tracker_running checks bash's own job table rather than `kill -0`, so
+# a recycled PID is never signalled. The tracker reports readiness on a FIFO
+# held open read-write here (so its write never blocks and our `read -t`
+# waits without forking a `sleep` every 100ms).
+TRACKER_PID=""
+TRACKER_READY_FD=""
+
+_tracker_running() {
+    [[ -n "${TRACKER_PID}" ]] || return 1
+    local pid
+    while IFS= read -r pid; do
+        [[ "${pid}" == "${TRACKER_PID}" ]] && return 0
+    done < <(jobs -rp)
+    return 1
 }
 
-append_rally_project_id() {
-    local project_id="$1" service="$2"
-    printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${project_id}" "${service}" >> "${RALLY_PROJECT_LEDGER_FILE}"
+# Reap an exited tracker and forget its PID. Prints nothing; sets
+# TRACKER_EXIT_CODE.
+_tracker_reap() {
+    TRACKER_EXIT_CODE=0
+    if [[ -n "${TRACKER_PID}" ]]; then
+        wait "${TRACKER_PID}" 2>/dev/null || TRACKER_EXIT_CODE=$?
+    fi
+    TRACKER_PID=""
 }
 
-record_new_rally_context_projects() {
-    local service="$1" seen_file="$2"
-    local current_ids project_id
-    current_ids=$(list_rally_context_project_ids) || return 1
+# Start the tracker and wait until it has snapshotted the pre-existing
+# c_rally_* projects, so the snapshot never races the task it brackets.
+start_project_tracker() {
+    local service="$1" ready_fifo="$2" line
+    TRACKER_PID=""
+    if ! mkfifo "${ready_fifo}" || ! exec {TRACKER_READY_FD}<>"${ready_fifo}"; then
+        TRACKER_READY_FD=""
+        log "  ${service}: WARNING - cannot create the tracker ready FIFO; RGW provenance is not recorded for this task"
+        return 0
+    fi
+    # Tracker stderr (tracebacks) goes to the run log; its own messages are
+    # written by its log() to stdout and the run log, like ours. (--run-log is
+    # only a path argument; the tracker appends to it, as does 2>>.)
+    # shellcheck disable=SC2094
+    python3 "${SCRIPT_DIR}/rally_project_tracker.py" \
+        --service "${service}" --ledger "${RALLY_PROJECT_LEDGER_FILE}" \
+        --ready-file "${ready_fifo}" --run-log "${RUN_LOG}" 2>>"${RUN_LOG}" &
+    TRACKER_PID=$!
 
-    while IFS= read -r project_id; do
-        [[ -n "${project_id}" ]] || continue
-        if ! grep -Fxq "${project_id}" "${seen_file}"; then
-            printf '%s\n' "${project_id}" >> "${seen_file}"
-            append_rally_project_id "${project_id}" "${service}"
-            log "  ${service}: recorded Rally project ${project_id}"
+    # Bounded: the snapshot makes at most 3 attempts of one 30s-timeout
+    # request (~100s worst case), so 120s only trips on a pathological
+    # Keystone. Starting the task anyway keeps the smoke test running; the
+    # cost is possibly-incomplete provenance, logged.
+    local seconds=0
+    while ! read -r -t 1 -u "${TRACKER_READY_FD}" line; do
+        if ! _tracker_running; then
+            _tracker_reap
+            log "  ${service}: WARNING - provenance tracker exited (code ${TRACKER_EXIT_CODE}) before its snapshot; RGW provenance is not recorded for this task (see ${RUN_LOG})"
+            return 0
         fi
-    done <<< "${current_ids}"
-}
-
-track_rally_context_projects() {
-    local service="$1" task_pid="$2" seen_file="$3"
-    local warned=0
-
-    while kill -0 "${task_pid}" 2>/dev/null; do
-        if ! record_new_rally_context_projects "${service}" "${seen_file}"; then
-            if [[ "${warned}" -eq 0 ]]; then
-                log "  ${service}: WARNING - failed to poll Rally context projects; RGW provenance may be incomplete for this task"
-                warned=1
-            fi
+        seconds=$((seconds + 1))
+        if (( seconds >= 120 )); then
+            log "  ${service}: WARNING - provenance tracker not ready after 120s; starting task anyway"
+            return 0
         fi
-        sleep 5
     done
+}
 
-    record_new_rally_context_projects "${service}" "${seen_file}" || true
+# Signal the tracker that the task exited; it takes one final poll (one
+# request, 30s timeout) and exits. Bounded at 60s, then SIGKILL, so a wedged
+# tracker can never hang the run. A no-op when the tracker already exited.
+stop_project_tracker() {
+    local line
+    if _tracker_running; then
+        kill -TERM "${TRACKER_PID}" 2>/dev/null || true
+        local ticks=0
+        while _tracker_running; do
+            if (( ticks >= 300 )); then
+                log "  WARNING - provenance tracker did not exit 60s after SIGTERM; killing it"
+                kill -KILL "${TRACKER_PID}" 2>/dev/null || true
+                break
+            fi
+            # A 0.2s wait without forking a sleep: nothing more arrives on the
+            # FIFO. TRACKER_READY_FD is always open here -- the tracker is
+            # only started after the FIFO is opened.
+            read -r -t 0.2 -u "${TRACKER_READY_FD}" line || true
+            ticks=$((ticks + 1))
+        done
+    fi
+    _tracker_reap
+    if [[ -n "${TRACKER_READY_FD}" ]]; then
+        exec {TRACKER_READY_FD}>&-
+        TRACKER_READY_FD=""
+    fi
 }
 
 # --------------------------------------------------------------------------
@@ -226,12 +260,9 @@ run_service_tests() {
     # list` in rally 5.0.1 (rally/cli/commands/task.py: --tag on start line 182,
     # on list line 558; --tag composes with --uuids-only).
     local task_tag="run-${TIMESTAMP}-${service}"
-    local tracker_seen_file
-    tracker_seen_file=$(mktemp)
-    if ! list_rally_context_project_ids > "${tracker_seen_file}"; then
-        : > "${tracker_seen_file}"
-        log "  ${service}: WARNING - failed to snapshot pre-run Rally projects"
-    fi
+    local tracker_dir
+    tracker_dir=$(mktemp -d)
+    start_project_tracker "${service}" "${tracker_dir}/ready.fifo"
 
     if [[ "${RALLY_DEBUG:-false}" == "true" ]]; then
         log "  DEBUG mode enabled. Full logs saving to ${log_file}"
@@ -243,12 +274,10 @@ run_service_tests() {
     fi
 
     local task_pid=$!
-    track_rally_context_projects "${service}" "${task_pid}" "${tracker_seen_file}" &
-    local tracker_pid=$!
     local task_rc=0
     wait "${task_pid}" || task_rc=$?
-    wait "${tracker_pid}" || true
-    rm -f "${tracker_seen_file}"
+    stop_project_tracker
+    rm -rf "${tracker_dir}"
 
     if [[ "${task_rc}" -ne 0 ]]; then
         log "  ${service}: Rally task command exited with code ${task_rc}"
@@ -333,92 +362,19 @@ check_cleanup() {
 }
 
 # --------------------------------------------------------------------------
-# 7. Auto-purge rally-owned RGW orphans
-# --------------------------------------------------------------------------
-auto_purge_rgw() {
-    rgw_available || return 0
-
-    log "Auto-purging rally-owned RGW orphans..."
-
-    local orphans_file
-    orphans_file=$(mktemp)
-    if ! rgw_find_orphaned_users > "${orphans_file}"; then
-        log "WARNING: RGW orphan scan failed; skipping auto-purge"
-        rm -f "${orphans_file}"
-        return 0
-    fi
-
-    if [[ "${RGW_LAST_FIND_ERRORS}" -gt 0 ]]; then
-        log "WARNING: RGW scan had ${RGW_LAST_FIND_ERRORS} error(s); skipping auto-purge (fail-closed)"
-        rm -f "${orphans_file}"
-        return 0
-    fi
-
-    local purged=0 failed=0 skipped=0
-    local uid ownership bucket_json bucket_name bucket_ok
-    while IFS= read -r uid; do
-        [[ -n "${uid}" ]] || continue
-        ownership=$(rgw_classify_owner "${uid}")
-
-        if [[ "${ownership}" != "rally_owned" ]]; then
-            skipped=$((skipped + 1))
-            continue
-        fi
-
-        if ! bucket_json=$(rgw_list_user_buckets "${uid}"); then
-            log "  RGW user ${uid}: bucket listing failed; skipping"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        local bucket_names
-        if ! bucket_names=$(echo "${bucket_json}" | jq -r '.[].name // empty' 2>/dev/null); then
-            log "  RGW user ${uid}: bucket JSON parse failed; skipping"
-            failed=$((failed + 1))
-            continue
-        fi
-
-        bucket_ok=1
-        while IFS= read -r bucket_name; do
-            [[ -n "${bucket_name}" ]] || continue
-            if rgw_delete_bucket "${bucket_name}"; then
-                log "  RGW bucket ${bucket_name}: deleted"
-            else
-                log "  RGW bucket ${bucket_name}: deletion FAILED"
-                bucket_ok=0
-                failed=$((failed + 1))
-            fi
-        done <<< "${bucket_names}"
-
-        if [[ "${bucket_ok}" -eq 0 ]]; then
-            log "  RGW user ${uid}: skipped (bucket deletion incomplete)"
-            continue
-        fi
-
-        if rgw_delete_user "${uid}"; then
-            log "  RGW user ${uid}: deleted"
-            purged=$((purged + 1))
-        else
-            log "  RGW user ${uid}: deletion FAILED"
-            failed=$((failed + 1))
-        fi
-    done < "${orphans_file}"
-
-    rm -f "${orphans_file}"
-
-    log "RGW auto-purge complete: purged=${purged} failed=${failed} skipped_unknown=${skipped}"
-}
-
-# --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
     log "=========================================="
     log "Rally Test Run: ${TIMESTAMP}"
     log "=========================================="
-    LOCKFILE="/rally/logs/rally-run.lock"
-    exec 200>"${LOCKFILE}"
-    flock -n 200 || { log "Another run is already in progress, exiting."; exit 0; }
+    # RALLY_RUN_LOCK_FILE (os_helpers.sh) is shared with purge_orphans.sh
+    # --confirm, which holds it to refuse deleting while a run is live.
+    exec 200>"${RALLY_RUN_LOCK_FILE}"
+    flock -n 200 || {
+        log "SKIPPED: ${RALLY_RUN_LOCK_FILE} is held by another test run or by purge_orphans.sh --confirm; this run did not execute."
+        exit 0
+    }
     RUN_START_EPOCH=$(date +%s)
 
     # We now own the flock. Mark the run in progress, THEN install the EXIT trap
@@ -481,6 +437,7 @@ main() {
 
     # Auto-purge rally-owned RGW orphans before writing cleanup metrics so
     # dashboard/Prometheus state reflects the post-purge resource state.
+    # (auto_purge_rgw lives in rgw_helpers.sh.)
     auto_purge_rgw
 
     # Check cleanup

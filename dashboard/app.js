@@ -1123,8 +1123,12 @@ function renderCleanup(cleanup) {
   const details = cleanup.details || {};
   const hasFailed = cleanup.cleanup_failed === 1;
 
-  badge.textContent = hasFailed ? "ISSUES" : "OK";
-  badge.className = `section-badge ${hasFailed ? "error" : "ok"}`;
+  // A failed listing reads as 0 orphans for its type, so a blind scan must not
+  // show "OK" (cleanup_monitor.sh openstack_scan_status).
+  const scanError = cleanup.openstack_scan_status === "error";
+
+  badge.textContent = hasFailed ? "ISSUES" : scanError ? "SCAN ERROR" : "OK";
+  badge.className = `section-badge ${hasFailed || scanError ? "error" : "ok"}`;
 
   const resourceTypes = [
     { key: "servers", label: "Servers", icon: "🖥️" },

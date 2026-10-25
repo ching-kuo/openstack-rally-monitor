@@ -30,10 +30,13 @@ def make_summary(timestamp="20240101T120000Z", services=None, run_duration=10.0)
     return {"timestamp": timestamp, "services": services, "run_duration_seconds": run_duration}
 
 
-def make_cleanup(s_nova=0, c_nova=0, rgw_status="skipped", rgw_users=0, rgw_buckets=0, rgw_unknown=0):
+def make_cleanup(s_nova=0, c_nova=0, rgw_status="skipped", rgw_users=0, rgw_buckets=0, rgw_unknown=0,
+                 openstack_status="ok"):
     """Build a minimal cleanup_metrics dict."""
     return {
         "timestamp": "20240101T120000Z",
+        "openstack_scan_status": openstack_status,
+        "openstack_scan_errors": 0 if openstack_status == "ok" else 1,
         "cleanup_failed": 1 if s_nova > 0 else 0,
         "context_cleanup_warning": 1 if c_nova > 0 else 0,
         "rgw_scan_status": rgw_status,

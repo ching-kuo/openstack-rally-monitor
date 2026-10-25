@@ -128,3 +128,19 @@ tests:
         exp_samples:
           - labels: 'ALERTS{alertname="RallyApiHealthStale",alertstate="firing",job="rally",instance="a:9101",severity="warning",team="infra"}'
             value: 1
+  # Cleanup scan blindness: fires after for: 15m on 0, never while ok.
+  - interval: 5m
+    input_series:
+      - series: 'rally_cleanup_scan_ok{job="rally",instance="a:9101"}'
+        values: '0+0x10'
+      - series: 'rally_cleanup_scan_ok{job="rally",instance="b:9101"}'
+        values: '1+0x10'
+    promql_expr_test:
+      - expr: ALERTS{alertname="RallyCleanupScanDegraded",alertstate="firing"}
+        eval_time: 10m
+        exp_samples: []
+      - expr: ALERTS{alertname="RallyCleanupScanDegraded",alertstate="firing"}
+        eval_time: 20m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RallyCleanupScanDegraded",alertstate="firing",job="rally",instance="a:9101",severity="warning",team="infra"}'
+            value: 1
