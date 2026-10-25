@@ -1,3 +1,10 @@
--r requirements.txt
+# Test deps for the pytest suites (CI and local). Lists the exporter runtime
+# packages directly rather than `-r requirements.txt`: that file constrains
+# against the hashed image lock, which would force --require-hashes mode, and
+# pytest is not in that lock. CI pins these to the lock's versions with a
+# hash-stripped copy of it as a constraints file (build-push.yml).
+flask
+prometheus-client
+gunicorn
 # Pinned to an exact version so CI runs the suites on a known pytest release.
-pytest==9.0.3
+pytest==9.1.1

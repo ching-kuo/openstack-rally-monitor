@@ -1,0 +1,6 @@
+# CI-only: the pip-audit release the "audit" job in build-push.yml runs.
+# requirements-audit.txt is the hashed pip-compile lock generated from this
+# file (same command and environment as docker/requirements.in describes, run
+# from .github/ci with requirements-audit.in/.txt); the job installs it with
+# --require-hashes. Dependabot's /.github/ci pip job bumps it.
+pip-audit==2.10.1

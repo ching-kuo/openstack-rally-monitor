@@ -1,32 +1,70 @@
 # Dependabot keeps the now-pinned dependencies current as reviewable PRs that
-# run the CI test job (build-push.yml), instead of versions drifting silently
-# on rebuilds. See docker/requirements-rally.txt for why the OpenStack
+# run the CI test and audit jobs (build-push.yml), instead of versions drifting
+# silently on rebuilds. See docker/requirements.in for why the OpenStack
 # toolchain is pinned in the first place.
+#
+# The pip and github-actions ecosystems wait out a 14-day cooldown after a
+# release before proposing it, so a freshly published (possibly compromised or
+# broken) version never lands the day it ships. Dependabot security updates
+# (pip advisories) are not delayed by the cooldown.
 version: 2
 updates:
-  # Exporter runtime + test deps (flask, prometheus-client, gunicorn, pytest).
-  - package-ecosystem: "pip"
-    directory: "/exporter"
-    schedule:
-      interval: "weekly"
-
-  # OpenStack toolchain pins (rally-openstack, rally, python-openstackclient)
-  # in docker/requirements-rally.txt. patch_rally.py patches Rally internals,
-  # so these bumps must land as reviewed PRs, never as a transparent rebuild.
+  # Image Python deps. The direct pins (flask, prometheus-client, gunicorn,
+  # rally-openstack, rally, python-openstackclient) live in
+  # docker/requirements.in; docker/requirements.txt is the hashed pip-compile
+  # lockfile generated from it, which the Dockerfile installs with
+  # --require-hashes. Keeping the pins in the .in file is what lets this job
+  # regenerate the lock in the same PR as the bump: Dependabot only re-runs
+  # pip-compile for requirements declared in an .in file. Not yet confirmed
+  # on GitHub; exporter/test_requirements_lock.py fails a PR whose pins and
+  # lock disagree.
+  #
+  # patch_rally.py patches Rally internals, so OpenStack toolchain bumps must
+  # land as reviewed PRs, never as a transparent rebuild.
   - package-ecosystem: "pip"
     directory: "/docker"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 14
 
-  # Base image (python:3.13-slim) in docker/Dockerfile.
+  # Test-only pin (pytest) in exporter/requirements-test.txt. The exporter's
+  # runtime packages are unpinned there and in exporter/requirements.txt (their
+  # versions come from the image lock), so this job is limited to pytest.
+  - package-ecosystem: "pip"
+    directory: "/exporter"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 14
+    allow:
+      - dependency-name: "pytest"
+
+  # pip-audit for the CI audit job: pinned in requirements-audit.in, with the
+  # hashed pip-compile lock requirements-audit.txt. Same .in layout as /docker,
+  # so the lock should be regenerated with each bump (also unconfirmed).
+  - package-ecosystem: "pip"
+    directory: "/.github/ci"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 14
+
+  # Base image (python:3.13-slim, digest-pinned) in docker/Dockerfile. No
+  # cooldown: Dependabot raises no advisory-based security updates for
+  # container images, so these digest bumps are how Debian and CPython
+  # security rebuilds reach the image, and delaying them two weeks would hold
+  # back patches. The digest still lands as a reviewed, CI-gated PR.
   - package-ecosystem: "docker"
     directory: "/docker"
     schedule:
       interval: "weekly"
 
-  # GitHub Actions pinned in .github/workflows/ (checkout, setup-python,
-  # docker/* actions).
+  # GitHub Actions in .github/workflows/, pinned to full commit SHAs with a
+  # "# vX.Y.Z" comment; Dependabot updates the SHA and the comment together.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 14

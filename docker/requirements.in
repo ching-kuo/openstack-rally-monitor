@@ -1,0 +1,54 @@
+# The image's direct Python dependencies: the single source of their exact (==)
+# pins. docker/requirements.txt is the pip-compile lockfile generated from this
+# file, with every transitive dependency pinned and SHA-256-hashed, and the
+# Dockerfile installs only that lock, with --require-hashes.
+#
+# The pins live here, in a pip-compile .in file, because Dependabot only
+# regenerates a pip-compile lock when the requirement it bumps is in the .in
+# file (a pin in a plain requirements file gets a plain in-place bump and a
+# stale lock). This layout is what should let the /docker Dependabot job bump
+# a pin and regenerate the lock in one PR; that is not yet confirmed on GitHub,
+# and exporter/test_requirements_lock.py fails any PR whose pins and lock
+# disagree.
+#
+# Regenerate the lock by hand after editing a pin. Run it on Linux under
+# Python 3.13 so environment markers resolve as they do in the image (amd64 and
+# arm64 resolve identically today), from the repo root:
+#   container run --rm -v "$PWD:/src" -w /src/docker python:3.13-slim sh -c \
+#     'pip install -q pip==26.1.1 pip-tools==7.5.3 click==8.2.1 &&
+#      pip-compile --generate-hashes --allow-unsafe --strip-extras \
+#        --output-file=requirements.txt requirements.in'
+# (docker run works the same.) click is held at 8.2.1 because newer click makes
+# pip-tools 7.5.3 write a bogus --no-index flag into the header. To keep the
+# two-week release cooldown for transitive packages, add
+# -e PIP_UPLOADED_PRIOR_TO=<UTC date 14 days ago> to the container run; it is an
+# environment input, so it stays out of the recorded header. A security fix
+# that CI's pip-audit step demands overrides the cooldown: raise just that
+# package to its minimum fixed version with -P <name>==<version> (the initial
+# lock did this for certifi, filelock, setuptools and virtualenv).
+
+# Exporter runtime (exporter/rally_exporter.py, served by gunicorn).
+# exporter/requirements.txt names these for local dev and takes their versions
+# from the lock, so this is the only place they are pinned.
+flask==3.1.3
+prometheus-client==0.26.0
+gunicorn==26.2.0
+
+# OpenStack toolchain. Why pinned (and not floating like a typical
+# `pip install rally-openstack`):
+#   * scripts/patch_rally.py monkey-patches Rally's internal password-generation
+#     policy at build time. It targets specific module internals, so a silent
+#     upstream version bump can move the code it patches out from under it.
+#   * The scenario YAMLs in rally/scenarios/ reference plugin names that
+#     upstream rally-openstack has renamed/removed across releases.
+#   * Two builds of the same commit must produce the same image.
+# Version drift must therefore be deliberate: a reviewable PR that runs the
+# CI test and audit jobs, never a change on rebuild.
+#
+# rally is an explicit transitive contract of rally-openstack 3.0.0
+# (Requires-Dist: rally>=4.1.0); pinned here so patch_rally.py and the scenario
+# plugin names stay matched to a known Rally release. It stays at 5.0.1 because
+# 5.1 rewrites the CLI on typer, and run_tests.sh drives and parses that CLI.
+rally-openstack==3.0.0
+rally==5.0.1
+python-openstackclient==10.1.0

@@ -7,9 +7,17 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+  # Weekly vulnerability re-scan of the unchanged lockfiles, so an advisory
+  # published after the last push still fails a run. Scheduled runs execute
+  # only the audit job: test and build-push skip, so nothing is built or pushed.
+  schedule:
+    - cron: "23 5 * * 1"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Push and workflow_dispatch share one group per ref (both can publish
+  # `latest`, so an older build must not finish after a newer one); only the
+  # audit-only scheduled run gets its own group, so it never cancels a build.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'schedule' && '-schedule' || '' }}
   cancel-in-progress: true
 
 env:
@@ -20,51 +28,120 @@ jobs:
   # Run all test suites and shell static analysis before building.
   # The script-driven suites shell out to bash + jq; both ship on ubuntu-latest.
   # Python is pinned to 3.13 to match the python:3.13-slim runtime image.
+  #
+  # Actions are pinned to full commit SHAs (the tag is in the trailing comment)
+  # so a moved or compromised tag cannot change what runs; Dependabot's
+  # github-actions updates bump the SHA and the comment together.
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # promtool runs exporter/test_alert_rules.py; CI=true there turns a
+      # missing promtool into a failure instead of a skip. Bump by hand: pick a
+      # Prometheus release at least two weeks old and copy the linux-amd64
+      # tarball's line from that release's sha256sums.txt.
+      PROMETHEUS_VERSION: "3.15.0"
+      PROMETHEUS_SHA256: "2a542df32eac02ee17b9d844fb2aa1de00dafa5476579ba8a3ba862e9d572ea0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Lint shell scripts
         run: shellcheck -x -P scripts scripts/*.sh
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
+      # Constrained to the image lock so the suites run against the same
+      # transitive versions the image ships. Hashes are stripped from the
+      # constraints because pytest and its deps are not in that lock, and any
+      # hash in a constraints file would switch pip into --require-hashes mode.
       - name: Install test dependencies
-        run: pip install -r exporter/requirements-test.txt
+        run: |
+          grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*==' docker/requirements.txt \
+            | sed 's/ *\\$//' > "${RUNNER_TEMP}/image-constraints.txt"
+          pip install -r exporter/requirements-test.txt -c "${RUNNER_TEMP}/image-constraints.txt"
+
+      - name: Install promtool
+        run: |
+          dir="prometheus-${PROMETHEUS_VERSION}.linux-amd64"
+          curl -fsSLo "${RUNNER_TEMP}/${dir}.tar.gz" \
+            "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${dir}.tar.gz"
+          echo "${PROMETHEUS_SHA256}  ${RUNNER_TEMP}/${dir}.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${dir}.tar.gz" -C "${RUNNER_TEMP}" "${dir}/promtool"
+          echo "${RUNNER_TEMP}/${dir}" >> "${GITHUB_PATH}"
 
       - name: Run tests
         run: python -m pytest exporter/ dashboard/ scripts/
 
-  build-push:
+  # Scan the image's hashed lockfile (every direct and transitive package the
+  # Dockerfile installs), and the hashed lock pip-audit itself is installed
+  # from, for known vulnerabilities. Also runs weekly on its own (schedule).
+  # --disable-pip audits the pinned set as written without resolving or
+  # installing anything, so the only network dependency is the PyPI advisory
+  # lookup. pip-audit has no
+  # severity filter (PyPI advisories carry none): any known vulnerability with
+  # or without a fix fails the job; raise the package to its minimum fixed
+  # version per docker/requirements.in, or, for a reviewed non-applicable
+  # advisory, add --ignore-vuln <ID> here with a comment saying why.
+  audit:
     runs-on: ubuntu-latest
-    needs: test
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install pip-audit
+        run: pip install --require-hashes -r .github/ci/requirements-audit.txt
+
+      # One invocation per lock: the two share packages, and pip-audit rejects
+      # duplicate requirements once their pinned versions diverge.
+      - name: Audit image dependencies
+        run: pip-audit --disable-pip --require-hashes --strict -r docker/requirements.txt
+
+      - name: Audit CI-tool dependencies
+        run: pip-audit --disable-pip --require-hashes --strict -r .github/ci/requirements-audit.txt
+
+  build-push:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [test, audit]
     permissions:
       contents: read
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Authentication is skipped for pull requests from forks, which cannot
       # access secrets and must not push. PRs build only, to validate the image.
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -72,7 +149,7 @@ jobs:
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -84,7 +161,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/Dockerfile

@@ -1,4 +1,7 @@
-FROM python:3.13-slim
+# Base image pinned by multi-arch index digest (tag kept for readability) so a
+# rebuild of the same commit cannot silently pick up a re-pushed tag.
+# Dependabot's docker ecosystem bumps the digest as a reviewable PR.
+FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
 
 LABEL maintainer="infra-labs"
 LABEL description="OpenStack Rally testing and monitoring tool"
@@ -21,21 +24,28 @@ RUN mkdir -p /rally/data /rally/config /results /exporter /scripts /dashboard
 RUN useradd -r -u 1500 -s /bin/false -d /home/rally -g 0 rally
 
 # Install system deps and Python packages in a single layer.
-# Build-only packages (gcc, libffi-dev, libssl-dev, python3-dev) are removed
-# after pip install so they don't persist in the final image.
-# Both requirements files pin exact versions (==) so the image is reproducible
-# per-commit; requirements-rally.txt explains why the OpenStack toolchain in
-# particular must stay pinned (patch_rally.py + scenario plugin names).
-COPY exporter/requirements.txt /tmp/requirements.txt
-COPY docker/requirements-rally.txt /tmp/requirements-rally.txt
+# docker/requirements.txt is the pip-compile lockfile generated from
+# docker/requirements.in, which holds the image's direct pins.
+# Every direct and transitive package is pinned and SHA-256-hashed, and
+# --require-hashes makes pip refuse any unpinned package or any downloaded
+# file whose hash is not in the lock. Every package is installed from a wheel
+# (--only-binary=:all:, so no C toolchain is needed) except murano-pkg-check,
+# whose only wheel is py2-only: it is built from its hashed sdist with
+# --no-build-isolation, so its build backend (pbr + setuptools) comes from the
+# same hashed lock, installed first, instead of an unhashed isolated download.
+# docker/requirements.in explains why the OpenStack toolchain in particular
+# must stay pinned (patch_rally.py + scenario plugin names).
+COPY docker/requirements.txt /tmp/requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc libffi-dev libssl-dev python3-dev \
         curl jq cron bash logrotate && \
-    pip install --no-cache-dir -r /tmp/requirements.txt && \
-    pip install --no-cache-dir -r /tmp/requirements-rally.txt && \
-    apt-get remove --purge -y gcc libffi-dev libssl-dev python3-dev && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+    awk '/^[^ #]/ { keep = ($0 ~ /^(pbr|setuptools)==/) } keep' \
+        /tmp/requirements.txt > /tmp/requirements-build.txt && \
+    pip install --no-cache-dir --require-hashes --only-binary=:all: \
+        -r /tmp/requirements-build.txt && \
+    pip install --no-cache-dir --require-hashes --only-binary=:all: \
+        --no-binary=murano-pkg-check --no-build-isolation \
+        -r /tmp/requirements.txt && \
+    rm -rf /var/lib/apt/lists/* /tmp/requirements.txt /tmp/requirements-build.txt
 
 # Copy application files
 COPY rally/ /rally/config/
@@ -56,13 +66,17 @@ RUN chmod 0644 /etc/logrotate.d/rally-monitor
 # Inter variable font — SIL Open Font License 1.1 (redistribution permitted)
 # Chart.js — MIT License
 # SHA-256 hashes pinned at vendoring time; verified after download to detect supply-chain tampering.
+# Dependabot cannot see these two pins: bump them by hand (check npm for a
+# release at least two weeks old, read the Chart.js changelog against the line
+# and bar charts in dashboard/app.js and dashboard/report.js, and recompute the
+# hash from the downloaded file, cross-checked against the npm tarball).
 RUN mkdir -p /dashboard/vendor && \
-    curl -fsSL "https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.1.1/files/inter-latin-wght-normal.woff2" \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/@fontsource-variable/inter@5.3.0/files/inter-latin-wght-normal.woff2" \
         -o /dashboard/vendor/inter-variable.woff2 && \
-    echo "f052ee44c3728dfd23aba8a4567150bc314d23903026fbb6ad089422c2df56af  /dashboard/vendor/inter-variable.woff2" | sha256sum -c - && \
-    curl -fsSL "https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" \
+    echo "3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62  /dashboard/vendor/inter-variable.woff2" | sha256sum -c - && \
+    curl -fsSL "https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js" \
         -o /dashboard/vendor/chart.umd.min.js && \
-    echo "206b6e8bb00fc7bba2c7ee80ca41db3e9e05ba7be0aa35abeba9cfd5357f5d0e  /dashboard/vendor/chart.umd.min.js" | sha256sum -c -
+    echo "48444a82d4edcb5bec0f1965faacdde18d9c17db3063d042abada2f705c9f54a  /dashboard/vendor/chart.umd.min.js" | sha256sum -c -
 
 # Ownership: code and config stay root:root and not group/world-writable.
 # root runs entrypoint.sh (and sources entrypoint_config.sh/os_helpers.sh) on
