@@ -7,13 +7,12 @@ flock is absent on macOS; the lock is not under test).
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-BASH = shutil.which("bash") or "/bin/bash"
+from shell_testlib import BASE_PATH, BASH
+
 SCRIPT = Path(__file__).resolve().parent / "cleanup_monitor.sh"
-BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 
 
 def _shim_case(out: str) -> str:

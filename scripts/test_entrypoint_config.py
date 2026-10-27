@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from shell_testlib import BASE_PATH, BASH, write_shim
 
-BASH = shutil.which("bash") or "/bin/bash"
 SCRIPTS = Path(__file__).resolve().parent
 CONFIG = SCRIPTS / "entrypoint_config.sh"
 ENTRYPOINT = SCRIPTS / "entrypoint.sh"
@@ -124,17 +125,6 @@ def test_normalize_port_rejects_invalid_values(value: str) -> None:
     assert "must be a decimal integer from 1 through 65535" in result.stderr
 
 
-def test_entrypoint_validates_before_initialization() -> None:
-    source = ENTRYPOINT.read_text()
-    initialization = source.index("# Initialize")
-
-    assert source.index('source "${SCRIPT_DIR}/entrypoint_config.sh"') < initialization
-    assert source.index('SCHEDULE_INTERVAL=$(normalize_interval') < initialization
-    assert source.index('HEALTH_CHECK_INTERVAL=$(normalize_interval') < initialization
-    assert source.index('EXPORTER_PORT=$(normalize_port') < initialization
-    assert source.index('DASHBOARD_PORT=$(normalize_port') < initialization
-
-
 @pytest.mark.parametrize(("raw", "expected"), [("300", "300\n"), ("1", "1\n"), ("3600", "3600\n"), ("0090", "90\n")])
 def test_normalize_timeout_accepts_seconds(raw: str, expected: str) -> None:
     result = run_function("normalize_timeout", raw)
@@ -168,7 +158,7 @@ def run_snippet(snippet: str, env: dict[str, str]) -> subprocess.CompletedProces
         [BASH, "-c", f'source "$1"; {snippet}', "entrypoint-config-test", str(CONFIG)],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", **env},
+        env={"PATH": BASE_PATH, **env},
         check=False,
     )
 
@@ -222,15 +212,91 @@ def test_check_os_credentials_warns_on_env_sample_placeholders_without_leaking()
     assert "changeme" not in result.stderr
 
 
-def test_entrypoint_checks_credentials_and_days_before_initialization() -> None:
-    source = ENTRYPOINT.read_text()
-    initialization = source.index("# Initialize")
-    assert source.index("check_os_credentials") < initialization
-    for name, fn in (("UPTIME_WINDOW_DAYS", "normalize_days"),
-                     ("RALLY_RESULTS_RETENTION_DAYS", "normalize_retention_days"),
-                     ("PROVENANCE_RETENTION_DAYS", "normalize_provenance_days")):
-        # or_default: a day count is never fatal (warn + default/clamp).
-        assert source.index(f'{name}=$(or_default {fn}') < initialization
+# The external commands entrypoint.sh uses to change the filesystem or start a
+# process. Each is shimmed to record "<name> <args>" and do nothing, so a call
+# to one of them that ever moves ahead of `su` is recorded instead of acting.
+# su fails, so the script stops at its first side effect. The shims cannot see
+# shell redirections (`> /rally/rally_env.tmp`, `> /etc/cron.d/...`); the static
+# check below pins those after the first su instead.
+SIDE_EFFECT_COMMANDS = ("ln", "mkdir", "chmod", "chown", "touch", "rm", "mv", "cp",
+                        "install", "cron", "crontab", "gunicorn", "python3", "tail",
+                        "logrotate", "id", "stat")
+FIRST_SIDE_EFFECT = "su -s /bin/bash rally -c rally db recreate"
+
+
+def run_entrypoint(tmp_path: Path, **overrides: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run entrypoint.sh with every side-effecting command shimmed. Returns
+    the process and the recorded calls, in order."""
+    bin_dir = tmp_path / "bin"
+    calls = tmp_path / "calls.log"
+    record = f'echo "${{0##*/}} $*" >> "{calls}"\n'
+    for name in SIDE_EFFECT_COMMANDS:
+        write_shim(bin_dir, name, record + "exit 0\n")
+    write_shim(bin_dir, "su", record + "exit 1\n")
+    env = {
+        "PATH": f"{bin_dir}:{BASE_PATH}",
+        "RESULTS_DIR": str(tmp_path),
+        "OS_AUTH_URL": "https://keystone.example:5000/v3",
+        "OS_USERNAME": "monitor",
+        "OS_PASSWORD": "pw",
+        "OS_PROJECT_NAME": "monitoring",
+        **overrides,
+    }
+    result = subprocess.run([BASH, str(ENTRYPOINT)], env=env,
+                            capture_output=True, text=True, check=False)
+    return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_entrypoint_reaches_initialization_with_valid_config(tmp_path: Path) -> None:
+    """Positive control for the cases below: valid settings reach the first
+    side effect, and nothing else ran before it."""
+    result, calls = run_entrypoint(tmp_path)
+    assert calls == [FIRST_SIDE_EFFECT], result.stderr
+
+
+def test_entrypoint_redirect_writes_come_after_first_su() -> None:
+    """Redirections to absolute paths (rally_env, the cron file) are writes
+    the command shims cannot record; they must stay after the first `su`
+    (i.e. after validation, which the run tests above pin before that su)."""
+    lines = ENTRYPOINT.read_text().splitlines()
+    first_su = next(i for i, line in enumerate(lines) if line.startswith("su "))
+    redirects = [i for i, line in enumerate(lines)
+                 if not line.lstrip().startswith("#")
+                 and re.search(r">\s*/(?!dev/)", line)]
+    assert redirects, "expected the rally_env and /etc/cron.d writes"
+    assert any("rally_env" in lines[i] for i in redirects)
+    assert any("/etc/cron.d" in lines[i] for i in redirects)
+    assert min(redirects) > first_su
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("RALLY_SCHEDULE_INTERVAL", "4h"),
+    ("HEALTH_CHECK_INTERVAL", "0"),
+    ("HEALTH_CHECK_TIMEOUT", "3601"),
+    ("EXPORTER_PORT", "70000"),
+    ("DASHBOARD_PORT", "8080; id"),
+    ("OS_PASSWORD", ""),
+])
+def test_entrypoint_rejects_bad_config_before_any_side_effect(
+    tmp_path: Path, name: str, value: str,
+) -> None:
+    result, calls = run_entrypoint(tmp_path, **{name: value})
+    assert result.returncode != 0
+    assert calls == []  # no shimmed command ran, su included
+    assert name in result.stderr
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("UPTIME_WINDOW_DAYS", "30d"),
+    ("RALLY_RESULTS_RETENTION_DAYS", "x"),
+    ("PROVENANCE_RETENTION_DAYS", "0"),
+])
+def test_entrypoint_day_counts_warn_and_continue(tmp_path: Path, name: str, value: str) -> None:
+    """A day count is never fatal (values that ran before validation existed
+    must not crash-loop the container): warn, then initialize."""
+    result, calls = run_entrypoint(tmp_path, **{name: value})
+    assert calls == [FIRST_SIDE_EFFECT]
+    assert "WARNING" in result.stderr and name in result.stderr
 
 
 def test_retention_days_accept_zero() -> None:

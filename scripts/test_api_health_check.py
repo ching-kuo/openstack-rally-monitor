@@ -11,6 +11,8 @@ import json
 import re
 import sys
 
+import pytest
+
 import api_health_check as hc
 
 DEPENDENT = ("nova", "neutron", "glance", "cinder", "swift")
@@ -107,31 +109,38 @@ class FakeClock:
         self._t += self._step
         return cur
 
+    def advance(self, seconds):
+        """Add `seconds` inside a timed window (a slow call)."""
+        self._t += seconds
+
 
 FIXED_NOW = "2026-06-12T00:00:00Z"
 
 
-def run(conn, *, step_ms=0, warn_ms=hc.DEFAULT_WARN_MS, now=FIXED_NOW, services=None):
+@pytest.fixture
+def run(monkeypatch):
     """Drive run_checks with a deterministic clock and timestamp.
 
     ``services`` (the effective monitored set) defaults to None so run_checks
     uses its own full-known-set default; pass a tuple to exercise a configured
-    subset.
+    subset. Pass ``clock`` to share a FakeClock with a behaviour that advances
+    it; otherwise each call measures ``step_ms``.
     """
-    clock = FakeClock(step_ms)
-    # Monkeypatch time.monotonic for the duration of the call.
-    orig = hc.time.monotonic
-    hc.time.monotonic = clock
-    try:
-        return hc.run_checks(conn, now_fn=lambda: now, warn_ms=warn_ms, services=services)
-    finally:
-        hc.time.monotonic = orig
+    def _run(conn, *, step_ms=0, warn_ms=hc.DEFAULT_WARN_MS, services=None, clock=None):
+        # Patched for this call only: the rest of the test (and pytest) keep
+        # the real time.monotonic.
+        with monkeypatch.context() as patch:
+            patch.setattr(hc.time, "monotonic", clock or FakeClock(step_ms))
+            return hc.run_checks(conn, now_fn=lambda: FIXED_NOW, warn_ms=warn_ms,
+                                 services=services)
+
+    return _run
 
 
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
-def test_all_up_when_every_call_succeeds_fast():
+def test_all_up_when_every_call_succeeds_fast(run):
     doc = run(FakeConnection(), step_ms=10)
     assert doc["overall"] == "up"
     assert set(doc["services"]) == set(ALL_SERVICES)
@@ -140,7 +149,7 @@ def test_all_up_when_every_call_succeeds_fast():
         assert doc["services"][svc]["latency_ms"] == 10
 
 
-def test_document_shape_keys_types_and_iso_timestamps():
+def test_document_shape_keys_types_and_iso_timestamps(run):
     doc = run(FakeConnection(), step_ms=42)
 
     assert set(doc) == {"timestamp", "overall", "services"}
@@ -156,7 +165,7 @@ def test_document_shape_keys_types_and_iso_timestamps():
 # ---------------------------------------------------------------------------
 # Degraded
 # ---------------------------------------------------------------------------
-def test_slow_service_is_degraded_not_down():
+def test_slow_service_is_degraded_not_down(run):
     # step_ms 6000 > default warn 5000 -> every successful call is degraded.
     doc = run(FakeConnection(), step_ms=6000)
     assert doc["overall"] == "degraded"
@@ -165,30 +174,19 @@ def test_slow_service_is_degraded_not_down():
         assert doc["services"][svc]["latency_ms"] == 6000
 
 
-def test_latency_exactly_at_threshold_is_up():
+def test_latency_exactly_at_threshold_is_up(run):
     # Boundary: latency_ms == warn_ms is up (degraded only when strictly over).
     doc = run(FakeConnection(), step_ms=5000, warn_ms=5000)
     assert doc["overall"] == "up"
     assert all(s["status"] == "up" for s in doc["services"].values())
 
 
-def test_single_slow_service_makes_overall_degraded():
-    # Only neutron is slow; the rest are instant. With step_ms=0 the fast
-    # services measure 0ms; we make neutron raise-via-sleep is overkill, so we
-    # instead give neutron its own slow behaviour using a per-call clock bump.
-    # Simpler: use a connection where neutron's behaviour advances the clock.
+def test_single_slow_service_makes_overall_degraded(run):
+    # Only neutron is slow (its behaviour adds 6000ms inside the timed
+    # window); the rest measure 0ms.
     clock = FakeClock(0)
-
-    def slow_neutron():
-        clock._t += 6.0  # add 6000ms inside the timed window
-
-    conn = FakeConnection({"neutron": slow_neutron})
-    orig = hc.time.monotonic
-    hc.time.monotonic = clock
-    try:
-        doc = hc.run_checks(conn, now_fn=lambda: FIXED_NOW, warn_ms=5000)
-    finally:
-        hc.time.monotonic = orig
+    conn = FakeConnection({"neutron": lambda: clock.advance(6.0)})
+    doc = run(conn, warn_ms=5000, clock=clock)
 
     assert doc["services"]["neutron"]["status"] == "degraded"
     assert doc["services"]["nova"]["status"] == "up"
@@ -198,7 +196,7 @@ def test_single_slow_service_makes_overall_degraded():
 # ---------------------------------------------------------------------------
 # Down (per-service failure)
 # ---------------------------------------------------------------------------
-def test_failed_service_is_down_and_others_unaffected():
+def test_failed_service_is_down_and_others_unaffected(run):
     doc = run(FakeConnection({"cinder": boom}), step_ms=10)
     assert doc["services"]["cinder"]["status"] == "down"
     # The failed call still records a measured latency (>= 0).
@@ -207,20 +205,11 @@ def test_failed_service_is_down_and_others_unaffected():
     assert doc["overall"] == "down"
 
 
-def test_down_takes_precedence_over_degraded():
+def test_down_takes_precedence_over_degraded(run):
     # nova slow (degraded), glance down -> overall down (down > degraded).
     clock = FakeClock(0)
-
-    def slow_nova():
-        clock._t += 6.0
-
-    conn = FakeConnection({"nova": slow_nova, "glance": boom})
-    orig = hc.time.monotonic
-    hc.time.monotonic = clock
-    try:
-        doc = hc.run_checks(conn, now_fn=lambda: FIXED_NOW, warn_ms=5000)
-    finally:
-        hc.time.monotonic = orig
+    conn = FakeConnection({"nova": lambda: clock.advance(6.0), "glance": boom})
+    doc = run(conn, warn_ms=5000, clock=clock)
 
     assert doc["services"]["nova"]["status"] == "degraded"
     assert doc["services"]["glance"]["status"] == "down"
@@ -230,9 +219,12 @@ def test_down_takes_precedence_over_degraded():
 # ---------------------------------------------------------------------------
 # Auth failure
 # ---------------------------------------------------------------------------
-def test_auth_failure_marks_keystone_and_all_dependents_down():
-    doc = run(FakeConnection({"keystone": boom}), step_ms=10)
+def test_auth_failure_marks_everything_down_without_calling_proxies(run):
+    called = []
+    conn = FakeConnection({"keystone": boom, "nova": lambda: called.append("nova")})
+    doc = run(conn, step_ms=10)
 
+    assert called == []  # no proxy is invoked without a token
     assert doc["overall"] == "down"
     assert doc["services"]["keystone"]["status"] == "down"
     # keystone records the time spent failing to authorize (>= 0).
@@ -241,20 +233,6 @@ def test_auth_failure_marks_keystone_and_all_dependents_down():
     for svc in DEPENDENT:
         assert doc["services"][svc]["status"] == "down"
         assert doc["services"][svc]["latency_ms"] == 0
-
-
-def test_auth_failure_does_not_call_service_proxies():
-    called = {"nova": False}
-
-    def fail_auth():
-        raise RuntimeError("no token")
-
-    def mark_nova():
-        called["nova"] = True
-
-    doc = run(FakeConnection({"keystone": fail_auth, "nova": mark_nova}))
-    assert called["nova"] is False  # proxy never invoked without a token
-    assert doc["services"]["nova"]["status"] == "down"
 
 
 # ---------------------------------------------------------------------------
@@ -318,11 +296,10 @@ def test_main_honours_health_latency_warn_ms_env(monkeypatch, capsys):
     # A very low threshold via the env makes any nonzero latency degraded.
     monkeypatch.setenv("HEALTH_LATENCY_WARN_MS", "1")
 
-    clock = FakeClock(50)  # 50ms per service
     monkeypatch.setattr(hc, "build_connection", lambda: FakeConnection())
-    monkeypatch.setattr(hc.time, "monotonic", clock)
-
-    rc = hc.main([])
+    with monkeypatch.context() as patch:
+        patch.setattr(hc.time, "monotonic", FakeClock(50))  # 50ms per service
+        rc = hc.main([])
     assert rc == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc["overall"] == "degraded"
@@ -358,106 +335,9 @@ def test_build_connection_bounds_every_api_call(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# parse_rally_services
-# ---------------------------------------------------------------------------
-def test_parse_rally_services_default_when_unset():
-    # An unset value (None) falls back to the documented six-service default,
-    # keystone first.
-    assert hc.parse_rally_services(None) == hc.DEFAULT_RALLY_SERVICES
-    assert hc.parse_rally_services(None)[0] == "keystone"
-
-
-def test_parse_rally_services_empty_and_blank_fall_back_to_default():
-    # Empty string, whitespace-only, and comma/whitespace-only all normalize to
-    # nothing -> default. keystone is then still present (always-included).
-    for raw in ("", "   ", ",", " , , ", ",,,"):
-        result = hc.parse_rally_services(raw)
-        # keystone-always means at minimum the keystone-prepended default set.
-        assert result == hc.DEFAULT_RALLY_SERVICES, raw
-
-
-def test_parse_rally_services_trims_lowercases_and_dedupes_preserving_order():
-    # Mixed case, surrounding/interior whitespace, empty segments, and a
-    # duplicate. Order is first-seen; keystone is forced first.
-    raw = "  Nova , KEYSTONE , nova ,, Cinder , GLANCE "
-    result = hc.parse_rally_services(raw)
-    # keystone hoisted to front; remaining preserve first-seen order, deduped.
-    assert result == ("keystone", "nova", "cinder", "glance")
-
-
-def test_parse_rally_services_strips_internal_whitespace():
-    # Whitespace INSIDE a token (not just around it) is stripped, matching the
-    # bash awk gsub(/[[:space:]]/, "") behaviour.
-    assert hc.parse_rally_services("no va, cind er") == ("keystone", "nova", "cinder")
-
-
-def test_parse_rally_services_always_includes_keystone_first():
-    # keystone is included and placed first even when absent from the input...
-    result = hc.parse_rally_services("nova,neutron")
-    assert result[0] == "keystone"
-    assert result == ("keystone", "nova", "neutron")
-    # ...and when listed (anywhere) it is deduped, not duplicated.
-    result = hc.parse_rally_services("nova,keystone,neutron")
-    assert result == ("keystone", "nova", "neutron")
-    assert result.count("keystone") == 1
-    # ...and when listed but not first, it still ends up first.
-    result = hc.parse_rally_services("nova,neutron,keystone")
-    assert result[0] == "keystone"
-
-
-def test_parse_rally_services_keeps_unregistered_names():
-    # Parsing does not know about the checker registry -- it keeps unknown names
-    # (e.g. octavia); run_checks is where unregistered names are dropped. The
-    # operator order is preserved (keystone still hoisted).
-    assert hc.parse_rally_services("octavia,nova") == ("keystone", "octavia", "nova")
-
-
-def test_parse_rally_services_custom_default():
-    assert hc.parse_rally_services(None, default=("keystone", "nova")) == ("keystone", "nova")
-
-
-# ---------------------------------------------------------------------------
-# Service-name allowlist (path-traversal hardening) -- mirrored in
-# run_tests.sh and health_check.sh; keep the three in sync.
-# ---------------------------------------------------------------------------
-def test_parse_rally_services_drops_path_traversal_token(capsys):
-    # "../health" fails ^[a-z0-9_-]+$ and is dropped (with a stderr warning);
-    # valid neighbours survive. keystone is always hoisted first.
-    assert hc.parse_rally_services("nova,../health,glance") == (
-        "keystone",
-        "nova",
-        "glance",
-    )
-    assert "dropping invalid service name" in capsys.readouterr().err
-
-
-def test_parse_rally_services_drops_shell_metachar_token():
-    # "nova;rm" contains ';' -> dropped entirely (it is one token, not a split).
-    assert hc.parse_rally_services("nova;rm,glance") == ("keystone", "glance")
-
-
-def test_parse_rally_services_internal_space_token_kept_after_strip():
-    # "no va" strips to "nova" before the allowlist check -> kept.
-    assert hc.parse_rally_services("no va") == ("keystone", "nova")
-
-
-def test_parse_rally_services_mixed_valid_and_invalid():
-    assert hc.parse_rally_services("nova,../etc,glance") == (
-        "keystone",
-        "nova",
-        "glance",
-    )
-
-
-def test_parse_rally_services_all_invalid_falls_back_to_default():
-    # Every token dropped -> fall back to default (keystone-prepended six).
-    assert hc.parse_rally_services("../a,b/c,../../d") == hc.DEFAULT_RALLY_SERVICES
-
-
-# ---------------------------------------------------------------------------
 # run_checks honours the configured service subset
 # ---------------------------------------------------------------------------
-def test_run_checks_only_checks_configured_services():
+def test_run_checks_only_checks_configured_services(run):
     # A trimmed set: only keystone + nova are checked; the other dependents are
     # absent from the output entirely (not reported as some placeholder status).
     doc = run(FakeConnection(), step_ms=10, services=("keystone", "nova"))
@@ -466,14 +346,14 @@ def test_run_checks_only_checks_configured_services():
     assert doc["services"]["nova"]["status"] == "up"
 
 
-def test_run_checks_preserves_configured_order_keystone_first():
+def test_run_checks_preserves_configured_order_keystone_first(run):
     # Output key order follows the configured (effective) order: keystone is
     # always emitted first, then the configured dependents in order.
     doc = run(FakeConnection(), step_ms=10, services=("keystone", "cinder", "nova"))
     assert list(doc["services"].keys()) == ["keystone", "cinder", "nova"]
 
 
-def test_run_checks_skips_unregistered_service_with_stderr_warning(capsys):
+def test_run_checks_skips_unregistered_service_with_stderr_warning(run, capsys):
     # A configured service with NO registered checker (octavia) is skipped and
     # warned about on stderr -- it must NOT appear in the output document, and
     # must NOT affect overall (which stays up with everything else fast).
@@ -490,7 +370,7 @@ def test_run_checks_skips_unregistered_service_with_stderr_warning(capsys):
     assert "no registered checker" in err
 
 
-def test_run_checks_keystone_always_present_even_if_not_in_dependents():
+def test_run_checks_keystone_always_present_even_if_not_in_dependents(run):
     # Even a degenerate effective set that omits keystone (defensive: callers
     # should never do this since parse_rally_services hoists it) still checks
     # auth -- run_checks always times authorize() and emits keystone.
@@ -499,7 +379,7 @@ def test_run_checks_keystone_always_present_even_if_not_in_dependents():
     assert doc["services"]["keystone"]["status"] == "up"
 
 
-def test_run_checks_unregistered_only_still_reports_keystone(capsys):
+def test_run_checks_unregistered_only_still_reports_keystone(run, capsys):
     # If every configured dependent is unregistered, the document still carries
     # keystone (the auth check) and nothing else; the unknown name is warned.
     doc = run(FakeConnection(), step_ms=10, services=("keystone", "heat"))
@@ -508,7 +388,7 @@ def test_run_checks_unregistered_only_still_reports_keystone(capsys):
     assert "heat" in capsys.readouterr().err
 
 
-def test_run_checks_subset_down_when_configured_service_fails():
+def test_run_checks_subset_down_when_configured_service_fails(run):
     # Down propagation still works within a trimmed set.
     doc = run(
         FakeConnection({"cinder": boom}),

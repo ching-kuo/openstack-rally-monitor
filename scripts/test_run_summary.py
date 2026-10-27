@@ -16,14 +16,10 @@ Mirrors the harness pattern in test_uptime_ledger.py::record.
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
-BASH = shutil.which("bash") or "/bin/bash"
-
-import pytest
+from shell_testlib import BASE_PATH, BASH
 
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 
@@ -92,12 +88,14 @@ def scenario(
 # Harness
 # ---------------------------------------------------------------------------
 
-def build_summary(tmp_path: Path, service_files: dict[str, object]):
+def build_summary(tmp_path: Path, service_files: dict[str, object],
+                  rally_services: str | None = None):
     """Drop fixture files into RUN_DIR and run build_summary against tmp_path.
 
     `service_files` maps service name -> file content. A dict/list value is
     JSON-encoded; a str value is written verbatim (for the garbage-result
     case); a service omitted from the mapping has no result file (-> skipped).
+    `rally_services` sets RALLY_SERVICES (the monitored set) when given.
     """
     run_dir = tmp_path / TIMESTAMP
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -119,16 +117,16 @@ def build_summary(tmp_path: Path, service_files: dict[str, object]):
         f'RUN_DIR="{run_dir}"; TIMESTAMP="{TIMESTAMP}"; '
         f'SUMMARY_FILE="{summary_file}"; RUN_LOG="{run_dir / "run.log"}"; '
     )
+    env = {"PATH": BASE_PATH, "RESULTS_DIR": str(tmp_path)}
+    if rally_services is not None:
+        env["RALLY_SERVICES"] = rally_services
     result = subprocess.run(
         [
             BASH,
             "-c",
             f'source "{SCRIPT}" && {overrides} build_summary',
         ],
-        env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-            "RESULTS_DIR": str(tmp_path),
-        },
+        env=env,
         capture_output=True,
         text=True,
         check=False,
@@ -403,117 +401,6 @@ def test_mixed_run_classifies_each_service_independently(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# RALLY_SERVICES parsing (parse_rally_services)
-# ---------------------------------------------------------------------------
-# The monitored service set is configurable via RALLY_SERVICES. run_tests.sh's
-# parse_rally_services normalizes it (trim/lowercase/drop-empties/dedupe, order
-# preserved) and the result becomes the SERVICES array that build_summary
-# iterates. The same normalization rules are mirrored in api_health_check.py's
-# parse_rally_services (covered in test_api_health_check.py) -- keep in sync.
-
-DEFAULT_SERVICES = "keystone,nova,neutron,glance,cinder,swift"
-
-
-def parse_rally_services(raw: str | None) -> list[str]:
-    """Source run_tests.sh and invoke its parse_rally_services with `raw`.
-
-    Returns the normalized service list (the function echoes one name per
-    line). `raw=None` exercises the unset path (the arg is passed empty, which
-    the function treats as "fall back to default", matching how main() invokes
-    it with ${RALLY_SERVICES:-}).
-    """
-    arg = "" if raw is None else raw
-    result = subprocess.run(
-        [
-            BASH,
-            "-c",
-            # Quote the argument exactly as given so whitespace/empties survive.
-            f'source "{SCRIPT}" && parse_rally_services "$1"',
-            "_",
-            arg,
-        ],
-        env={"PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, f"parse_rally_services failed:\n{result.stderr}"
-    return [line for line in result.stdout.splitlines() if line != ""]
-
-
-def test_parse_services_default_when_unset() -> None:
-    assert parse_rally_services(None) == DEFAULT_SERVICES.split(",")
-
-
-@pytest.mark.parametrize("raw", ["", "   ", ",", " , , ", ",,,"])
-def test_parse_services_empty_or_blank_falls_back_to_default(raw: str) -> None:
-    # Empty / whitespace-only / separator-only inputs normalize to nothing and
-    # must fall back to the six-service default rather than yielding an empty
-    # SERVICES array (which would make build_summary emit no services).
-    assert parse_rally_services(raw) == DEFAULT_SERVICES.split(",")
-
-
-def test_parse_services_trims_lowercases_dedupes_preserving_order() -> None:
-    # Mixed case, surrounding + interior whitespace, an empty segment, and a
-    # duplicate. Order is first-seen; no keystone hoisting here (that is the
-    # health checker's concern -- the smoke set reflects operator order verbatim).
-    assert parse_rally_services("  Nova , KEYSTONE , nova ,, Cinder ") == [
-        "nova",
-        "keystone",
-        "cinder",
-    ]
-
-
-def test_parse_services_strips_internal_whitespace() -> None:
-    # Whitespace inside a token is stripped (awk gsub over [[:space:]]).
-    assert parse_rally_services("no va, cind er") == ["nova", "cinder"]
-
-
-def test_parse_services_keeps_unknown_names() -> None:
-    # Parsing is registry-agnostic: an unknown service (e.g. octavia) is kept;
-    # run_service_tests logs a SKIP later when no scenario file exists for it.
-    assert parse_rally_services("octavia,nova") == ["octavia", "nova"]
-
-
-def test_parse_services_preserves_operator_order() -> None:
-    # A non-default ordering is preserved exactly (dashboard re-sorts client
-    # side; the script must not impose its own order).
-    assert parse_rally_services("swift,nova,keystone") == ["swift", "nova", "keystone"]
-
-
-# ---------------------------------------------------------------------------
-# Service-name allowlist (path-traversal hardening) -- mirrored in
-# api_health_check.py and health_check.sh; keep the three in sync.
-# ---------------------------------------------------------------------------
-def test_parse_services_drops_path_traversal_token() -> None:
-    # "../health" contains '/' and '.', neither in ^[a-z0-9_-]+$, so it is
-    # dropped; the valid neighbours survive.
-    assert parse_rally_services("nova,../health,glance") == ["nova", "glance"]
-
-
-def test_parse_services_drops_shell_metachar_token() -> None:
-    # A ';' (command-injection shape) fails the allowlist.
-    assert parse_rally_services("nova;rm,glance") == ["glance"]
-
-
-def test_parse_services_internal_space_token_kept_after_strip() -> None:
-    # "no va" strips to "nova" (valid) -- interior whitespace removal happens
-    # before the allowlist check, so this stays a legitimate service.
-    assert parse_rally_services("no va") == ["nova"]
-
-
-def test_parse_services_mixed_valid_and_invalid() -> None:
-    # Invalid middle token dropped, valid ones kept in order.
-    assert parse_rally_services("nova,../etc,glance") == ["nova", "glance"]
-
-
-def test_parse_services_all_invalid_falls_back_to_default() -> None:
-    # When every token is dropped by the allowlist the result is empty and must
-    # fall back to the six-service default, not yield an empty SERVICES array.
-    assert parse_rally_services("../a,b/c,../../d") == DEFAULT_SERVICES.split(",")
-
-
-# ---------------------------------------------------------------------------
 # Configured subset flows through build_summary
 # ---------------------------------------------------------------------------
 
@@ -522,36 +409,13 @@ def test_build_summary_honours_trimmed_rally_services(tmp_path: Path) -> None:
     (and thus the summary keys) contains exactly that subset -- a Swift-less
     cloud no longer carries a permanent swift column. Verifies the parser ->
     SERVICES -> build_summary wiring end to end."""
-    run_dir = tmp_path / TIMESTAMP
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "run.log").touch()
-    (run_dir / "nova.json").write_text(
-        json.dumps([scenario("NovaServers.boot_and_delete", iterations=2)])
+    # Trim the set: only keystone + nova are monitored. (The parser's own
+    # normalization rules are covered by test_parse_rally_services.py.)
+    summary = build_summary(
+        tmp_path,
+        {"nova": [scenario("NovaServers.boot_and_delete", iterations=2)]},
+        rally_services="keystone,nova",
     )
-
-    summary_file = tmp_path / "latest_summary.json"
-    overrides = (
-        f'RUN_DIR="{run_dir}"; TIMESTAMP="{TIMESTAMP}"; '
-        f'SUMMARY_FILE="{summary_file}"; RUN_LOG="{run_dir / "run.log"}"; '
-    )
-    result = subprocess.run(
-        [
-            BASH,
-            "-c",
-            f'source "{SCRIPT}" && {overrides} build_summary',
-        ],
-        env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-            "RESULTS_DIR": str(tmp_path),
-            # Trim the set: only keystone + nova are monitored.
-            "RALLY_SERVICES": "keystone,nova",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, f"build_summary failed:\n{result.stderr}\n{result.stdout}"
-    summary = json.loads(summary_file.read_text())
     # Exactly the configured services -- swift/cinder/etc. are absent.
     assert set(summary["services"].keys()) == {"keystone", "nova"}
     assert summary["services"]["nova"]["status"] == "passed"

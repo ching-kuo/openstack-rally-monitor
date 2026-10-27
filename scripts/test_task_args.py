@@ -1,15 +1,15 @@
-"""Contract tests for run_tests.sh Rally task argument generation."""
+"""Contract tests for run_tests.sh Rally task argument generation. That main
+uses write_task_args (and aborts when it fails) is tested in test_run_main.py."""
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
+from shell_testlib import BASH, write_shim
 
-BASH = shutil.which("bash") or "/bin/bash"
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 
 
@@ -91,10 +91,7 @@ def test_generation_failure_preserves_existing_target(tmp_path: Path) -> None:
     target = tmp_path / "task_args.json"
     target.write_text('{"existing": true}\n')
     failing_bin = tmp_path / "failing-bin"
-    failing_bin.mkdir()
-    jq = failing_bin / "jq"
-    jq.write_text("#!/bin/sh\nexit 42\n")
-    jq.chmod(0o755)
+    write_shim(failing_bin, "jq", "exit 42\n")
 
     result = write_task_args(
         target,
@@ -104,10 +101,3 @@ def test_generation_failure_preserves_existing_target(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert target.read_text() == '{"existing": true}\n'
     assert not target.with_suffix(".json.tmp").exists()
-
-
-def test_main_uses_helper_instead_of_json_heredoc() -> None:
-    source = SCRIPT.read_text()
-
-    assert 'write_task_args "${task_args_file}"' in source
-    assert 'cat <<EOF > "${task_args_file}"' not in source

@@ -5,16 +5,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from shell_testlib import write_shim
+from shell_testlib import BASH, write_shim
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4.
-BASH = shutil.which("bash") or "/bin/bash"
 SCRIPT = Path(__file__).resolve().parent / "init_state.sh"
 
 

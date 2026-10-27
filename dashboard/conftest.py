@@ -34,7 +34,8 @@ def server(dirs, monkeypatch):
 
     srv = HTTPServer(("127.0.0.1", 0), serve.SecureStaticHandler)
     port = srv.server_address[1]
-    t = threading.Thread(target=srv.serve_forever)
+    # A short poll interval: shutdown() waits up to one interval (default 0.5s).
+    t = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01})
     t.daemon = True
     t.start()
 
@@ -42,3 +43,4 @@ def server(dirs, monkeypatch):
     yield base, dashboard_dir, results_dir
 
     srv.shutdown()
+    srv.server_close()

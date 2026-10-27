@@ -10,14 +10,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
-BASH = shutil.which("bash") or "/bin/bash"
-
 import pytest
+
+from shell_testlib import BASE_PATH, BASH, write_shim
 
 SCRIPT = Path(__file__).resolve().parent / "announce.sh"
 
@@ -115,6 +113,7 @@ class TestPostHappyPath:
             expect_success=True,
         )
         rec = read_state(tmp_path)["announcements"][0]
+        assert rec["id"] == result.stdout.strip()
         assert rec["type"] == "scheduled"
         assert rec["effective_from"] == "2026-05-17T10:00:00Z"
         assert rec["expires_at"] == "2026-05-17T12:00:00Z"
@@ -146,51 +145,31 @@ class TestPostHappyPath:
 # ---------------------------------------------------------------------------
 
 class TestPostValidation:
-    def test_maintenance_without_expires_at_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(tmp_path, "post", "--type", "maintenance", "--body", "x")
+    @pytest.mark.parametrize("argv", [
+        pytest.param(("--type", "maintenance", "--body", "x"),
+                     id="maintenance-without-expires-at"),
+        pytest.param(("--type", "scheduled", "--body", "x",
+                      "--expires-at", "2026-05-17T12:00:00Z"),
+                     id="scheduled-without-effective-from"),
+        pytest.param(("--type", "scheduled", "--body", "x",
+                      "--effective-from", "2026-05-17T10:00:00Z"),
+                     id="scheduled-without-expires-at"),
+        pytest.param(("--type", "bogus", "--body", "x"), id="unknown-type"),
+        pytest.param(("--type", "incident", "--body", "x" * 501), id="overlong-body"),
+        pytest.param(("--type", "maintenance", "--body", "x",
+                      "--expires-at", "2026-13-45T99:99:99Z"),
+                     id="bogus-iso-timestamp"),
+        pytest.param(("--type", "maintenance", "--body", "x",
+                      "--expires-at", "2026-05-16T18:00:00"),
+                     id="iso-timestamp-missing-trailing-z"),
+        pytest.param(("--type", "incident", "--body", "   "), id="empty-body"),
+    ])
+    def test_invalid_post_rejected_without_writing_state(
+        self, tmp_path: Path, argv: tuple[str, ...],
+    ) -> None:
+        result = run_cli(tmp_path, "post", *argv)
         assert result.returncode != 0
         assert not (tmp_path / "announcement-state.json").exists()
-
-    def test_scheduled_without_effective_from_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(
-            tmp_path, "post", "--type", "scheduled", "--body", "x",
-            "--expires-at", "2026-05-17T12:00:00Z",
-        )
-        assert result.returncode != 0
-
-    def test_scheduled_without_expires_at_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(
-            tmp_path, "post", "--type", "scheduled", "--body", "x",
-            "--effective-from", "2026-05-17T10:00:00Z",
-        )
-        assert result.returncode != 0
-
-    def test_unknown_type_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(tmp_path, "post", "--type", "bogus", "--body", "x")
-        assert result.returncode != 0
-
-    def test_overlong_body_rejected(self, tmp_path: Path) -> None:
-        body = "x" * 501
-        result = run_cli(tmp_path, "post", "--type", "incident", "--body", body)
-        assert result.returncode != 0
-
-    def test_bogus_iso_timestamp_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(
-            tmp_path, "post", "--type", "maintenance", "--body", "x",
-            "--expires-at", "2026-13-45T99:99:99Z",
-        )
-        assert result.returncode != 0
-
-    def test_iso_timestamp_missing_trailing_z_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(
-            tmp_path, "post", "--type", "maintenance", "--body", "x",
-            "--expires-at", "2026-05-16T18:00:00",
-        )
-        assert result.returncode != 0
-
-    def test_empty_body_rejected(self, tmp_path: Path) -> None:
-        result = run_cli(tmp_path, "post", "--type", "incident", "--body", "   ")
-        assert result.returncode != 0
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +296,29 @@ def make_services_dict(status: str = "passed") -> dict:
     }
 
 
+INCIDENT = {"id": "incident-1", "type": "incident", "body": "x",
+            "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
+            "effective_from": None, "updates": []}
+
+
+def _one_failed() -> dict:
+    services = make_services_dict("passed")
+    services["nova"]["status"] = "failed"
+    return {"timestamp": "20260516T140000Z", "services": services}
+
+
+@pytest.fixture
+def incident_state(tmp_path: Path) -> Path:
+    """A state file holding one active incident."""
+    write_state(tmp_path, {"announcements": [INCIDENT]})
+    return tmp_path
+
+
 class TestAutoClear:
     def test_all_green_clears_incidents_only(self, tmp_path: Path) -> None:
         write_state(tmp_path, {
             "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
+                INCIDENT,
                 {"id": "maint-1", "type": "maintenance", "body": "y",
                  "created_at": "2026-05-16T10:00:00Z",
                  "expires_at": "2026-05-16T18:00:00Z",
@@ -347,103 +342,33 @@ class TestAutoClear:
         ids = {rec["id"] for rec in state["announcements"]}
         assert ids == {"maint-1", "sched-1"}
 
-    def test_one_failed_leaves_incidents(self, tmp_path: Path) -> None:
-        write_state(tmp_path, {
-            "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
-            ]
-        })
-        services = make_services_dict("passed")
-        services["nova"]["status"] = "failed"
-        summary_path = write_summary(tmp_path, {
-            "timestamp": "20260516T140000Z",
-            "services": services,
-        })
-        run_cli(
-            tmp_path, "auto-clear-if-all-green",
-            "--summary-file", str(summary_path),
-            expect_success=True,
-        )
-        state = read_state(tmp_path)
-        assert len(state["announcements"]) == 1
-        assert state["announcements"][0]["id"] == "incident-1"
-
-    def test_empty_services_guard_leaves_incidents(self, tmp_path: Path) -> None:
-        """The exact failure mode the incident banner exists to communicate:
-        deployment setup failed and .services is {}. A naive `all(...)` over an
-        empty iteration returns true; the guard must reject this case."""
-        write_state(tmp_path, {
-            "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
-            ]
-        })
-        summary_path = write_summary(tmp_path, {
-            "timestamp": "20260516T140000Z",
-            "services": {},
-        })
-        run_cli(
-            tmp_path, "auto-clear-if-all-green",
-            "--summary-file", str(summary_path),
-            expect_success=True,
-        )
-        assert len(read_state(tmp_path)["announcements"]) == 1
-
-    def test_error_field_guard_leaves_incidents(self, tmp_path: Path) -> None:
-        write_state(tmp_path, {
-            "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
-            ]
-        })
-        services = make_services_dict("passed")
-        summary_path = write_summary(tmp_path, {
-            "timestamp": "20260516T140000Z",
-            "error": "deployment_setup_failed",
-            "services": services,
-        })
-        run_cli(
-            tmp_path, "auto-clear-if-all-green",
-            "--summary-file", str(summary_path),
-            expect_success=True,
-        )
-        assert len(read_state(tmp_path)["announcements"]) == 1
-
-    def test_missing_summary_file_is_no_op(self, tmp_path: Path) -> None:
-        write_state(tmp_path, {
-            "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
-            ]
-        })
+    # The empty-services case is the exact failure mode the incident banner
+    # exists to communicate: deployment setup failed and .services is {}. A
+    # naive `all(...)` over an empty iteration returns true; the guard must
+    # reject it. A missing or malformed summary file is a no-op.
+    @pytest.mark.parametrize("summary", [
+        pytest.param(json.dumps(_one_failed()), id="one-failed"),
+        pytest.param(json.dumps({"timestamp": "20260516T140000Z", "services": {}}),
+                     id="empty-services-guard"),
+        pytest.param(json.dumps({"timestamp": "20260516T140000Z",
+                                 "error": "deployment_setup_failed",
+                                 "services": make_services_dict("passed")}),
+                     id="error-field-guard"),
+        pytest.param(None, id="missing-summary-file"),
+        pytest.param("{this is not json", id="malformed-summary-file"),
+    ])
+    def test_non_green_summary_leaves_incidents(
+        self, incident_state: Path, summary: str | None,
+    ) -> None:
+        summary_path = incident_state / "summary.json"
+        if summary is not None:
+            summary_path.write_text(summary)
         result = run_cli(
-            tmp_path, "auto-clear-if-all-green",
-            "--summary-file", str(tmp_path / "does-not-exist.json"),
+            incident_state, "auto-clear-if-all-green",
+            "--summary-file", str(summary_path),
         )
         assert result.returncode == 0
-        assert len(read_state(tmp_path)["announcements"]) == 1
-
-    def test_malformed_summary_file_is_no_op(self, tmp_path: Path) -> None:
-        bad_summary = tmp_path / "bad.json"
-        bad_summary.write_text("{this is not json")
-        write_state(tmp_path, {
-            "announcements": [
-                {"id": "incident-1", "type": "incident", "body": "x",
-                 "created_at": "2026-05-16T14:00:00Z", "expires_at": None,
-                 "effective_from": None, "updates": []},
-            ]
-        })
-        result = run_cli(
-            tmp_path, "auto-clear-if-all-green",
-            "--summary-file", str(bad_summary),
-        )
-        assert result.returncode == 0
-        assert len(read_state(tmp_path)["announcements"]) == 1
+        assert read_state(incident_state)["announcements"] == [INCIDENT]
 
     def test_runs_without_announcement_state_file(self, tmp_path: Path) -> None:
         """Auto-clear must not fail when there's no state file yet (idle dashboard)."""
@@ -463,20 +388,67 @@ class TestAutoClear:
 # ---------------------------------------------------------------------------
 
 class TestRobustness:
-    def test_id_entropy_under_burst_posts(self, tmp_path: Path) -> None:
-        """100 sequential posts produce 100 distinct IDs (the 32-bit random
-        suffix is what prevents same-second collisions)."""
-        seen: set[str] = set()
-        for _ in range(100):
-            result = run_cli(
-                tmp_path, "post", "--type", "incident", "--body", "x",
-                expect_success=True,
-            )
-            record_id = result.stdout.strip()
-            assert record_id not in seen
-            seen.add(record_id)
-        assert len(seen) == 100
-        assert len(read_state(tmp_path)["announcements"]) == 100
+    def test_burst_posts_get_distinct_ids(self, tmp_path: Path) -> None:
+        """Posts within the same second still get distinct IDs and records
+        (end to end; the generator itself is stressed below)."""
+        ids = [
+            run_cli(tmp_path, "post", "--type", "incident", "--body", "x",
+                    expect_success=True).stdout.strip()
+            for _ in range(5)
+        ]
+        assert len(set(ids)) == 5
+        assert [rec["id"] for rec in read_state(tmp_path)["announcements"]] == ids
+
+    # announce.sh runs main when sourced, so generate_id is extracted from it.
+    # `date` is stubbed to one second, so only the random suffix differs; a
+    # `command` override that fails selects the /dev/urandom fallback.
+    GENERATE_ID = (
+        f'eval "$(sed -n "/^generate_id() {{/,/^}}/p" "{SCRIPT}")"\n'
+        "date() { echo 20260612T120000Z; }\n"
+    )
+    FALLBACK = "command() { return 1; }\n"
+
+    @pytest.mark.parametrize(("prelude", "shims", "logged", "suffix"), [
+        pytest.param("", {"openssl": "printf deadbeef\n"}, "openssl rand -hex 4",
+                     "deadbeef", id="openssl"),
+        # Bytes 00 0a ff 01: leading zeros and a newline byte must survive
+        # the od|tr formatting as hex digits.
+        pytest.param(FALLBACK, {"head": r"printf '\x00\x0a\xff\x01'"}, "head -c 4 /dev/urandom",
+                     "000aff01", id="urandom-fallback"),
+    ])
+    def test_generate_id_asks_for_32_bits_as_8_hex(
+        self, tmp_path: Path, prelude: str, shims: dict[str, str], logged: str, suffix: str,
+    ) -> None:
+        """Deterministic: the generator requests exactly 4 random bytes and
+        formats them as exactly 8 lowercase hex characters."""
+        calls = tmp_path / "calls.log"
+        for name, body in shims.items():
+            write_shim(tmp_path / "bin", name, f'echo "{name} $*" >> "{calls}"\n{body}\n')
+        result = subprocess.run(
+            [BASH, "-c", self.GENERATE_ID + prelude + "generate_id incident"],
+            env={"PATH": f"{tmp_path / 'bin'}:{BASE_PATH}"},
+            capture_output=True, text=True, check=True,
+        )
+        assert result.stdout == f"incident-20260612T120000Z-{suffix}"
+        assert calls.read_text().splitlines() == [logged]
+
+    @pytest.mark.parametrize("prelude", ["", FALLBACK], ids=["openssl", "urandom-fallback"])
+    def test_generate_id_smoke_no_same_second_collisions(self, prelude: str) -> None:
+        """200 real IDs in one stubbed second are distinct and well formed
+        (birthday odds of a chance failure ~5e-6 per case). Background jobs
+        in batches of 100, because each call forks openssl or head|od|tr."""
+        snippet = self.GENERATE_ID + prelude + (
+            "for _ in 1 2; do\n"
+            "  for _ in $(seq 100); do { id=$(generate_id incident); echo \"$id\"; } & done\n"
+            "  wait\n"
+            "done\n"
+        )
+        result = subprocess.run([BASH, "-c", snippet], capture_output=True,
+                                text=True, check=True)
+        ids = result.stdout.split()
+        assert len(ids) == 200
+        assert all(re.fullmatch(r"incident-20260612T120000Z-[0-9a-f]{8}", i) for i in ids)
+        assert len(set(ids)) == 200
 
     def test_corrupt_state_file_does_not_clobber_on_post(self, tmp_path: Path) -> None:
         """If the state file is corrupt JSON, the CLI must not silently
@@ -527,10 +499,7 @@ class TestRobustness:
         first_state = (tmp_path / "announcement-state.json").read_text()
 
         bin_dir = tmp_path / "fake-bin"
-        bin_dir.mkdir()
-        jq_stub = bin_dir / "jq"
-        jq_stub.write_text("#!/bin/sh\nexit 1\n")
-        jq_stub.chmod(0o755)
+        write_shim(bin_dir, "jq", "exit 1\n")
 
         env = os.environ.copy()
         env["RESULTS_DIR"] = str(tmp_path)

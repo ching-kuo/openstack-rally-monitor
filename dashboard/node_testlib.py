@@ -1,9 +1,13 @@
-"""Run snippets against the dashboard's ES modules (dashboard/js/) under node.
+"""Run snippets against the dashboard's JavaScript under node.
 
-The modules touch the DOM only when a render function is called, never at
-import time (main.js, the entry point, is the one exception and is not
-imported here), so a test imports exactly the functions it needs. Render
-functions run against FAKE_DOM, a minimal stand-in for `document`.
+The ES modules (dashboard/js/) touch the DOM only when a render function is
+called, never at import time (main.js, the entry point, is the one exception
+and is not imported here), so a test imports exactly the functions it needs.
+Render functions run against FAKE_DOM, a minimal stand-in for `document`.
+
+report.js is a classic script that calls initReport() at load time, so it
+cannot be loaded under node; extract_function() pulls a self-contained
+function out of it by source and run_script() evaluates it.
 """
 from __future__ import annotations
 
@@ -108,18 +112,47 @@ def imports(module: str, *names: str) -> str:
     return f"import {{ {', '.join(names)} }} from {url!r};\n"
 
 
-def run_module(snippet: str, env: dict[str, str] | None = None) -> str:
-    """Run `snippet` as an ES module and return its stripped stdout. `env`
-    (e.g. TZ, LANG) replaces the environment, for locale-dependent output."""
+def _run_node(args: list[str], env: dict[str, str] | None) -> str:
     result = subprocess.run(
-        [NODE, "--input-type=module", "-e", snippet],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+        [NODE, *args], capture_output=True, text=True, check=False, env=env,
     )
     assert result.returncode == 0, f"node failed:\n{result.stderr}"
     return result.stdout.strip()
+
+
+def run_module(snippet: str, env: dict[str, str] | None = None) -> str:
+    """Run `snippet` as an ES module and return its stripped stdout. `env`
+    (e.g. TZ, LANG) replaces the environment, for locale-dependent output."""
+    return _run_node(["--input-type=module", "-e", snippet], env)
+
+
+def run_script(snippet: str) -> str:
+    """Run `snippet` as a classic script and return its stripped stdout."""
+    return _run_node(["-e", snippet], None)
+
+
+def assert_cases(cases: list[tuple[str, object]], out: list) -> None:
+    """Compare a batched node run with its case table. `cases` holds
+    (case id, expected) pairs in the order the snippet evaluated them; a
+    mismatch names the failing case ids rather than list positions."""
+    assert len(out) == len(cases), f"{len(cases)} cases but {len(out)} results"
+    assert dict(zip([case_id for case_id, _ in cases], out)) == dict(cases)
+
+
+def extract_function(path: Path, name: str) -> str:
+    """The source of `function name(...) {...}` in `path`, by brace matching
+    (the function must not contain braces inside strings or comments)."""
+    src = path.read_text()
+    start = src.index(f"function {name}(")
+    depth = 0
+    for i in range(src.index("{", start), len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i + 1]
+    raise AssertionError(f"could not brace-match {name}")
 
 
 def run_json(snippet: str, env: dict[str, str] | None = None):

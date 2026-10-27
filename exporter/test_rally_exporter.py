@@ -39,12 +39,8 @@ class TestLoadLatestSummary:
         result = exporter.load_latest_summary()
         assert result == {"timestamp": "none", "services": {}}
 
-    def test_valid_file_returns_data(self, results_dir):
-        summary = make_summary()
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
-        result = exporter.load_latest_summary()
-        assert result["timestamp"] == "20240101T120000Z"
-        assert "nova" in result["services"]
+    # A valid file is covered through update_metrics by
+    # TestUpdateMetrics::test_valid_passing_data_reports_success.
 
     def test_caches_on_same_mtime(self, results_dir):
         """File is not re-read when mtime is unchanged and cache is fresh."""
@@ -86,16 +82,22 @@ class TestLoadCleanupMetrics:
         assert result["rgw_scan_status"] == "skipped"
         assert result["rgw_orphaned_users"] == 0
 
-    def test_valid_file_returns_data(self, results_dir):
-        cleanup = make_cleanup(s_nova=3)
-        (results_dir / "cleanup_metrics.json").write_text(json.dumps(cleanup))
-        result = exporter.load_cleanup_metrics()
-        assert result["orphaned_resources"]["nova"] == 3
+    # A valid file is covered through update_metrics by the cleanup tests in
+    # TestUpdateMetrics.
 
 
 # ---------------------------------------------------------------------------
 # update_metrics — CQ-08 regression tests
 # ---------------------------------------------------------------------------
+
+TASK_GAUGES = (
+    "rally_task_success",
+    "rally_task_duration_seconds",
+    "rally_task_iterations_total",
+    "rally_task_failures_total",
+    "rally_task_sla_passed",
+)
+
 
 class TestUpdateMetrics:
     @pytest.mark.parametrize(
@@ -156,6 +158,30 @@ class TestUpdateMetrics:
         output = metrics_output()
         assert "rally_overall_success 0.0" in output
         assert "rally_data_valid 1.0" in output
+
+    def test_per_scenario_task_gauges(self, results_dir):
+        """Each scenario's rally_task_* series carries its own values; a
+        scenario with failures reads rally_task_success 0 even when its
+        service's other scenarios pass."""
+        summary = make_summary(services={
+            "nova": {
+                "status": "failed", "duration": 13.5, "total_iterations": 6,
+                "failed_iterations": 1, "sla_passed": False,
+                "scenarios": [
+                    {"name": "Boot", "duration": 10.0, "iterations": 2, "failures": 0, "sla": True},
+                    {"name": "Resize", "duration": 3.5, "iterations": 4, "failures": 1, "sla": False},
+                ],
+            },
+        })
+        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
+        exporter.update_metrics()
+
+        def sample(metric, scenario):
+            return exporter.registry.get_sample_value(
+                metric, {"service": "nova", "scenario": scenario})
+
+        assert [sample(m, "Boot") for m in TASK_GAUGES] == [1, 10.0, 2, 0, 1]
+        assert [sample(m, "Resize") for m in TASK_GAUGES] == [0, 3.5, 4, 1, 0]
 
     def test_labeled_metrics_retained_on_same_timestamp(self, results_dir):
         """CQ-04: Labeled metrics are not cleared when timestamp is unchanged."""
@@ -327,166 +353,3 @@ class TestCronSpacing:
     )
     def test_spacing(self, raw, expected_minutes):
         assert mc.cron_spacing_seconds(raw, 240) == expected_minutes * 60
-
-
-class TestRunSetupFailure:
-    """A run that aborts before any test ({services: {}, error}) is a real,
-    failed run -- not "no data"."""
-
-    @staticmethod
-    def failure_summary(timestamp="20240101T160000Z"):
-        return {
-            "timestamp": timestamp,
-            "error": "deployment_setup_failed",
-            "error_detail": "401 Unauthorized",
-            "services": {},
-        }
-
-    def test_failure_summary_is_valid_but_failed(self, results_dir):
-        path = results_dir / "latest_summary.json"
-        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z")))
-        exporter.update_metrics()
-        assert 'rally_service_status{service="nova"} 1.0' in metrics_output()
-
-        path.write_text(json.dumps(self.failure_summary()))
-        exporter._summary_mtime = -1.0  # force cache miss
-        exporter.update_metrics()
-        output = metrics_output()
-        assert "rally_data_valid 1.0" in output
-        assert "rally_overall_success 0.0" in output
-        assert "rally_run_setup_ok 0.0" in output
-        # The last green per-service series must not survive the failed run.
-        assert "rally_service_status{" not in output
-        assert "rally_task_success{" not in output
-        # The failed run is the newest run: staleness alerts must not fire.
-        assert "rally_last_run_timestamp 1.7041248e+09" in output
-
-    def test_failure_summary_resets_duration_and_end_time(self, results_dir):
-        """An aborted run has no duration: the previous run's must not linger,
-        and its end time is its start (RallyStaleResults measures from here)."""
-        sample = exporter.registry.get_sample_value
-        path = results_dir / "latest_summary.json"
-        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z", run_duration=600)))
-        exporter.update_metrics()
-        assert sample("rally_run_duration_seconds") == 600
-        assert sample("rally_last_run_end_timestamp") == 1704110400 + 600
-
-        path.write_text(json.dumps(self.failure_summary()))  # 20240101T160000Z
-        exporter._summary_mtime = -1.0
-        exporter.update_metrics()
-        assert sample("rally_run_duration_seconds") == 0
-        assert sample("rally_last_run_end_timestamp") == 1704124800
-
-    def test_missing_duration_resets_duration_with_end_time(self, results_dir):
-        """A run killed after build_summary has no run_duration_seconds. Its
-        end time is its start, so the duration that RallyStaleResults adds to
-        the threshold must be 0 too, not the previous run's."""
-        sample = exporter.registry.get_sample_value
-        path = results_dir / "latest_summary.json"
-        path.write_text(json.dumps(make_summary(timestamp="20240101T120000Z", run_duration=600)))
-        exporter.update_metrics()
-
-        killed = make_summary(timestamp="20240101T160000Z")
-        del killed["run_duration_seconds"]
-        path.write_text(json.dumps(killed))
-        exporter._summary_mtime = -1.0
-        exporter.update_metrics()
-        assert sample("rally_run_duration_seconds") == 0
-        assert sample("rally_last_run_end_timestamp") == 1704124800
-
-    def test_normal_summary_sets_run_setup_ok(self, results_dir):
-        (results_dir / "latest_summary.json").write_text(json.dumps(make_summary()))
-        exporter.update_metrics()
-        assert "rally_run_setup_ok 1.0" in metrics_output()
-
-    def test_service_failed_to_start_fails_overall(self, results_dir):
-        """A service whose Rally task never started is reported failed by
-        build_summary (with an error field) and must clear overall success."""
-        summary = make_summary(services={
-            "nova": {
-                "status": "failed",
-                "error": "task_failed_to_start",
-                "duration": 0,
-                "total_iterations": 0,
-                "failed_iterations": 0,
-                "sla_passed": True,
-                "scenarios": [],
-            }
-        })
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
-        exporter.update_metrics()
-        output = metrics_output()
-        assert 'rally_service_status{service="nova"} 0.0' in output
-        assert "rally_overall_success 0.0" in output
-
-    def test_recovers_after_transient_invalid_read(self, results_dir):
-        """A transiently unreadable summary followed by the same valid summary
-        must restore overall success and the labeled series (it used to stay 0
-        until the next run because the timestamp had already been processed)."""
-        path = results_dir / "latest_summary.json"
-        path.write_text(json.dumps(make_summary()))
-        exporter.update_metrics()
-        path.unlink()
-        exporter.update_metrics()
-        assert "rally_overall_success 0.0" in metrics_output()
-
-        path.write_text(json.dumps(make_summary()))
-        exporter._summary_mtime = -1.0
-        exporter.update_metrics()
-        output = metrics_output()
-        assert "rally_overall_success 1.0" in output
-        assert 'rally_service_status{service="nova"} 1.0' in output
-
-
-# ---------------------------------------------------------------------------
-# Flask endpoints
-# ---------------------------------------------------------------------------
-
-class TestHealthEndpoint:
-    def test_returns_200_with_ok(self, client, results_dir):
-        resp = client.get("/health")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["status"] == "ok"
-        assert "timestamp" in data
-
-
-class TestReadyEndpoint:
-    def test_not_ready_when_no_results(self, client, results_dir):
-        resp = client.get("/ready")
-        assert resp.status_code == 503
-        data = resp.get_json()
-        assert data["ready"] is False
-
-    def test_not_ready_when_all_pending(self, client, results_dir):
-        summary = make_summary(services={
-            "nova": {"status": "pending", "duration": 0, "total_iterations": 0,
-                     "failed_iterations": 0, "sla_passed": True, "scenarios": []}
-        })
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
-        resp = client.get("/ready")
-        assert resp.status_code == 503
-
-    def test_ready_with_recent_valid_results(self, client, results_dir):
-        ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        summary = make_summary(timestamp=ts)
-        (results_dir / "latest_summary.json").write_text(json.dumps(summary))
-        resp = client.get("/ready")
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["ready"] is True
-
-
-class TestMetricsEndpoint:
-    def test_returns_200_with_prometheus_content_type(self, client, results_dir):
-        resp = client.get("/metrics")
-        assert resp.status_code == 200
-        assert b"text/plain" in resp.content_type.encode()
-
-    def test_contains_expected_metric_names(self, client, results_dir):
-        resp = client.get("/metrics")
-        body = resp.data
-        assert b"rally_data_valid" in body
-        assert b"rally_overall_success" in body
-        assert b"rally_last_run_timestamp" in body
-        assert b"rally_exporter_errors_total" in body

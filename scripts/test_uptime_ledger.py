@@ -2,13 +2,11 @@
 and the health-history filter (health_history_filter.jq) used by
 health_check.sh."""
 import json
-import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
-BASH = shutil.which("bash") or "/bin/bash"
+from shell_testlib import BASE_PATH, BASH
 
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 HEALTH_FILTER = Path(__file__).resolve().parent / "health_history_filter.jq"
@@ -24,25 +22,27 @@ def make_summary(statuses=None, error=None):
     return summary
 
 
-def record(tmp_path, summary, timestamp="20260603T000000Z", window_days=30):
-    """Source run_tests.sh and invoke record_smoke_result against tmp_path."""
-    (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
-    result = subprocess.run(
-        [
-            BASH,
-            "-c",
-            f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" record_smoke_result',
-        ],
-        env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-            "RESULTS_DIR": str(tmp_path),
-            "UPTIME_WINDOW_DAYS": str(window_days),
-        },
+def call_with_summary(tmp_path, function, summary, timestamp, window_days=30):
+    """Write latest_summary.json (a dict is JSON-encoded, a str is written
+    verbatim), source run_tests.sh and call `function` against tmp_path.
+    window_days=None leaves UPTIME_WINDOW_DAYS unset (the script default)."""
+    text = summary if isinstance(summary, str) else json.dumps(summary)
+    (tmp_path / "latest_summary.json").write_text(text)
+    env = {"PATH": BASE_PATH, "RESULTS_DIR": str(tmp_path)}
+    if window_days is not None:
+        env["UPTIME_WINDOW_DAYS"] = str(window_days)
+    return subprocess.run(
+        [BASH, "-c", f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" {function}'],
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    return result
+
+
+def record(tmp_path, summary, timestamp="20260603T000000Z", window_days=30):
+    """Invoke record_smoke_result against tmp_path."""
+    return call_with_summary(tmp_path, "record_smoke_result", summary, timestamp, window_days)
 
 
 def read_ledger(tmp_path):
@@ -172,27 +172,12 @@ def test_missing_results_json_is_not_created(tmp_path):
 
 
 def publish(tmp_path, summary, timestamp="20260603T000000Z"):
-    """Source run_tests.sh and run publish_dashboard_files against tmp_path.
+    """Run publish_dashboard_files against tmp_path.
 
     Mirrors the deployment-failure path: latest_summary.json holds the failure
     shape, smoke ledger and cleanup metrics are auto-seeded by the function.
     """
-    (tmp_path / "latest_summary.json").write_text(json.dumps(summary))
-    return subprocess.run(
-        [
-            BASH,
-            "-c",
-            f'source "{SCRIPT}" && TIMESTAMP="{timestamp}" publish_dashboard_files',
-        ],
-        env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-            "RESULTS_DIR": str(tmp_path),
-            "UPTIME_WINDOW_DAYS": "30",
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    return call_with_summary(tmp_path, "publish_dashboard_files", summary, timestamp)
 
 
 def test_deployment_failure_path_publishes_error_shape(tmp_path):
@@ -242,25 +227,6 @@ def run_health_filter(tmp_path, history, current, max_entries=2880, days=30):
     return json.loads(result.stdout)
 
 
-def test_health_filter_appends_and_computes_uptime(tmp_path):
-    history = {
-        "checks": [
-            {"timestamp": iso_ts(2), "overall": "down"},
-            {"timestamp": iso_ts(1), "overall": "up"},
-        ]
-    }
-    current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
-    out = run_health_filter(tmp_path, history, current)
-
-    assert len(out["checks"]) == 3
-    assert out["uptime"] == {
-        "window_days": 30,
-        "checks_total": 3,
-        "checks_up": 2,
-        "percent": 66.67,
-    }
-
-
 def test_health_filter_counts_degraded_as_up(tmp_path):
     # Uptime measures reachability: a "degraded" check (reachable but slow)
     # counts as up. Here 2 of 3 are reachable (up + degraded), 1 is down.
@@ -273,9 +239,13 @@ def test_health_filter_counts_degraded_as_up(tmp_path):
     current = {"timestamp": iso_ts(0), "overall": "up", "services": {}}
     out = run_health_filter(tmp_path, history, current)
 
-    assert out["uptime"]["checks_total"] == 3
-    assert out["uptime"]["checks_up"] == 2  # up + degraded, not the down
-    assert out["uptime"]["percent"] == 66.67
+    assert len(out["checks"]) == 3  # the current check is appended
+    assert out["uptime"] == {
+        "window_days": 30,
+        "checks_total": 3,
+        "checks_up": 2,  # up + degraded, not the down
+        "percent": 66.67,
+    }
 
 
 def test_health_filter_all_degraded_is_full_uptime(tmp_path):
@@ -323,74 +293,11 @@ def test_health_filter_null_percent_when_window_empty(tmp_path):
 
 
 def test_unreadable_summary_records_failed_run(tmp_path):
-    (tmp_path / "latest_summary.json").write_text("not json")
-    result = subprocess.run(
-        [
-            BASH,
-            "-c",
-            f'source "{SCRIPT}" && TIMESTAMP="{recent_ts(0)}" record_smoke_result',
-        ],
-        env={
-            "PATH": "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
-            "RESULTS_DIR": str(tmp_path),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    # UPTIME_WINDOW_DAYS unset, as before the window became configurable.
+    result = record(tmp_path, "not json", timestamp=recent_ts(0), window_days=None)
 
     assert result.returncode == 0, result.stderr
     # read_ledger parsing the file also proves it is still valid JSON
     ledger = read_ledger(tmp_path)
     assert ledger["runs"][0]["status"] == "failed"
-
-
-# ---------------------------------------------------------------------------
-# Health fallback filter (the exact jq program health_check.sh runs via -f
-# when api_health_check.py fails -- the all-down document)
-# ---------------------------------------------------------------------------
-
-FALLBACK_FILTER = Path(__file__).resolve().parent / "health_fallback_filter.jq"
-DEFAULT_SERVICES = "keystone,nova,neutron,glance,cinder,swift"
-
-
-def run_fallback_filter(raw, ts="2026-06-12T00:00:00Z"):
-    """Apply health_fallback_filter.jq the same way health_check.sh does."""
-    result = subprocess.run(
-        [
-            "jq", "-n",
-            "-f", str(FALLBACK_FILTER),
-            "--arg", "ts", ts,
-            "--arg", "raw", raw,
-            "--arg", "default", DEFAULT_SERVICES,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
-
-
-def test_fallback_empty_raw_uses_default_set():
-    doc = run_fallback_filter("")
-    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
-    assert doc["overall"] == "down"
-    assert all(v["status"] == "down" and v["latency_ms"] == 0 for v in doc["services"].values())
-
-
-def test_fallback_all_invalid_raw_falls_back_to_default_set():
-    # Regression: the allowlist must filter BEFORE the raw-vs-default choice;
-    # an all-invalid RALLY_SERVICES previously produced a keystone-only doc.
-    doc = run_fallback_filter("../etc, b/c, ;rm")
-    assert list(doc["services"]) == DEFAULT_SERVICES.split(",")
-
-
-def test_fallback_mixed_raw_keeps_only_allowlisted_tokens():
-    doc = run_fallback_filter(" Nova , ../x, SWIFT , nova ")
-    assert list(doc["services"]) == ["keystone", "nova", "swift"]
-
-
-def test_fallback_keystone_always_present_and_first():
-    doc = run_fallback_filter("glance")
-    assert list(doc["services"]) == ["keystone", "glance"]
+    assert ledger["uptime"]["window_days"] == 30  # the default

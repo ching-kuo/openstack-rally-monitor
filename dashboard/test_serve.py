@@ -1,4 +1,5 @@
 """Unit tests for dashboard/serve.py."""
+import json
 import urllib.error
 import urllib.request
 from pathlib import Path, PurePosixPath
@@ -6,6 +7,19 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 import serve
+
+
+# The JSON files the dashboard fetches (dashboard/js/), stated independently of
+# serve.ALLOWED_JSON_SYMLINKS.
+REQUIRED_JSON = frozenset({
+    "results.json",
+    "history.json",
+    "health.json",
+    "health_history.json",
+    "announcement-state.json",
+    "run_state.json",
+    "dashboard_config.json",
+})
 
 
 def get(base, path):
@@ -86,23 +100,22 @@ class TestAllowlist:
         code, _, _ = get(base, request_path)
         assert code == 404
 
-    def test_all_json_symlinks_served(self, server):
+    def test_all_json_symlinks_served_as_revalidated_json(self, server):
+        """Every allowlisted JSON symlink is served as JSON with no-cache (the
+        data changes every run/check). The loop covers whatever production
+        allowlists; REQUIRED_JSON pins, independently of it, the files the
+        dashboard needs, so dropping one from the allowlist fails here."""
         base, dashboard_dir, results_dir = server
-        payloads = {
-            "results.json": '{"ok": true}',
-            "history.json": "{}",
-            "health.json": "{}",
-            "health_history.json": "{}",
-            "announcement-state.json": '{"announcements": []}',
-            "run_state.json": '{"state": "idle"}',
-        }
-        for name, payload in payloads.items():
+        assert REQUIRED_JSON <= serve.ALLOWED_JSON_SYMLINKS
+        for name in sorted(serve.ALLOWED_JSON_SYMLINKS):
+            payload = json.dumps({"name": name})
             (results_dir / name).write_text(payload)
             (dashboard_dir / name).symlink_to(results_dir / name)
-            code, _, body = get(base, f"/{name}")
+            code, headers, body = get(base, f"/{name}")
             assert code == 200, f"{name} should be served"
-            if name == "results.json":
-                assert b"ok" in body
+            assert body == payload.encode(), name
+            assert headers["cache-control"] == "no-cache", name
+            assert headers["content-type"].startswith("application/json"), name
 
     @pytest.mark.parametrize("name", ["run_state.json", "announcement-state.json"])
     def test_dangling_state_symlink_returns_404(self, server, name):
@@ -114,15 +127,6 @@ class TestAllowlist:
         (dashboard_dir / name).symlink_to(results_dir / name)
         code, _, _ = get(base, f"/{name}")
         assert code == 404
-
-    @pytest.mark.parametrize("name", ["results.json", "run_state.json", "announcement-state.json"])
-    def test_json_symlink_has_no_cache(self, server, name):
-        base, dashboard_dir, results_dir = server
-        (results_dir / name).write_text("{}")
-        (dashboard_dir / name).symlink_to(results_dir / name)
-        _, headers, _ = get(base, f"/{name}")
-        assert headers.get("cache-control") == "no-cache"
-        assert headers["content-type"].startswith("application/json")
 
     def test_arbitrary_results_json_not_widened_by_allowlist(self, server):
         """Adding announcement-state.json must not widen the allowlist to
@@ -295,29 +299,15 @@ class TestRunReports:
         assert b"report" in body
         assert headers["content-type"].startswith("text/html")
 
-    def test_report_uses_the_strict_csp(self, server):
-        """Reports now carry the strict CSP: script-src is exactly 'self', with
-        no 'unsafe-inline', no CDN origins, and no sandbox directive. The report
-        executes only same-origin scripts (report.js, vendored Chart.js); its
-        data rides in a non-executable <script type=application/json> block that
-        CSP script-src does not govern."""
-        base, dashboard_dir, results_dir = server
-        self._make_report(results_dir, dashboard_dir, self.VALID_TS, "nova.html")
-        _, headers, _ = get(base, f"/runs/{self.VALID_TS}/nova.html")
-        csp = _parse_csp(headers["content-security-policy"])
-        assert csp.get("script-src") == ["'self'"]
-        assert "'unsafe-inline'" not in csp.get("script-src", [])
-        assert "https://ajax.googleapis.com" not in csp.get("script-src", [])
-        assert "https://cdnjs.cloudflare.com" not in csp.get("script-src", [])
-        assert "https://cdnjs.cloudflare.com" not in csp.get("style-src", [])
-        assert "sandbox" not in csp
-        assert headers["x-frame-options"] == "DENY"
-
     def test_report_and_dashboard_share_one_strict_csp(self, server):
         """There is a single header set now: a report and a dashboard asset on
-        the same server return byte-identical CSP. A reused connection proves no
+        the same server return byte-identical CSP (whose script-src, style-src
+        and default-src TestSecurityHeaders pins). A reused connection proves no
         per-path policy variance crept back in (a regression guard against the
-        old dual-policy model leaking across keep-alive)."""
+        old dual-policy model leaking across keep-alive). Reports execute only
+        same-origin scripts (report.js, vendored Chart.js); their data rides in
+        a non-executable <script type=application/json> block that CSP
+        script-src does not govern, so no CDN origin or sandbox is needed."""
         import http.client
         from urllib.parse import urlparse
 
@@ -333,6 +323,7 @@ class TestRunReports:
             r1 = conn.getresponse()
             r1.read()
             report_csp = r1.getheader("content-security-policy")
+            report_frame_options = r1.getheader("x-frame-options")
 
             conn.request("GET", "/index.html")
             r2 = conn.getresponse()
@@ -342,7 +333,10 @@ class TestRunReports:
             conn.close()
 
         assert report_csp == index_csp
-        assert _parse_csp(report_csp).get("script-src") == ["'self'"]
+        csp = _parse_csp(report_csp)
+        assert csp.get("script-src") == ["'self'"]
+        assert "sandbox" not in csp
+        assert report_frame_options == "DENY"
 
     @pytest.mark.parametrize(
         "path",
@@ -430,16 +424,14 @@ class TestSecurityHeaders:
         [
             ("x-frame-options", "DENY"),
             ("x-content-type-options", "nosniff"),
-            ("content-security-policy", None),
         ],
     )
     def test_security_headers_present(self, server, header, expected_value):
+        # The CSP itself is checked directive by directive below.
         base, dashboard_dir, _ = server
         (dashboard_dir / "index.html").write_text("<html></html>")
         _, headers, _ = get(base, "/")
-        assert header in headers
-        if expected_value is not None:
-            assert headers[header] == expected_value
+        assert headers[header] == expected_value
 
     def test_csp_script_src_has_no_unsafe_inline(self, server):
         """Regression: script-src must not permit inline scripts. index.html
@@ -459,6 +451,8 @@ class TestSecurityHeaders:
         assert "'self'" in csp.get("style-src", [])
         # The fallback directive also stays locked to same-origin.
         assert csp.get("default-src") == ["'self'"]
+        # No external origin (e.g. the old report CDNs) in any directive.
+        assert not [t for tokens in csp.values() for t in tokens if "://" in t]
 
 
 # ---------------------------------------------------------------------------

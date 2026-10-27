@@ -6,7 +6,7 @@ import pytest
 import health_metrics as hm
 import metrics_common as mc
 import rally_exporter as exporter
-from exporter_testlib import iso_offset, make_health, make_summary, metrics_output
+from exporter_testlib import error_count, iso_offset, make_health, make_summary, metrics_output
 
 # ---------------------------------------------------------------------------
 # load_health
@@ -22,16 +22,12 @@ class TestLoadHealth:
 
     def test_missing_or_corrupt_file_increments_error_counter(self, results_dir):
         """health.json is always seeded, so absence/corruption is a real error."""
-        before = exporter.rally_exporter_errors_total.labels(file="health.json")._value.get()
+        before = error_count("health.json")
         exporter.load_health()  # no file present
-        after = exporter.rally_exporter_errors_total.labels(file="health.json")._value.get()
-        assert after == before + 1
+        assert error_count("health.json") == before + 1
 
-    def test_valid_file_returns_data(self, results_dir):
-        (results_dir / "health.json").write_text(json.dumps(make_health()))
-        result = exporter.load_health()
-        assert result["overall"] == "up"
-        assert result["services"]["keystone"]["status"] == "up"
+    # A valid file is covered through update_metrics by
+    # TestHealthMetrics::test_per_service_and_overall_set.
 
 
 # ---------------------------------------------------------------------------
@@ -49,11 +45,6 @@ class TestHealthMetrics:
         assert 'rally_api_latency_milliseconds{service="keystone"} 120.0' in output
         assert 'rally_api_latency_milliseconds{service="nova"} 5000.0' in output
         assert "rally_api_overall_up 1.0" in output
-
-    def test_overall_down_sets_zero(self, results_dir):
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="down")))
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
 
     def test_degraded_service_counts_as_up(self, results_dir):
         """degraded means reachable-but-slow: rally_api_up is 1 (slowness shows
@@ -74,45 +65,47 @@ class TestHealthMetrics:
         # The slow service is still visible via its latency gauge.
         assert 'rally_api_latency_milliseconds{service="nova"} 6200.0' in output
 
-    def test_overall_degraded_sets_one(self, results_dir):
-        """overall degraded -> rally_api_overall_up 1 (reachable)."""
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="degraded")))
+    @pytest.mark.parametrize(
+        ("overall", "expected"),
+        [
+            pytest.param("up", 1, id="up"),
+            pytest.param("degraded", 1, id="degraded-is-reachable"),
+            pytest.param("down", 0, id="down"),
+            pytest.param("unknown", 0, id="unknown-fails-closed"),
+            pytest.param("bogus", 0, id="unrecognized-fails-closed"),
+            pytest.param(None, 0, id="missing-overall-fails-closed"),
+            pytest.param("no-file", 0, id="missing-file-fails-closed"),
+        ],
+    )
+    def test_overall_up_table(self, results_dir, overall, expected):
+        """rally_api_overall_up FAILS CLOSED: only up/degraded read 1. Each case
+        starts from the opposite value, so a gauge that kept a stale 1 (a broken
+        pipeline whose per-service series are cleared, so no `== 0` alert can
+        fire) or a stale 0 fails the test. A seed/unknown or missing overall
+        and a missing health.json (load_health returns 'unknown') all read 0."""
+        hm.rally_api_overall_up.set(1 - expected)
+        if overall != "no-file":
+            health = make_health(overall=overall)
+            if overall is None:
+                del health["overall"]
+            (results_dir / "health.json").write_text(json.dumps(health))
         exporter.update_metrics()
-        assert "rally_api_overall_up 1.0" in metrics_output()
-
-    def test_overall_unknown_fails_closed_to_zero(self, results_dir):
-        """A seed/unknown overall FAILS CLOSED to 0, even after a prior healthy
-        signal. Otherwise a corrupt/missing health.json would leave this gauge
-        stuck at 1 while the per-service rally_api_up series are cleared (absent
-        series cannot fire `== 0` alerts), so a broken pipeline would read as
-        all-healthy."""
-        hm.rally_api_overall_up.set(1)  # simulate a prior "up" signal
-        (results_dir / "health.json").write_text(
-            json.dumps(make_health(overall="unknown"))
-        )
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
-
-    def test_overall_missing_fails_closed_to_zero(self, results_dir):
-        hm.rally_api_overall_up.set(1)
-        (results_dir / "health.json").write_text(
-            json.dumps({"timestamp": "2024-01-01T12:00:00Z", "services": {}})
-        )
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
+        assert f"rally_api_overall_up {float(expected)}" in metrics_output()
 
     def test_overall_healthy_then_corrupt_flips_to_zero(self, results_dir):
         """Regression: a healthy scrape (overall up -> 1) followed by a
-        corrupt/missing-overall health.json must flip the gauge to 0, not leave
-        it stuck at 1. This is the exact stale-signal bug the fail-closed change
-        fixes."""
-        (results_dir / "health.json").write_text(json.dumps(make_health(overall="up")))
+        missing-overall health.json must flip the gauge to 0, not leave it
+        stuck at 1. This is the exact stale-signal bug the fail-closed change
+        fixes. (Both snapshots are fresh, so staleness is not what flips it.)"""
+        path = results_dir / "health.json"
+        path.write_text(json.dumps(make_health(overall="up")))
         exporter.update_metrics()
         assert "rally_api_overall_up 1.0" in metrics_output()
         # Now the file loses a valid overall (e.g. truncated/corrupt write).
-        (results_dir / "health.json").write_text(
-            json.dumps({"timestamp": "2024-01-01T12:05:00Z", "services": {}})
-        )
+        broken = make_health(overall="up")
+        del broken["overall"]
+        path.write_text(json.dumps(broken))
+        exporter._health_mtime = -1.0  # force a re-read
         exporter.update_metrics()
         assert "rally_api_overall_up 0.0" in metrics_output()
 
@@ -140,14 +133,6 @@ class TestHealthMetrics:
         output = metrics_output()
         assert 'rally_api_up{service="nova"}' not in output
         assert 'rally_api_up{service="keystone"} 1.0' in output
-
-    def test_missing_health_file_fails_closed_to_zero(self, results_dir):
-        """With no health.json, load_health returns overall 'unknown', which now
-        fails closed to 0 (was the stale-at-1 bug): a missing health pipeline
-        must not read as healthy."""
-        hm.rally_api_overall_up.set(1)
-        exporter.update_metrics()
-        assert "rally_api_overall_up 0.0" in metrics_output()
 
 
 class TestHealthStaleness:

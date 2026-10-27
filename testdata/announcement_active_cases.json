@@ -1,0 +1,102 @@
+{
+  "_comment": "Announcement active-ness cases, KEEP IN SYNC: exporter/announcement_metrics.py::is_announcement_active and dashboard/js/announcements.js::isAnnouncementActive must agree on every case. Run by exporter/test_announcement_metrics.py and dashboard/test_dashboard_cards.py. now_ms is now_iso in epoch milliseconds; prototype-key types must not pass on the JS side.",
+  "now_iso": "2026-06-12T12:00:00Z",
+  "now_ms": 1781265600000.0,
+  "cases": [
+    {
+      "id": "incident-no-bounds",
+      "record": {
+        "type": "incident"
+      },
+      "active": true
+    },
+    {
+      "id": "maintenance-before-expiry",
+      "record": {
+        "type": "maintenance",
+        "expires_at": "2026-06-12T13:00:00Z"
+      },
+      "active": true
+    },
+    {
+      "id": "scheduled-inside-window",
+      "record": {
+        "type": "scheduled",
+        "effective_from": "2026-06-12T11:59:00Z",
+        "expires_at": "2026-06-12T13:00:00Z"
+      },
+      "active": true
+    },
+    {
+      "id": "effective-from-exactly-now",
+      "record": {
+        "type": "scheduled",
+        "effective_from": "2026-06-12T12:00:00Z",
+        "expires_at": "2026-06-12T13:00:00Z"
+      },
+      "active": true
+    },
+    {
+      "id": "future-effective-from",
+      "record": {
+        "type": "scheduled",
+        "effective_from": "2026-06-12T13:00:00Z",
+        "expires_at": "2026-06-12T14:00:00Z"
+      },
+      "active": false
+    },
+    {
+      "id": "past-expires-at",
+      "record": {
+        "type": "maintenance",
+        "expires_at": "2026-06-12T11:59:00Z"
+      },
+      "active": false
+    },
+    {
+      "id": "expires-at-exactly-now",
+      "record": {
+        "type": "maintenance",
+        "expires_at": "2026-06-12T12:00:00Z"
+      },
+      "active": false
+    },
+    {
+      "id": "unparseable-bounds-ignored",
+      "record": {
+        "type": "incident",
+        "effective_from": "not-a-date",
+        "expires_at": "garbage"
+      },
+      "active": true
+    },
+    {
+      "id": "unknown-type",
+      "record": {
+        "type": "bogus"
+      },
+      "active": false
+    },
+    {
+      "id": "prototype-key-toString",
+      "record": {
+        "type": "toString"
+      },
+      "active": false
+    },
+    {
+      "id": "prototype-key-constructor",
+      "record": {
+        "type": "constructor"
+      },
+      "active": false
+    },
+    {
+      "id": "prototype-key-__proto__",
+      "record": {
+        "type": "__proto__"
+      },
+      "active": false
+    }
+  ]
+}

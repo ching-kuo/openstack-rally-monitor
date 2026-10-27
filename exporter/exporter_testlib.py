@@ -80,3 +80,8 @@ def iso_offset(seconds):
 def metrics_output():
     """Return current registry output as a string."""
     return generate_latest(registry).decode()
+
+
+def error_count(file):
+    """Current rally_exporter_errors_total{file=...} (0 before its first error)."""
+    return registry.get_sample_value("rally_exporter_errors_total", {"file": file}) or 0.0

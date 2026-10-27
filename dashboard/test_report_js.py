@@ -2,8 +2,8 @@
 
 report.js calls initReport() at load time (touching document), so it cannot be
 required directly under node. We extract the self-contained pure helpers by
-their source markers and evaluate them in isolation -- the same technique as
-test_getrunstatus.py. This pins:
+their source (node_testlib.extract_function) and evaluate them in isolation.
+This pins:
 
   - scenarioStatus: a scenario is "passed" only with iterations>0, zero errors,
     and sla_passed != false (mirrors the all-green intent in build_summary).
@@ -14,71 +14,46 @@ test_getrunstatus.py. This pins:
 If node is unavailable the tests skip rather than fail.
 """
 import json
-import shutil
-import subprocess
 from pathlib import Path
 
-import pytest
+from node_testlib import assert_cases, extract_function, requires_node, run_script
 
 REPORT_JS = Path(__file__).resolve().parent / "report.js"
-NODE = shutil.which("node")
 
-pytestmark = pytest.mark.skipif(NODE is None, reason="node not available")
-
-
-def _extract(func_name: str) -> str:
-    src = REPORT_JS.read_text()
-    marker = f"function {func_name}("
-    start = src.index(marker)
-    depth = 0
-    i = src.index("{", start)
-    while i < len(src):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
-        i += 1
-    raise AssertionError(f"could not brace-match {func_name}")
+pytestmark = requires_node
 
 
-def _run_node(snippet: str) -> str:
-    result = subprocess.run([NODE, "-e", snippet], capture_output=True, text=True, check=False)
-    assert result.returncode == 0, f"node failed:\n{result.stderr}"
-    return result.stdout.strip()
+def _extract(*func_names: str) -> str:
+    return "\n".join(extract_function(REPORT_JS, name) for name in func_names)
 
 
 def _eval(func_name: str, call: str) -> str:
-    fn = _extract(func_name)
-    return _run_node(f"{fn}\nprocess.stdout.write(String({call}));")
+    return run_script(f"{_extract(func_name)}\nprocess.stdout.write(String({call}));")
 
 
-def _eval_json(func_name: str, call: str):
-    fn = _extract(func_name)
-    return json.loads(_run_node(f"{fn}\nprocess.stdout.write(JSON.stringify({call}));"))
+def _eval_json(func_names: str | tuple[str, ...], call: str):
+    names = (func_names,) if isinstance(func_names, str) else func_names
+    return json.loads(
+        run_script(f"{_extract(*names)}\nprocess.stdout.write(JSON.stringify({call}));")
+    )
 
 
 # --- scenarioStatus ---------------------------------------------------------
 
-def test_scenario_status_passed():
-    assert _eval("scenarioStatus", 'scenarioStatus({iterations:2,errors:0,sla_passed:true})') == "passed"
+SCENARIO_STATUS_CASES = [
+    ("passed", "{iterations:2,errors:0,sla_passed:true}", "passed"),
+    ("failed-on-errors", "{iterations:2,errors:1,sla_passed:true}", "failed"),
+    ("failed-on-sla", "{iterations:2,errors:0,sla_passed:false}", "failed"),
+    ("failed-on-zero-iterations", "{iterations:0,errors:0,sla_passed:true}", "failed"),
+    ("failed-on-nullish", "null", "failed"),
+]
 
 
-def test_scenario_status_failed_on_errors():
-    assert _eval("scenarioStatus", 'scenarioStatus({iterations:2,errors:1,sla_passed:true})') == "failed"
-
-
-def test_scenario_status_failed_on_sla():
-    assert _eval("scenarioStatus", 'scenarioStatus({iterations:2,errors:0,sla_passed:false})') == "failed"
-
-
-def test_scenario_status_failed_on_zero_iterations():
-    assert _eval("scenarioStatus", 'scenarioStatus({iterations:0,errors:0,sla_passed:true})') == "failed"
-
-
-def test_scenario_status_failed_on_nullish():
-    assert _eval("scenarioStatus", "scenarioStatus(null)") == "failed"
+def test_scenario_status():
+    """All cases in one node run; the ids keep a failure readable."""
+    args = ",".join(arg for _, arg, _ in SCENARIO_STATUS_CASES)
+    out = _eval_json("scenarioStatus", f"[{args}].map((s) => scenarioStatus(s))")
+    assert_cases([(case_id, expected) for case_id, _, expected in SCENARIO_STATUS_CASES], out)
 
 
 # --- groupScenarios ---------------------------------------------------------
@@ -149,19 +124,17 @@ def test_parse_hash_routes_known_views():
 
 
 def test_selection_hash_round_trips_through_parse_hash():
-    fns = _extract("parseHash") + "\n" + _extract("selectionHash")
-    out = json.loads(_run_node(
-        f"{fns}\nconst sels=[{{view:'overview'}},{{view:'input'}},{{view:'scenario',idx:3}}];"
-        "process.stdout.write(JSON.stringify(sels.map((s) => parseHash(selectionHash(s), 5))));"
-    ))
+    out = _eval_json(
+        ("parseHash", "selectionHash"),
+        "[{view:'overview'},{view:'input'},{view:'scenario',idx:3}]"
+        ".map((s) => parseHash(selectionHash(s), 5))",
+    )
     assert out == [{"view": "overview"}, {"view": "input"}, {"view": "scenario", "idx": 3}]
 
 
 def _initial(scenarios_js: str):
-    fns = _extract("scenarioStatus") + "\n" + _extract("initialSelection")
-    return json.loads(_run_node(
-        f"{fns}\nprocess.stdout.write(JSON.stringify(initialSelection({scenarios_js})));"
-    ))
+    return _eval_json(("scenarioStatus", "initialSelection"),
+                      f"initialSelection({scenarios_js})")
 
 
 def test_initial_selection_opens_first_failed_scenario():
@@ -181,12 +154,11 @@ def test_initial_selection_is_overview_when_all_passed_or_empty():
 def test_route_for_falls_back_to_initial_selection():
     """Initial load and hashchange share one fallback, so Back to the original
     (hashless) entry shows the same view the page opened on."""
-    fns = "\n".join(_extract(n) for n in ("scenarioStatus", "parseHash", "initialSelection", "routeFor"))
-    out = json.loads(_run_node(
-        f"{fns}\nconst sc=[{{iterations:1,errors:0}},{{iterations:1,errors:1}}];"
-        "process.stdout.write(JSON.stringify([routeFor('', sc), routeFor('#input', sc),"
-        " routeFor('#scenario=9', sc)]));"
-    ))
+    out = _eval_json(
+        ("scenarioStatus", "parseHash", "initialSelection", "routeFor"),
+        "((sc) => [routeFor('', sc), routeFor('#input', sc), routeFor('#scenario=9', sc)])"
+        "([{iterations:1,errors:0},{iterations:1,errors:1}])",
+    )
     assert out == [
         {"view": "scenario", "idx": 1},
         {"view": "input"},

@@ -14,13 +14,10 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from shell_testlib import write_shim
+from shell_testlib import BASE_PATH, BASH, write_shim
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
-BASH = shutil.which("bash") or "/bin/bash"
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 TIMESTAMP = "20260612T120000Z"
-BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 UUID = "0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"
 
 

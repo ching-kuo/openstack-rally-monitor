@@ -4,7 +4,12 @@ import json
 import re
 from pathlib import Path
 
-from node_testlib import FAKE_DOM, imports, requires_node, run_json, run_module
+from node_testlib import FAKE_DOM, assert_cases, imports, requires_node, run_json, run_module
+
+# The active-ness case table is shared with the exporter's Python test.
+ANNOUNCEMENT_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "announcement_active_cases.json").read_text()
+)
 
 pytestmark = requires_node
 
@@ -180,15 +185,19 @@ def test_card_focus_survives_a_refresh():
     assert out == ["cinder", True, True, True]
 
 
-def test_announcement_types_ignore_prototype_keys():
-    """KEEP IN SYNC with announcement_metrics.py: only the three enum types."""
+def test_is_announcement_active_matches_shared_cases():
+    """KEEP IN SYNC with announcement_metrics.py: the exporter runs the same
+    table (testdata/announcement_active_cases.json), including the
+    prototype-key types that must not pass as one of the three enum types."""
+    cases = ANNOUNCEMENT_CASES["cases"]
+    records = [case["record"] for case in cases]
     out = run_json(
         imports("announcements", "isAnnouncementActive")
-        + "const now = Date.now();"
-        "process.stdout.write(JSON.stringify(['toString', 'constructor', '__proto__', 'incident']"
-        ".map((type) => isAnnouncementActive({type}, now))));"
+        + f"const recs = JSON.parse({json.dumps(json.dumps(records))});"
+        "process.stdout.write(JSON.stringify(recs.map("
+        f"(r) => isAnnouncementActive(r, {ANNOUNCEMENT_CASES['now_ms']}))));"
     )
-    assert out == [False, False, False, True]
+    assert_cases([(case["id"], case["active"]) for case in cases], out)
 
 
 def _css_block(path: Path, selector: str) -> str:

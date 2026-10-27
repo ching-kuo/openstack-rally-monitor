@@ -493,6 +493,7 @@ openstack-rally-monitor/
 │   ├── test_*.py, conftest.py, node_testlib.py
 ├── docs/
 │   └── CUSTOMIZING.md
+├── testdata/                (case tables shared by the Python and JS tests)
 └── env.sample
 ```
 

@@ -1,26 +1,24 @@
 """Shell-level tests for scripts/rgw_helpers.sh, including auto_purge_rgw."""
 
-import os
-import sys
 import subprocess
 from pathlib import Path
 
+from shell_testlib import BASE_PATH, BASH, write_curl_config_shim
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-from shell_testlib import write_curl_config_shim  # noqa: E402
-HELPERS = ROOT / "scripts" / "rgw_helpers.sh"
-RUN_TESTS = ROOT / "scripts" / "run_tests.sh"
+SCRIPTS = Path(__file__).resolve().parent
+ROOT = SCRIPTS.parent
+HELPERS = SCRIPTS / "rgw_helpers.sh"
+RUN_TESTS = SCRIPTS / "run_tests.sh"
 
 
 def run_bash(script: str, env: dict | None = None) -> subprocess.CompletedProcess[str]:
-    merged_env = os.environ.copy()
-    if env:
-        merged_env.update(env)
+    """Run `script` with a minimal environment: BASE_PATH plus only what the
+    test sets. Never the developer's own, whose RGW_*/OS_* credentials could
+    point the helpers at a live RGW or Keystone."""
     return subprocess.run(
-        ["bash", "-c", script],
+        [BASH, "-c", script],
         cwd=str(ROOT),
-        env=merged_env,
+        env={"PATH": BASE_PATH, **(env or {})},
         text=True,
         capture_output=True,
     )
@@ -448,21 +446,6 @@ def test_empty_bulk_listing_falls_back_to_per_project_lookups(tmp_path):
     assert proc.stdout.strip() == "FALLBACK"
 
 
-def test_run_order_refreshes_cleanup_metrics_after_rgw_auto_purge():
-    script = RUN_TESTS.read_text(encoding="utf-8")
-    # Scope to the normal completion flow only. The deployment-failure path
-    # inside main() now also calls publish_dashboard_files (before auto_purge),
-    # so anchor on the normal-flow auto-purge call-site comment, which exists
-    # only after that failure path, to avoid matching the earlier call.
-    main_body = script.split(
-        "# Auto-purge rally-owned RGW orphans before writing cleanup metrics", 1
-    )[1]
-
-    assert main_body.index("auto_purge_rgw") < main_body.index("check_cleanup")
-    # finish_run (run_lib.sh) prunes, records the duration, then publishes.
-    assert main_body.index("check_cleanup") < main_body.index("finish_run")
-
-
 # ---------------------------------------------------------------------------
 # rgw_list_user_bucket_names: the stats-free inventory
 # ---------------------------------------------------------------------------
@@ -574,7 +557,7 @@ def test_rgw_curl_keeps_credentials_out_of_argv(tmp_path):
         echo "code=$code"
         """,
         env={
-            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PATH": f"{bin_dir}:{BASE_PATH}",
             "RGW_ADMIN_URL": "https://rgw.example.com/admin",
             "RGW_ACCESS_KEY": "AKEY",
             "RGW_SECRET_KEY": 'SECRET"KEY',

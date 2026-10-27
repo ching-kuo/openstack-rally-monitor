@@ -8,12 +8,11 @@ non-run directories and non-service files are ignored, and a malformed JSON
 still yields a valid empty-state report (best-effort, never crashes the boot).
 """
 import json
-import shutil
 import subprocess
 from pathlib import Path
 
-# macOS ships bash 3.2 at /bin/bash; the scripts need bash >= 4 (mapfile).
-BASH = shutil.which("bash") or "/bin/bash"
+from shell_testlib import BASE_PATH, BASH
+
 
 SCRIPT = Path(__file__).resolve().parent / "backfill_reports.sh"
 
@@ -42,7 +41,7 @@ def run_backfill(results_dir: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         check=False,
-        env={"RESULTS_DIR": str(results_dir), "PATH": "/usr/bin:/bin:/usr/local/bin"},
+        env={"RESULTS_DIR": str(results_dir), "PATH": BASE_PATH},
     )
 
 

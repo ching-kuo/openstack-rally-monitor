@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -18,12 +17,10 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import rally_project_tracker as tracker_mod  # noqa: E402
-from shell_testlib import write_shim  # noqa: E402
+from shell_testlib import BASE_PATH, BASH, write_shim  # noqa: E402
 
-BASH = shutil.which("bash") or "/bin/bash"
 SCRIPTS = Path(__file__).resolve().parent
 TIMESTAMP = "20260612T120000Z"
-BASE_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 # Same shape the bash tracker wrote: "<UTC ts> <project_id> <service>".
 LEDGER_LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ (\S+) (\S+)$")
 
@@ -247,8 +244,8 @@ def test_run_service_tests_records_task_projects_only(tmp_path: Path) -> None:
     # The task creates a context project and exits; the pre-existing one is
     # in the snapshot and must not be attributed to nova.
     create = (
-        f'echo \'[{{"id":"pre","name":"c_rally_pre"}},'
-        f'{{"id":"made","name":"c_rally_made"}}]\' > "$FAKE_PROJECTS_FILE"; '
+        'echo \'[{"id":"pre","name":"c_rally_pre"},'
+        '{"id":"made","name":"c_rally_made"}]\' > "$FAKE_PROJECTS_FILE"; '
         'echo "Task aborted"; exit 1'
     )
     result, ledger = run_service(tmp_path, create)

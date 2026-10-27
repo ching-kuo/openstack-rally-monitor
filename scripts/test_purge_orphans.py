@@ -16,13 +16,13 @@ exercised end to end.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-BASH = shutil.which("bash") or "/bin/bash"
+from shell_testlib import BASE_PATH, BASH
+
 SCRIPT = Path(__file__).resolve().parent / "purge_orphans.sh"
 
 
@@ -81,27 +81,19 @@ rgw_user_exists() { return 0; }
 """
 
 
-def test_empty_unknown_owner_is_eligible(tmp_path: Path):
+def test_orphan_classification(tmp_path: Path):
     r = run_purge_rgw(STUBS, tmp_path)
+    # rally_uid and the empty unknown-owner empty_uid are eligible; data_uid
+    # (unknown owner WITH data) is skipped.
     assert r["EMPTY"] == "1"
-    # rally_uid + empty_uid are both eligible users; data_uid is not.
+    assert r["SKIPPED"] == "1"
     assert "empty_uid" in r["SNAP_USERS"]
     assert "rally_uid" in r["SNAP_USERS"]
-    assert "data_uid" not in r["SNAP_USERS"]
-
-
-def test_unknown_owner_with_data_is_skipped(tmp_path: Path):
-    r = run_purge_rgw(STUBS, tmp_path)
-    assert r["SKIPPED"] == "1"
     assert "data_uid" not in r["SNAP_USERS"]
     # The empty orphan owns no buckets, so only the rally-owned bucket snapshots.
     assert "keepme" not in r["SNAP_BUCKETS"]
     assert "rally_uid|b1" in r["SNAP_BUCKETS"]
-
-
-def test_found_count_includes_empty_orphan(tmp_path: Path):
-    r = run_purge_rgw(STUBS, tmp_path)
-    # rally_uid (1 user + 1 bucket) + empty_uid (1 user) = 3; data_uid skipped.
+    # rally_uid (1 user + 1 bucket) + empty_uid (1 user) = 3.
     assert r["FOUND"] == "3"
 
 
@@ -138,7 +130,7 @@ def run_harness(body: str, tmp_path: Path, env: dict | None = None,
         {body}
     """
     full_env = {
-        "PATH": f"{tmp_path / 'bin'}:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
+        "PATH": f"{tmp_path / 'bin'}:{BASE_PATH}",
         "RESULTS_DIR": str(tmp_path),
         "RALLY_RUN_LOCK_FILE": str(tmp_path / "rally-run.lock"),
         **(env or {}),
@@ -340,7 +332,7 @@ def test_run_tests_and_purge_share_one_lock_setting(tmp_path: Path):
         echo "RUN=$RALLY_RUN_LOCK_FILE"
     """
     r = subprocess.run([BASH, "-c", probe], capture_output=True, text=True,
-                       env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin",
+                       env={"PATH": BASE_PATH,
                             "RALLY_RUN_LOCK_FILE": custom, "RESULTS_DIR": str(tmp_path)})
     assert f"RUN={custom}" in r.stdout, r.stderr
     run_tests = (SCRIPT.parent / "run_tests.sh").read_text()
