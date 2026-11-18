@@ -148,3 +148,20 @@ def test_rally_entry_without_valid_id_is_a_scan_error(tmp_path: Path) -> None:
     result, m = run_monitor(tmp_path, {"server list": json.dumps([{"Name": "s_rally_a"}])})
     assert m["openstack_scan_status"] == "error"
     assert m["details"]["servers"] == 0
+
+
+def test_prefix_requires_trailing_underscore(tmp_path: Path) -> None:
+    result, m = run_monitor(tmp_path, {
+        "server list": json.dumps([
+            {"Name": "s_rallybackup", "ID": "id1"},
+            {"Name": "c_rallyx", "ID": "id2"},
+            {"Name": "s_rally_abc", "ID": "id3"},
+            {"Name": "c_rally_abc", "ID": "id4"},
+        ]),
+    })
+    assert result.returncode == 1, result.stdout
+    assert m["details"]["servers"] == 1
+    assert m["context_details"]["servers"] == 1
+    assert m["orphaned_resources"]["nova"] == 1
+    assert m["context_orphaned_resources"]["nova"] == 1
+    assert m["openstack_scan_status"] == "ok"

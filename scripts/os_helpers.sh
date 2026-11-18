@@ -80,13 +80,13 @@ reexec_as_rally() {
 # 0 when <service> is monitored: in the normalized RALLY_SERVICES set
 # (keystone always). Callers use it only to judge a missing catalog endpoint;
 # every resource type is scanned regardless, because one service's scenarios
-# leave orphans in another's (nova contexts create c_rally networks/routers).
+# leave orphans in another's (nova contexts create c_rally_* networks/routers).
 os_service_monitored() {
     [[ "$1" == "keystone" ]] && return 0
     grep -Fxq -- "$1" <<< "$(parse_rally_services "${RALLY_SERVICES:-}")"
 }
 
-# Run `<cmd...> -f json` and store "<id>\t<name>" for every s_rally*/c_rally*
+# Run `<cmd...> -f json` and store "<id>\t<name>" for every s_rally_*/c_rally_*
 # entry in the variable named $1. Returns 0 on success, 2 when the service has
 # no endpoint in the catalog, 1 when the call fails or its output is not a
 # JSON array (so a failure never reads as "0 orphans"). A 2 is "not
@@ -114,7 +114,7 @@ os_list_rally_resources() {
 }
 
 # One jq pass that validates the shape (non-array output fails) and prints
-# "<id>\t<name>" per s_rally*/c_rally* entry. A null/missing Name counts as ""
+# "<id>\t<name>" per s_rally_*/c_rally_* entry. A null/missing Name counts as ""
 # (no match) rather than erroring the whole program, which used to zero the
 # count for its resource type. A matching entry whose ID is not a non-empty
 # ^[A-Za-z0-9_-]+$ string fails the WHOLE listing: an empty ID would make
@@ -126,7 +126,7 @@ _os_rally_rows() {
         if type != "array" then error("not a JSON array") else . end
         | .[]
         | ((.Name // "") | tostring) as $name
-        | select($name | test("^[sc]_rally"))
+        | select($name | test("^[sc]_rally_"))
         # \A..\z: jq `$` would also accept "id\n".
         | if (.ID | type) == "string" and (.ID | test("\\A[A-Za-z0-9_-]+\\z"))
           then [.ID, $name] | @tsv

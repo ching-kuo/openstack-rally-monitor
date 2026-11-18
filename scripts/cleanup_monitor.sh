@@ -61,8 +61,8 @@ check_resource() {
         return 0
     fi
     awk -F'\t' '
-        $2 ~ /^s_rally/ { s++ }
-        $2 ~ /^c_rally/ { c++ }
+        $2 ~ /^s_rally_/ { s++ }
+        $2 ~ /^c_rally_/ { c++ }
         END { print s + 0, c + 0, 0 }
     ' <<< "${rows}"
 }

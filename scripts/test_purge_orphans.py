@@ -195,6 +195,21 @@ def test_unparseable_listing_is_a_listing_error(tmp_path: Path):
     assert "FOUND=0 ERR=1" in r.stdout
 
 
+def test_prefix_requires_trailing_underscore(tmp_path: Path):
+    body = """
+        openstack() {
+            echo '[{"Name":"s_rallybackup","ID":"bad1"},{"Name":"c_rallyx","ID":"bad2"},{"Name":"s_rally_abc","ID":"ok1"},{"Name":"c_rally_abc","ID":"ok2"}]'
+        }
+        purge_servers
+        echo "FOUND=${TOTAL_FOUND} SNAP=${_SNAP_SERVERS[*]+${_SNAP_SERVERS[*]}} ERR=${_LISTING_ERRORS}"
+    """
+    r = run_harness(body, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "FOUND=2 SNAP=ok1 ok2 ERR=0" in r.stdout
+    assert "bad1" not in r.stdout
+    assert "bad2" not in r.stdout
+
+
 # ---------------------------------------------------------------------------
 # main: dry-run listing errors, run-lock interlock
 # ---------------------------------------------------------------------------
