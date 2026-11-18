@@ -331,8 +331,7 @@ cmd_list() {
 ALL_GREEN_PREDICATE='
     (.services | length) > 0
     and (.error // null) == null
-    and (.services | to_entries | any(.value.status == "passed"))
-    and (.services | to_entries | all(.value.status == "passed" or .value.status == "skipped"))
+    and ([.services[].status] | any(. == "passed") and all(. == "passed" or . == "skipped"))
 '
 
 cmd_auto_clear_if_all_green() {

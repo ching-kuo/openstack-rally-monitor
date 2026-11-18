@@ -24,7 +24,8 @@ from shell_testlib import BASE_PATH, BASH
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 
 # build_summary iterates this hardcoded service list (run_tests.sh SERVICES).
-# Services without a result file are reported as "skipped".
+# Services without a result file are reported as "skipped" (no scenario file)
+# or "failed"/results_missing (scenario file exists).
 SERVICES = ("keystone", "nova", "neutron", "glance", "cinder", "swift")
 
 TIMESTAMP = "20260612T120000Z"
@@ -120,6 +121,9 @@ def build_summary(tmp_path: Path, service_files: dict[str, object],
     env = {"PATH": BASE_PATH, "RESULTS_DIR": str(tmp_path)}
     if rally_services is not None:
         env["RALLY_SERVICES"] = rally_services
+    # Pinned so the host's /rally/config never leaks in; empty unless a test
+    # writes scenarios there.
+    env["RALLY_CONFIG_DIR"] = str(tmp_path / "config")
     result = subprocess.run(
         [
             BASH,
@@ -444,4 +448,22 @@ def test_task_that_never_started_is_failed_with_error(tmp_path: Path) -> None:
     assert nova["scenarios"] == []
     # Untouched services keep their usual shape (no error key).
     assert "error" not in svc(summary, "keystone")
+    assert svc(summary, "glance")["status"] == "skipped"
+
+
+def test_missing_results_with_scenario_file_is_failed(tmp_path: Path) -> None:
+    """"skipped" is neutral, so it must mean "no scenario file" only. A service
+    whose scenario exists but left no result file (results export failed,
+    RUN_DIR unwritable) did not run cleanly and must fail the run."""
+    config = tmp_path / "config"
+    (config / "scenarios").mkdir(parents=True)
+    (config / "scenarios" / "nova.yaml").write_text("---\n")
+    summary = build_summary(
+        tmp_path,
+        {"keystone": [scenario("Authenticate.keystone")]},
+        rally_services="keystone,nova,glance",
+    )
+    nova = svc(summary, "nova")
+    assert nova["status"] == "failed"
+    assert nova["error"] == "results_missing"
     assert svc(summary, "glance")["status"] == "skipped"

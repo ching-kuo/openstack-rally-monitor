@@ -208,7 +208,8 @@ def test_timeline_cell_details_for_skipped_pending_and_empty_runs():
         "  [c.className, c.attrs['aria-label']])));"
     )
     assert out[0][0].startswith("timeline-cell passed")
-    assert "All services passed" in out[0][1]
+    # Skipped is neutral but must not be hidden behind "All services passed".
+    assert "All tested services passed (skipped: octavia)" in out[0][1]
     assert out[1][0].startswith("timeline-cell failed")
     assert "All services skipped" in out[1][1]
     assert out[2][0].startswith("timeline-cell pending")

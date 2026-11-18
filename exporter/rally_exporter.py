@@ -543,11 +543,10 @@ def update_metrics():
         elif status == "failed":
             rally_service_status.labels(service=service).set(0)
             all_passed = False
-        elif status == "skipped":
-            rally_service_status.labels(service=service).set(-1)
         else:
             rally_service_status.labels(service=service).set(-1)
-            all_passed = False
+            if status != "skipped":
+                all_passed = False
 
         # Per-scenario metrics
         for scenario in data.get("scenarios", []):

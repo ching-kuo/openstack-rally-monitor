@@ -25,6 +25,12 @@ log_tail() {
 # --------------------------------------------------------------------------
 # 3. Build summary JSON from all results
 # --------------------------------------------------------------------------
+# The one definition of a service's scenario path: run_service_tests SKIPs when
+# it is absent, and build_summary maps "no results" to skipped only then.
+scenario_file_for() {
+    printf '%s' "${RALLY_CONFIG_DIR}/scenarios/$1.yaml"
+}
+
 build_summary() {
     log "Building summary..."
     local summary='{"timestamp":"'"${TIMESTAMP}"'","services":{}}'
@@ -90,8 +96,16 @@ build_summary() {
             # Already normalized by log_tail when run_service_tests wrote it.
             svc_error_detail=$(<"${start_failed_file}")
             log "  ${service}: status=failed (task failed to start)"
+        elif [[ -f "$(scenario_file_for "${service}")" ]]; then
+            # "skipped" is neutral in the all-green predicate, so it must mean
+            # "no scenario file" only (run_service_tests' SKIP). A scenario that
+            # left no results did not run cleanly.
+            svc_status="failed"
+            svc_error="results_missing"
+            svc_error_detail="No ${service}.json was written; see ${RUN_DIR}/${service}.log and run.log"
+            log "  ${service}: status=failed (scenario exists but no result file)"
         else
-            log "  ${service}: no result file found"
+            log "  ${service}: status=skipped (no scenario file)"
         fi
 
         summary=$(echo "${summary}" | jq \
@@ -145,8 +159,7 @@ record_smoke_result() {
     if [[ -z "${status}" ]]; then
         status=$(jq -r '
             if (.services | length) > 0 and ((.error // null) == null)
-               and (.services | to_entries | any(.value.status == "passed"))
-               and (.services | to_entries | all(.value.status == "passed" or .value.status == "skipped"))
+               and ([.services[].status] | any(. == "passed") and all(. == "passed" or . == "skipped"))
             then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
     fi
     RUN_SMOKE_STATUS="${status}"

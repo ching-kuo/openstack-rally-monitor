@@ -92,20 +92,6 @@ def test_deployment_failure_shape_records_failed(tmp_path):
     assert ledger["runs"][0]["status"] == "failed"
 
 
-def test_skipped_service_is_neutral_unless_all_skipped(tmp_path):
-    passed_dir = tmp_path / "passed_and_skipped"
-    passed_dir.mkdir()
-    record(passed_dir, make_summary({"keystone": "passed", "swift": "skipped"}),
-           timestamp=recent_ts(0))
-    assert read_ledger(passed_dir)["runs"][0]["status"] == "passed"
-
-    all_skipped_dir = tmp_path / "all_skipped"
-    all_skipped_dir.mkdir()
-    record(all_skipped_dir, make_summary({"swift": "skipped", "octavia": "skipped"}),
-           timestamp=recent_ts(0))
-    assert read_ledger(all_skipped_dir)["runs"][0]["status"] == "failed"
-
-
 @pytest.mark.parametrize(
     "case",
     RUN_STATUS_CASES,

@@ -77,7 +77,9 @@ run_tests.sh                           (orchestration; summary/ledger/publish/pr
   → rally task results <uuid>          (JSON to /results/<timestamp>/<service>.json; no UUID found
                                         → <service>.start_failed marker → service "failed" with
                                         error task_failed_to_start + an empty-state <service>.html
-                                        carrying the reason; "skipped" = no scenario file only)
+                                        carrying the reason; scenario file but no result file
+                                        → failed, error results_missing; "skipped" = no scenario
+                                        file only, neutral in the all-green predicate)
   → render_report.py <service>.json    (self-contained themed /results/<timestamp>/<service>.html)
   → build_summary()                    → /results/latest_summary.json (first_error per scenario)
   → record_smoke_result()              → /results/smoke_history.json (rolling uptime ledger)

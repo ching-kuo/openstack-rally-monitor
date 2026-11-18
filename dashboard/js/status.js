@@ -80,11 +80,10 @@ export function getRunStatus(runData) {
   if ((runData && runData.error) || Object.keys(services).length === 0) return "failed";
   const statuses = Object.values(services).map((s) => s && s.status);
   if (statuses.some((s) => s === "failed" || !SERVICE_STATUSES.includes(s))) return "failed";
-  if (statuses.some((s) => s === "pending")) return "pending";
+  if (statuses.includes("pending")) return "pending";
   // "skipped" is neutral when at least one service passed; an all-skipped run
   // is not green and classifies as "failed".
-  if (statuses.some((s) => s === "passed")) return "passed";
-  return "failed";
+  return statuses.includes("passed") ? "passed" : "failed";
 }
 
 // Names of the services whose entry in `services` has the given status.

@@ -24,15 +24,17 @@ function runCellDetail(run, status) {
     // misleading "No service data" (which read as benign).
     return `Error: ${run.error}`;
   }
-  const failed = servicesWithStatus(run.services, "failed");
-  if (status === "failed" && failed.length > 0) return `Failed: ${failed.join(", ")}`;
-  const total = Object.keys(run.services || {}).length;
+  const skipped = servicesWithStatus(run.services, "skipped");
   if (status === "failed") {
+    const failed = servicesWithStatus(run.services, "failed");
+    if (failed.length > 0) return `Failed: ${failed.join(", ")}`;
+    const total = Object.keys(run.services || {}).length;
     if (total === 0) return "No service data";
-    if (servicesWithStatus(run.services, "skipped").length === total) return "All services skipped";
+    if (skipped.length === total) return "All services skipped";
     return "Unknown service status";
   }
   if (status === "pending") return "Some services pending";
+  if (skipped.length > 0) return `All tested services passed (skipped: ${skipped.join(", ")})`;
   return "All services passed";
 }
 

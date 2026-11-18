@@ -253,7 +253,8 @@ write_task_args() {
 
 run_service_tests() {
     local service="$1" task_args_file="$2"
-    local scenario_file="${RALLY_CONFIG_DIR}/scenarios/${service}.yaml"
+    local scenario_file
+    scenario_file=$(scenario_file_for "${service}")
     local result_file="${RUN_DIR}/${service}.json"
     local html_file="${RUN_DIR}/${service}.html"
 
