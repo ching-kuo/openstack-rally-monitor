@@ -50,5 +50,5 @@ gunicorn==26.2.0
 # plugin names stay matched to a known Rally release. It stays at 5.0.1 because
 # 5.1 rewrites the CLI on typer, and run_tests.sh drives and parses that CLI.
 rally-openstack==3.0.0
-rally==5.0.1
+rally==5.2.0
 python-openstackclient==10.1.0
