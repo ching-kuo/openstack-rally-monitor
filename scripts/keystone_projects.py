@@ -90,9 +90,17 @@ def project_status(conn, project_id: str) -> str:
         return "error"
     try:
         response = conn.identity.get(f"/projects/{project_id}")
-    except Exception as exc:  # noqa: BLE001 - raise_exc sessions raise on 404
-        status = getattr(exc, "http_status", None) or getattr(exc, "status_code", None)
-        return "gone" if status == 404 else "error"
+    except Exception as exc:  # noqa: BLE001
+        # The SDK proxy returns HTTP errors from this GET as a response
+        # (raise_exc=False), so an exception -- even a 404 one -- came from
+        # elsewhere, e.g. a token re-auth POST: never proof the project is gone.
+        # Never the message: keystoneauth copies the server's error text into
+        # it, which a gateway may fill with an echoed credential.
+        status = getattr(exc, "http_status", None)
+        print(f"keystone_projects: lookup of {project_id} raised "
+              f"{type(exc).__name__} (HTTP {status if isinstance(status, int) else '-'})",
+              file=sys.stderr)
+        return "error"
     status = getattr(response, "status_code", 0)
     if status == 200:
         return "exists"

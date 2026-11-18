@@ -125,9 +125,25 @@ def test_check_mode_reports_each_id_over_one_session(monkeypatch, capsys):
     stdin = io.StringIO("live\ndead\nboom\nraised\ndown\nbad/id\n")
     assert kp.main(["--check"], stdin=stdin) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "live exists", "dead gone", "boom error", "raised gone", "down error", "bad/id error",
+        # A raised 404 is not the project GET (the proxy returns that as a
+        # response); it is e.g. a token re-auth POST 404, so never "gone".
+        "live exists", "dead gone", "boom error", "raised error", "down error", "bad/id error",
     ]
     assert built == [1]
+
+
+def test_lookup_exception_text_is_never_logged(monkeypatch, capsys):
+    # keystoneauth copies the server's error message into the exception, and a
+    # gateway may echo a credential there; log class and status only.
+    leaky = RuntimeError("echoed password=hunter2")
+    leaky.http_status = 401
+    conn = FakeCheckConn({"monitor-proj": 200, "x": leaky})
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("x\n")) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "x error\n"
+    assert "hunter2" not in captured.err
+    assert "RuntimeError" in captured.err and "401" in captured.err
 
 
 def test_check_mode_aborts_when_every_get_returns_404(monkeypatch, capsys):
