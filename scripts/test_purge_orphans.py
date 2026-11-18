@@ -715,7 +715,8 @@ def test_invalid_max_delete_threshold_fails_closed_before_any_calls(
 
 @pytest.mark.parametrize(
     "bad_delays",
-    ["abc", "   ", "10 abc", "10\n20", "10 20\n", "10\r20", "-5 10"],
+    # \v and \f: [[:space:]] matches them but `read -a` does not split on them.
+    ["abc", "   ", "10 abc", "10\n20", "10 20\n", "10\r20", "-5 10", "10\v20", "10\f20"],
 )
 def test_invalid_rgw_settle_delays_fails_closed_before_any_calls(
     tmp_path: Path, bad_delays: str

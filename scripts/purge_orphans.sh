@@ -60,6 +60,7 @@ RESULTS_DIR="${RESULTS_DIR:-/results}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/rgw_helpers.sh"
 source "${SCRIPT_DIR}/os_helpers.sh"
+source "${SCRIPT_DIR}/entrypoint_config.sh"
 reexec_as_rally "$@"
 # RGW Phase 1/2 (purge_rgw, purge_rgw_delete) live in purge_rgw.sh.
 source "${SCRIPT_DIR}/purge_rgw.sh"
@@ -419,22 +420,12 @@ warn_if_run_in_progress() {
 # Validate configuration up front (fail closed; never fall back to defaults for
 # a destructive tool).
 validate_config() {
-    if [[ "${MAX_DELETE_THRESHOLD}" == *$'\n'* || ! "${MAX_DELETE_THRESHOLD}" =~ ^[0-9]+$ ]]; then
-        log "ERROR: MAX_DELETE_THRESHOLD must be a non-negative integer, got '${MAX_DELETE_THRESHOLD}'"
-        exit 1
-    fi
-    local _digits="${MAX_DELETE_THRESHOLD}"
-    while [[ "${_digits}" == 0* && ${#_digits} -gt 1 ]]; do
-        _digits="${_digits#0}"
-    done
-    if (( ${#_digits} > 18 )); then
-        log "ERROR: MAX_DELETE_THRESHOLD exceeds 64-bit integer range, got '${MAX_DELETE_THRESHOLD}'"
-        exit 1
-    fi
-    MAX_DELETE_THRESHOLD=$((10#${MAX_DELETE_THRESHOLD}))
+    MAX_DELETE_THRESHOLD=$(normalize_max_delete_threshold "${MAX_DELETE_THRESHOLD}") || exit 1
 
-    if [[ "${RGW_SETTLE_DELAYS}" == *$'\n'* || "${RGW_SETTLE_DELAYS}" == *$'\r'* \
-            || ! "${RGW_SETTLE_DELAYS}" =~ ^[[:space:]]*[0-9]+([[:space:]]+[0-9]+)*[[:space:]]*$ ]]; then
+    # Literal ASCII space/tab only: the separators `read -r -a` splits on in
+    # purge_rgw.sh ([[:blank:]] also matches e.g. U+2003 in UTF-8 locales).
+    local delays_re=$'^[ \t]*[0-9]+([ \t]+[0-9]+)*[ \t]*$'
+    if [[ ! "${RGW_SETTLE_DELAYS}" =~ ${delays_re} ]]; then
         log "ERROR: RGW_SETTLE_DELAYS must be whitespace-separated non-negative integers, got '${RGW_SETTLE_DELAYS}'"
         exit 1
     fi

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Configuration validation shared by the container entrypoint (fail fast),
-# health_check.sh and run_tests.sh (or_default fallbacks), and tests.
+# health_check.sh and run_tests.sh (or_default fallbacks), purge_orphans.sh
+# (normalize_max_delete_threshold, fail closed), and tests.
 
 _entrypoint_config_log() {
     local level="$1"
@@ -56,6 +57,12 @@ normalize_interval() {
 # (staleness floor) through the exported HEALTH_CHECK_TIMEOUT.
 normalize_timeout() {
     _normalize_bounded_decimal "${1-}" 1 3600 "${2:-Timeout}"
+}
+
+# purge_orphans.sh delete cap. Callers must fail closed (no or_default): a bad
+# cap on a destructive tool stops it. 18 digits: no 64-bit overflow.
+normalize_max_delete_threshold() {
+    _normalize_bounded_decimal "${1-}" 0 999999999999999999 MAX_DELETE_THRESHOLD
 }
 
 normalize_port() {
