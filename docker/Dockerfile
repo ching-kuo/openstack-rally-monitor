@@ -1,7 +1,7 @@
 # Base image pinned by multi-arch index digest (tag kept for readability) so a
 # rebuild of the same commit cannot silently pick up a re-pushed tag.
 # Dependabot's docker ecosystem bumps the digest as a reviewable PR.
-FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 LABEL maintainer="infra-labs"
 LABEL description="OpenStack Rally testing and monitoring tool"
