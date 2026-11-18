@@ -10,9 +10,9 @@
 #   /scripts/purge_orphans.sh --confirm          # permanently delete orphaned resources
 #   /scripts/purge_orphans.sh --confirm --force  # bypass MAX_DELETE_THRESHOLD guard
 #
-# Exit codes: 0 ok; 1 a deletion failed or was indeterminate, or RGW purge was
-# skipped; 2 threshold exceeded; 3 a Phase 1 list call failed (count
-# incomplete; dry-run too);
+# Exit codes: 0 ok; 1 invalid configuration or usage, a deletion failed or was
+# indeterminate, or RGW purge was skipped; 2 threshold exceeded; 3 a Phase 1 list
+# call failed (count incomplete; dry-run too);
 # 4 --confirm refused because a Rally test run holds the run lock, or the lock
 # file is missing or cannot be opened (the lock cannot be held).
 #
@@ -416,10 +416,36 @@ warn_if_run_in_progress() {
     fi
 }
 
+# Validate configuration up front (fail closed; never fall back to defaults for
+# a destructive tool).
+validate_config() {
+    if [[ "${MAX_DELETE_THRESHOLD}" == *$'\n'* || ! "${MAX_DELETE_THRESHOLD}" =~ ^[0-9]+$ ]]; then
+        log "ERROR: MAX_DELETE_THRESHOLD must be a non-negative integer, got '${MAX_DELETE_THRESHOLD}'"
+        exit 1
+    fi
+    local _digits="${MAX_DELETE_THRESHOLD}"
+    while [[ "${_digits}" == 0* && ${#_digits} -gt 1 ]]; do
+        _digits="${_digits#0}"
+    done
+    if (( ${#_digits} > 18 )); then
+        log "ERROR: MAX_DELETE_THRESHOLD exceeds 64-bit integer range, got '${MAX_DELETE_THRESHOLD}'"
+        exit 1
+    fi
+    MAX_DELETE_THRESHOLD=$((10#${MAX_DELETE_THRESHOLD}))
+
+    if [[ "${RGW_SETTLE_DELAYS}" == *$'\n'* || "${RGW_SETTLE_DELAYS}" == *$'\r'* \
+            || ! "${RGW_SETTLE_DELAYS}" =~ ^[[:space:]]*[0-9]+([[:space:]]+[0-9]+)*[[:space:]]*$ ]]; then
+        log "ERROR: RGW_SETTLE_DELAYS must be whitespace-separated non-negative integers, got '${RGW_SETTLE_DELAYS}'"
+        exit 1
+    fi
+}
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
 main() {
+    validate_config
+
     # Phase 1: listing pass — never deletes anything.
     # Populates ID snapshots and TOTAL_FOUND for threshold enforcement.
     _LISTING_ERRORS=0

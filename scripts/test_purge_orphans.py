@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from shell_testlib import BASE_PATH, BASH
+from shell_testlib import BASE_PATH, BASH, write_shim
 
 SCRIPT = Path(__file__).resolve().parent / "purge_orphans.sh"
 
@@ -649,3 +649,123 @@ def test_newline_suffixed_openstack_id_rejects_the_listing(tmp_path: Path):
     """
     r = run_harness(body, tmp_path)
     assert "SNAP= ERR=1" in r.stdout, r.stdout + r.stderr
+
+
+# ---------------------------------------------------------------------------
+# R-3: Fail-closed startup config validation (MAX_DELETE_THRESHOLD, RGW_SETTLE_DELAYS)
+# ---------------------------------------------------------------------------
+
+def _run_purge_cli(
+    tmp_path: Path,
+    env_overrides: dict[str, str],
+    args: list[str] | None = None,
+    openstack_body: str = "echo '[]'\n",
+) -> tuple[subprocess.CompletedProcess, Path]:
+    """Run purge_orphans.sh as a standalone script with lock, openstack, and curl shims."""
+    write_flock_shim(tmp_path, 0)
+    invoked = tmp_path / "invoked.log"
+    bin_dir = tmp_path / "bin"
+    write_shim(
+        bin_dir,
+        "openstack",
+        f'echo "openstack $*" >> "{invoked}"\n{openstack_body}',
+    )
+    write_shim(
+        bin_dir,
+        "curl",
+        f'echo "curl $*" >> "{invoked}"\necho "[]"\n',
+    )
+    full_env = {
+        "PATH": f"{bin_dir}:{BASE_PATH}",
+        "RESULTS_DIR": str(tmp_path),
+        "RALLY_RUN_LOCK_FILE": str(tmp_path / "rally-run.lock"),
+        "RGW_ADMIN_URL": "http://rgw.invalid",
+        "RGW_ACCESS_KEY": "ak",
+        "RGW_SECRET_KEY": "sk",
+        **env_overrides,
+    }
+    cli_args = ["--confirm"] if args is None else args
+    proc = subprocess.run(
+        [BASH, str(SCRIPT), *cli_args],
+        capture_output=True,
+        text=True,
+        env=full_env,
+        check=False,
+    )
+    return proc, invoked
+
+
+@pytest.mark.parametrize(
+    "bad_threshold",
+    ["5x", "50\n", "5\n0", "-1", " 50", "50 "],
+)
+def test_invalid_max_delete_threshold_fails_closed_before_any_calls(
+    tmp_path: Path, bad_threshold: str
+):
+    r, invoked = _run_purge_cli(
+        tmp_path,
+        {"MAX_DELETE_THRESHOLD": bad_threshold},
+        openstack_body='echo \'[{"Name":"s_rally_a","ID":"a"}]\'\n',
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "MAX_DELETE_THRESHOLD" in (r.stdout + r.stderr)
+    assert not invoked.exists(), f"unexpected calls: {invoked.read_text()}"
+    assert not (tmp_path / "flock.log").exists()
+
+
+@pytest.mark.parametrize(
+    "bad_delays",
+    ["abc", "   ", "10 abc", "10\n20", "10 20\n", "10\r20", "-5 10"],
+)
+def test_invalid_rgw_settle_delays_fails_closed_before_any_calls(
+    tmp_path: Path, bad_delays: str
+):
+    r, invoked = _run_purge_cli(
+        tmp_path,
+        {"RGW_SETTLE_DELAYS": bad_delays},
+        openstack_body='echo \'[{"Name":"s_rally_a","ID":"a"}]\'\n',
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "RGW_SETTLE_DELAYS" in (r.stdout + r.stderr)
+    assert not invoked.exists(), f"unexpected calls: {invoked.read_text()}"
+    assert not (tmp_path / "flock.log").exists()
+
+
+def test_dry_run_validates_config_before_listing(tmp_path: Path):
+    r, invoked = _run_purge_cli(
+        tmp_path,
+        {"MAX_DELETE_THRESHOLD": "5x"},
+        args=[],
+    )
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "MAX_DELETE_THRESHOLD" in (r.stdout + r.stderr)
+    assert not invoked.exists()
+
+
+def test_leading_zero_threshold_is_base10_normalized_and_whitespace_delays_accepted(
+    tmp_path: Path,
+):
+    # With 9 servers and MAX_DELETE_THRESHOLD=08, bash arithmetic without 10#
+    # normalization fails ("value too great for base") and evaluates false,
+    # letting deletion proceed. Normalized 08 must enforce the cap (9 > 8) and
+    # exit 2 without invoking any delete command.
+    r, invoked = _run_purge_cli(
+        tmp_path,
+        {
+            "MAX_DELETE_THRESHOLD": "08",
+            "RGW_SETTLE_DELAYS": "  10\t20  ",
+            # Keep RGW unconfigured for this non-RGW threshold test.
+            "RGW_ADMIN_URL": "",
+        },
+        openstack_body=(
+            'if [ "$1" = "server" ] && [ "$2" = "list" ]; then\n'
+            '  echo \'[{"Name":"s_rally_1","ID":"id1"},{"Name":"s_rally_2","ID":"id2"},{"Name":"s_rally_3","ID":"id3"},{"Name":"s_rally_4","ID":"id4"},{"Name":"s_rally_5","ID":"id5"},{"Name":"s_rally_6","ID":"id6"},{"Name":"s_rally_7","ID":"id7"},{"Name":"s_rally_8","ID":"id8"},{"Name":"s_rally_9","ID":"id9"}]\'\n'
+            'else\n'
+            '  echo "[]"\n'
+            'fi\n'
+        ),
+    )
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "value too great for base" not in r.stderr
+    assert "MAX_DELETE_THRESHOLD=8" in r.stdout
+    assert "delete" not in invoked.read_text()
