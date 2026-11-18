@@ -26,8 +26,13 @@ function runCellDetail(run, status) {
   }
   const failed = servicesWithStatus(run.services, "failed");
   if (status === "failed" && failed.length > 0) return `Failed: ${failed.join(", ")}`;
-  if (status === "failed") return "No service data";
-  if (status === "pending") return "Some services pending or skipped";
+  const total = Object.keys(run.services || {}).length;
+  if (status === "failed") {
+    if (total === 0) return "No service data";
+    if (servicesWithStatus(run.services, "skipped").length === total) return "All services skipped";
+    return "Unknown service status";
+  }
+  if (status === "pending") return "Some services pending";
   return "All services passed";
 }
 

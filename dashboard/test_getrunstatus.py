@@ -3,9 +3,10 @@
 Each test imports the functions it needs straight from dashboard/js/ (see
 node_testlib.py). This pins:
 
-  - getRunStatus: the deployment-failure shape ({services:{}, error:...}) and
-    the empty-services shape must classify as "failed", NOT pass the vacuous
-    `every(...passed)` check and render "All Healthy".
+  - getRunStatus: the deployment-failure shape ({services:{}, error:...}),
+    empty-services, and all-skipped runs must classify as "failed" (NOT pass a
+    vacuous check and render "All Healthy"), while "skipped" is neutral when at
+    least one service passes (shared table: testdata/run_status_cases.json).
   - orderedServiceUnion: the duration chart derives its series from the union
     of all runs (not just the oldest), so a newly-added service appears
     immediately.
@@ -17,10 +18,15 @@ node still get a green run; the bash-side publish test covers the data path).
 """
 import json
 import re
+from pathlib import Path
 
 import pytest
 
 from node_testlib import FAKE_DOM, JS_DIR, imports, requires_node, run_json, run_module
+
+RUN_STATUS_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "run_status_cases.json").read_text()
+)["cases"]
 
 pytestmark = requires_node
 
@@ -57,6 +63,17 @@ def _eval_getrunstatus(run_obj_js: str) -> str:
 )
 def test_getrunstatus(run_js, expected):
     assert _eval_getrunstatus(run_js) == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    RUN_STATUS_CASES,
+    ids=[c["id"] for c in RUN_STATUS_CASES],
+)
+def test_getrunstatus_shared_cases(case):
+    status = _eval_getrunstatus(json.dumps(case["summary"]))
+    assert status == case["dashboard_status"]
+    assert (status == "passed") == case["passed"]
 
 
 def _eval_union(items_js: str) -> list:

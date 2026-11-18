@@ -318,17 +318,21 @@ cmd_list() {
 }
 
 # Exact predicate: an unambiguous all-green run requires non-empty .services,
-# no top-level .error field, and every service value's status == "passed".
+# no top-level .error field, at least one service with status == "passed",
+# and every service status in {"passed", "skipped"} ("skipped" is neutral,
+# while an all-skipped run is not green).
 # The empty-services and .error checks guard against the deployment_setup_failed
 # summary shape (services: {}, error: "deployment_setup_failed") — `jq all(...)`
 # returns true on empty input, which would silently erase the very banner the
 # operator posted to explain the failure.
-# NOTE: run_tests.sh::record_smoke_result duplicates this predicate for its
-# uptime pass/fail classification — keep the two in sync.
+# NOTE: run_lib.sh::record_smoke_result duplicates this predicate for its
+# uptime pass/fail classification — keep the two in sync (and with
+# exporter/rally_exporter.py and dashboard/js/status.js via testdata/run_status_cases.json).
 ALL_GREEN_PREDICATE='
     (.services | length) > 0
     and (.error // null) == null
-    and (.services | to_entries | all(.value.status == "passed"))
+    and (.services | to_entries | any(.value.status == "passed"))
+    and (.services | to_entries | all(.value.status == "passed" or .value.status == "skipped"))
 '
 
 cmd_auto_clear_if_all_green() {

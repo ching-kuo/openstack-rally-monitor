@@ -18,6 +18,9 @@ import pytest
 from shell_testlib import BASE_PATH, BASH, write_shim
 
 SCRIPT = Path(__file__).resolve().parent / "announce.sh"
+RUN_STATUS_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "run_status_cases.json").read_text()
+)["cases"]
 
 
 def _has_flock() -> bool:
@@ -381,6 +384,21 @@ class TestAutoClear:
             "--summary-file", str(summary_path),
         )
         assert result.returncode == 0
+
+    @pytest.mark.parametrize(
+        "case",
+        RUN_STATUS_CASES,
+        ids=[c["id"] for c in RUN_STATUS_CASES],
+    )
+    def test_run_status_cases(self, incident_state: Path, case: dict) -> None:
+        summary_path = write_summary(incident_state, case["summary"], name="summary.json")
+        result = run_cli(
+            incident_state, "auto-clear-if-all-green",
+            "--summary-file", str(summary_path),
+        )
+        assert result.returncode == 0
+        expected = [] if case["passed"] else [INCIDENT]
+        assert read_state(incident_state)["announcements"] == expected
 
 
 # ---------------------------------------------------------------------------

@@ -6,10 +6,15 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from shell_testlib import BASE_PATH, BASH
 
 SCRIPT = Path(__file__).resolve().parent / "run_tests.sh"
 HEALTH_FILTER = Path(__file__).resolve().parent / "health_history_filter.jq"
+RUN_STATUS_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "run_status_cases.json").read_text()
+)["cases"]
 
 
 def make_summary(statuses=None, error=None):
@@ -87,11 +92,30 @@ def test_deployment_failure_shape_records_failed(tmp_path):
     assert ledger["runs"][0]["status"] == "failed"
 
 
-def test_skipped_service_counts_as_failed(tmp_path):
-    summary = make_summary({"keystone": "passed", "swift": "skipped"})
-    record(tmp_path, summary, timestamp=recent_ts(0))
+def test_skipped_service_is_neutral_unless_all_skipped(tmp_path):
+    passed_dir = tmp_path / "passed_and_skipped"
+    passed_dir.mkdir()
+    record(passed_dir, make_summary({"keystone": "passed", "swift": "skipped"}),
+           timestamp=recent_ts(0))
+    assert read_ledger(passed_dir)["runs"][0]["status"] == "passed"
 
-    assert read_ledger(tmp_path)["runs"][0]["status"] == "failed"
+    all_skipped_dir = tmp_path / "all_skipped"
+    all_skipped_dir.mkdir()
+    record(all_skipped_dir, make_summary({"swift": "skipped", "octavia": "skipped"}),
+           timestamp=recent_ts(0))
+    assert read_ledger(all_skipped_dir)["runs"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    "case",
+    RUN_STATUS_CASES,
+    ids=[case["id"] for case in RUN_STATUS_CASES],
+)
+def test_run_status_cases(tmp_path, case):
+    result = record(tmp_path, case["summary"], timestamp=recent_ts(0))
+    assert result.returncode == 0, result.stderr
+    expected = "passed" if case["passed"] else "failed"
+    assert read_ledger(tmp_path)["runs"][0]["status"] == expected
 
 
 def test_uptime_percent_rounds_to_two_decimals(tmp_path):

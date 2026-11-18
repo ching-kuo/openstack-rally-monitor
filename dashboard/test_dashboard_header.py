@@ -103,16 +103,20 @@ def test_first_load_failure_shows_an_error_not_loading():
 def test_header_badge_names_failing_services_with_overflow():
     out = run_json(
         imports("header", "headerBadge")
-        + "const f = {status: 'failed'}, p = {status: 'passed'};"
+        + "const f = {status: 'failed'}, p = {status: 'passed'}, s = {status: 'skipped'};"
         "process.stdout.write(JSON.stringify(["
         " headerBadge({services: {nova: f, neutron: f, glance: f, cinder: f, swift: p}}, null),"
         " headerBadge({services: {nova: p}}, {overall: 'down',"
         "   services: {keystone: {status: 'down'}, nova: {status: 'up'}}}),"
-        " headerBadge({services: {}, error: 'deployment_setup_failed'}, null)]));"
+        " headerBadge({services: {}, error: 'deployment_setup_failed'}, null),"
+        " headerBadge({services: {keystone: p, octavia: s}}, null),"
+        " headerBadge({services: {octavia: s, heat: s}}, null)]));"
     )
     assert out == [
         {"cls": "unhealthy", "label": "Issues Detected: nova, neutron, glance +1"},
         {"cls": "unhealthy", "label": "API Issues Detected: keystone"},
+        {"cls": "unhealthy", "label": "Issues Detected"},
+        {"cls": "healthy", "label": "All Healthy"},
         {"cls": "unhealthy", "label": "Issues Detected"},
     ]
 

@@ -190,3 +190,28 @@ def test_permalink_to_an_unknown_run_falls_back_after_the_refresh():
         " replacedUrls.at(-1)]));"
     )
     assert out == [None, False, "/"]
+
+
+def test_timeline_cell_details_for_skipped_pending_and_empty_runs():
+    out = run_json(
+        FAKE_DOM
+        + imports("data", "state")
+        + imports("timeline", "renderTimeline")
+        + "state.history = {runs: ["
+        "  {timestamp: '20261026T000000Z', services: {keystone: {status: 'passed'}, octavia: {status: 'skipped'}}},"
+        "  {timestamp: '20261026T040000Z', services: {octavia: {status: 'skipped'}, heat: {status: 'skipped'}}},"
+        "  {timestamp: '20261026T080000Z', services: {keystone: {status: 'passed'}, nova: {status: 'pending'}}},"
+        "  {timestamp: '20261026T120000Z', services: {}}"
+        "]};"
+        "renderTimeline();"
+        "process.stdout.write(JSON.stringify(els.timeline.children.map((c) =>"
+        "  [c.className, c.attrs['aria-label']])));"
+    )
+    assert out[0][0].startswith("timeline-cell passed")
+    assert "All services passed" in out[0][1]
+    assert out[1][0].startswith("timeline-cell failed")
+    assert "All services skipped" in out[1][1]
+    assert out[2][0].startswith("timeline-cell pending")
+    assert "Some services pending." in out[2][1]
+    assert out[3][0].startswith("timeline-cell failed")
+    assert "No service data" in out[3][1]

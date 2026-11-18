@@ -68,17 +68,23 @@ export function orderedServiceUnion(items) {
   return ordered;
 }
 
+// KEEP IN SYNC with scripts/run_lib.sh::record_smoke_result,
+// scripts/announce.sh::ALL_GREEN_PREDICATE, and
+// exporter/rally_exporter.py::update_metrics (testdata/run_status_cases.json).
 export function getRunStatus(runData) {
   const services = (runData && runData.services) || {};
   // A run with a top-level error (e.g. deployment_setup_failed) or with no
   // service data at all is a failed run, not "All Healthy". The empty-services
   // failure summary {timestamp, services:{}, error:...} would otherwise pass
-  // the `every(...passed)` vacuous-truth check below and render green.
+  // a vacuous check and render green.
   if ((runData && runData.error) || Object.keys(services).length === 0) return "failed";
   const statuses = Object.values(services).map((s) => s && s.status);
-  if (statuses.some((s) => s === "failed")) return "failed";
-  if (statuses.every((s) => s === "passed")) return "passed";
-  return "pending";
+  if (statuses.some((s) => s === "failed" || !SERVICE_STATUSES.includes(s))) return "failed";
+  if (statuses.some((s) => s === "pending")) return "pending";
+  // "skipped" is neutral when at least one service passed; an all-skipped run
+  // is not green and classifies as "failed".
+  if (statuses.some((s) => s === "passed")) return "passed";
+  return "failed";
 }
 
 // Names of the services whose entry in `services` has the given status.

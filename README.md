@@ -189,7 +189,7 @@ does not divide 24 has one shorter gap at midnight.
 
 ## Scenarios
 
-Each service has a dedicated YAML scenario in `rally/scenarios/`. The monitored set is configurable via `RALLY_SERVICES` (default: all six below); a configured name without a matching `rally/scenarios/<name>.yaml` is skipped with a `SKIP` log line rather than failing the run. A service whose scenario file exists but whose Rally task never starts (no task UUID) is reported **failed** with `error: "task_failed_to_start"`, not skipped; the dashboard modal and its "Full Rally report" show the tail of the task log as the reason.
+Each service has a dedicated YAML scenario in `rally/scenarios/`. The monitored set is configurable via `RALLY_SERVICES` (default: all six below); a configured name without a matching `rally/scenarios/<name>.yaml` is skipped with a `SKIP` log line and treated as neutral when at least one other service passes (an all-skipped run is not green and counts as failed). A service whose scenario file exists but whose Rally task never starts (no task UUID) is reported **failed** with `error: "task_failed_to_start"`, not skipped; the dashboard modal and its "Full Rally report" show the tail of the task log as the reason.
 
 | Service | Tests |
 |---------|-------|

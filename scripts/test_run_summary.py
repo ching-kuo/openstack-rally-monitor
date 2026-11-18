@@ -429,9 +429,9 @@ def test_build_summary_honours_trimmed_rally_services(tmp_path: Path) -> None:
 
 def test_task_that_never_started_is_failed_with_error(tmp_path: Path) -> None:
     """run_service_tests drops <service>.start_failed when no task UUID is
-    found. That service must read as failed (with the reason) -- "skipped"
-    would leave rally_overall_success at 1 and the dashboard card pending while
-    the smoke ledger and notify.sh already count the run as failed."""
+    found. That service must read as failed (with the reason) -- "skipped" is
+    neutral when other services pass, which would leave rally_overall_success
+    at 1, the smoke ledger passed, and the dashboard green instead of failing."""
     run_dir = tmp_path / TIMESTAMP
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "nova.start_failed").write_text("Task config is invalid\n")

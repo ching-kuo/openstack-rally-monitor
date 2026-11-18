@@ -1,0 +1,124 @@
+{
+  "_comment": "Run status classification cases, KEEP IN SYNC: scripts/run_lib.sh::record_smoke_result, scripts/announce.sh::ALL_GREEN_PREDICATE, exporter/rally_exporter.py::update_metrics (rally_overall_success), and dashboard/js/status.js::getRunStatus must agree on every case. A service with status 'skipped' (no scenario YAML) is neutral; a run passes iff it has non-empty .services, no top-level .error, no service with 'failed'/'pending'/unknown status, and at least one service with 'passed' (all-skipped is NOT green). Run by scripts/test_uptime_ledger.py, scripts/test_announce.py, exporter/test_rally_exporter.py, and dashboard/test_getrunstatus.py.",
+  "cases": [
+    {
+      "id": "all-passed",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          },
+          "nova": {
+            "status": "passed"
+          }
+        }
+      },
+      "passed": true,
+      "dashboard_status": "passed"
+    },
+    {
+      "id": "passed-and-skipped",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          },
+          "octavia": {
+            "status": "skipped"
+          }
+        }
+      },
+      "passed": true,
+      "dashboard_status": "passed"
+    },
+    {
+      "id": "all-skipped",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "octavia": {
+            "status": "skipped"
+          },
+          "heat": {
+            "status": "skipped"
+          }
+        }
+      },
+      "passed": false,
+      "dashboard_status": "failed"
+    },
+    {
+      "id": "passed-and-failed",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          },
+          "nova": {
+            "status": "failed"
+          }
+        }
+      },
+      "passed": false,
+      "dashboard_status": "failed"
+    },
+    {
+      "id": "passed-and-pending",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          },
+          "nova": {
+            "status": "pending"
+          }
+        }
+      },
+      "passed": false,
+      "dashboard_status": "pending"
+    },
+    {
+      "id": "passed-and-unknown",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          },
+          "nova": {
+            "status": "bogus"
+          }
+        }
+      },
+      "passed": false,
+      "dashboard_status": "failed"
+    },
+    {
+      "id": "empty-services",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "services": {}
+      },
+      "passed": false,
+      "dashboard_status": "failed"
+    },
+    {
+      "id": "top-level-error",
+      "summary": {
+        "timestamp": "20260603T000000Z",
+        "error": "deployment_setup_failed",
+        "services": {
+          "keystone": {
+            "status": "passed"
+          }
+        }
+      },
+      "passed": false,
+      "dashboard_status": "failed"
+    }
+  ]
+}

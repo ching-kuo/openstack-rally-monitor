@@ -528,17 +528,26 @@ def update_metrics():
 
     # Per-service metrics. A run-level error means nothing was tested, so the
     # run failed even though there are no per-service results to say so.
+    # "skipped" is neutral (leaves all_passed untouched), but at least one
+    # service must pass so an all-skipped run is not green. Pending and
+    # unknown statuses clear all_passed (KEEP IN SYNC with run_lib.sh,
+    # announce.sh, and dashboard/js/status.js via testdata/run_status_cases.json).
     all_passed = not run_error
+    any_passed = False
     for service, data in services.items():
         status = data.get("status", "pending")
 
         if status == "passed":
             rally_service_status.labels(service=service).set(1)
+            any_passed = True
         elif status == "failed":
             rally_service_status.labels(service=service).set(0)
             all_passed = False
+        elif status == "skipped":
+            rally_service_status.labels(service=service).set(-1)
         else:
             rally_service_status.labels(service=service).set(-1)
+            all_passed = False
 
         # Per-scenario metrics
         for scenario in data.get("scenarios", []):
@@ -568,7 +577,7 @@ def update_metrics():
                 service=service, scenario=name
             ).set(sla)
 
-    rally_overall_success.set(1 if all_passed else 0)
+    rally_overall_success.set(1 if (all_passed and any_passed) else 0)
 
 
 # ---------------------------------------------------------------------------

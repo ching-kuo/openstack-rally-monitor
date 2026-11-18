@@ -127,8 +127,10 @@ build_summary() {
 # Kept separately from the per-run directories (which are pruned after
 # RALLY_RESULTS_RETENTION_DAYS) so uptime can cover UPTIME_WINDOW_DAYS.
 # A run counts as "passed" only when it has services, no top-level error,
-# and every service passed -- a copy of ALL_GREEN_PREDICATE in announce.sh;
-# keep the two in sync.
+# at least one service passed, and every service is passed or skipped
+# (skipped is neutral, while an all-skipped run is not green) -- a copy of
+# ALL_GREEN_PREDICATE in announce.sh; keep the two in sync (and with
+# exporter/rally_exporter.py and dashboard/js/status.js via testdata/run_status_cases.json).
 #
 # The computed pass/fail is exported in the RUN_SMOKE_STATUS global so main()
 # can hand the same value to notify.sh without re-deriving the predicate a
@@ -143,7 +145,8 @@ record_smoke_result() {
     if [[ -z "${status}" ]]; then
         status=$(jq -r '
             if (.services | length) > 0 and ((.error // null) == null)
-               and (.services | to_entries | all(.value.status == "passed"))
+               and (.services | to_entries | any(.value.status == "passed"))
+               and (.services | to_entries | all(.value.status == "passed" or .value.status == "skipped"))
             then "passed" else "failed" end' "${SUMMARY_FILE}" 2>/dev/null) || status="failed"
     fi
     RUN_SMOKE_STATUS="${status}"

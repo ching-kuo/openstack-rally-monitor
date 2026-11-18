@@ -2,12 +2,17 @@
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
 import metrics_common as mc
 import rally_exporter as exporter
 from exporter_testlib import make_cleanup, make_summary, metrics_output
+
+RUN_STATUS_CASES = json.loads(
+    (Path(__file__).resolve().parents[1] / "testdata" / "run_status_cases.json").read_text()
+)["cases"]
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +163,17 @@ class TestUpdateMetrics:
         output = metrics_output()
         assert "rally_overall_success 0.0" in output
         assert "rally_data_valid 1.0" in output
+
+    @pytest.mark.parametrize(
+        "case",
+        RUN_STATUS_CASES,
+        ids=[c["id"] for c in RUN_STATUS_CASES],
+    )
+    def test_run_status_cases_overall_success(self, results_dir, case):
+        (results_dir / "latest_summary.json").write_text(json.dumps(case["summary"]))
+        exporter.update_metrics()
+        expected = 1.0 if case["passed"] else 0.0
+        assert exporter.registry.get_sample_value("rally_overall_success") == expected
 
     def test_per_scenario_task_gauges(self, results_dir):
         """Each scenario's rally_task_* series carries its own values; a
