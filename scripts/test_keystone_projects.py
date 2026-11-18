@@ -92,12 +92,22 @@ def test_name_prefix_uses_the_server_side_filter():
 
 
 class FakeCheckConn:
-    def __init__(self, statuses):
+    def __init__(self, statuses, current_project_id="monitor-proj"):
         self.statuses = statuses
+        self._current_project_id = current_project_id
+        self.checked = []
         self.identity = SimpleNamespace(get=self._get)
 
+    @property
+    def current_project_id(self):
+        if isinstance(self._current_project_id, Exception):
+            raise self._current_project_id
+        return self._current_project_id
+
     def _get(self, path):
-        status = self.statuses[path.rsplit("/", 1)[1]]
+        project_id = path.rsplit("/", 1)[1]
+        self.checked.append(project_id)
+        status = self.statuses[project_id]
         if isinstance(status, Exception):
             raise status
         return SimpleNamespace(status_code=status, json=lambda: {})
@@ -106,8 +116,10 @@ class FakeCheckConn:
 def test_check_mode_reports_each_id_over_one_session(monkeypatch, capsys):
     not_found = RuntimeError("404")
     not_found.http_status = 404
-    conn = FakeCheckConn({"live": 200, "dead": 404, "boom": 500, "raised": not_found,
-                          "down": RuntimeError("timeout")})
+    conn = FakeCheckConn({
+        "monitor-proj": 200, "live": 200, "dead": 404, "boom": 500,
+        "raised": not_found, "down": RuntimeError("timeout"),
+    })
     built = []
     monkeypatch.setattr(kp, "build_connection", lambda: built.append(1) or conn)
     stdin = io.StringIO("live\ndead\nboom\nraised\ndown\nbad/id\n")
@@ -116,6 +128,59 @@ def test_check_mode_reports_each_id_over_one_session(monkeypatch, capsys):
         "live exists", "dead gone", "boom error", "raised gone", "down error", "bad/id error",
     ]
     assert built == [1]
+
+
+def test_check_mode_aborts_when_every_get_returns_404(monkeypatch, capsys):
+    conn = FakeCheckConn({"monitor-proj": 404, "a": 404, "b": 404})
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("a\nb\n")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+    assert conn.checked == ["monitor-proj"]
+
+
+def test_check_mode_reports_gone_when_own_project_exists(monkeypatch, capsys):
+    conn = FakeCheckConn({"monitor-proj": 200, "a": 404, "b": 404})
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("a\nb\n")) == 0
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["a gone", "b gone"]
+    assert captured.err == ""
+    assert conn.checked == ["monitor-proj", "a", "b"]
+
+
+def test_check_mode_aborts_when_current_project_id_raises(monkeypatch, capsys):
+    auth_404 = RuntimeError("NotFound")
+    auth_404.http_status = 404
+    conn = FakeCheckConn({"a": 404}, current_project_id=auth_404)
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("a\n")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "NotFound" in captured.err
+    assert conn.checked == []
+
+
+def test_check_mode_aborts_when_current_project_id_is_none(monkeypatch, capsys):
+    conn = FakeCheckConn({"a": 404}, current_project_id=None)
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("a\n")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+    assert conn.checked == []
+
+
+@pytest.mark.parametrize("own_status", [500, RuntimeError("timeout")])
+def test_check_mode_aborts_when_own_project_errors(monkeypatch, capsys, own_status):
+    conn = FakeCheckConn({"monitor-proj": own_status, "a": 404})
+    monkeypatch.setattr(kp, "build_connection", lambda: conn)
+    assert kp.main(["--check"], stdin=io.StringIO("a\n")) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+    assert conn.checked == ["monitor-proj"]
 
 
 def test_newline_suffixed_id_is_never_printed_or_checked(monkeypatch, capsys):

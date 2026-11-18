@@ -14,7 +14,10 @@ Two consumers:
     and, when that list is truncated or fails, per-project existence checks
     (``--check``: IDs on stdin, one ``<id> exists|gone|error`` line each, all
     over the same session instead of one ``openstack project show`` process
-    per RGW user).
+    per RGW user). Before reading stdin, ``--check`` first verifies that the
+    token's own ``current_project_id`` exists so an auth or Identity-endpoint
+    404 (or an unscoped/domain-scoped token) fails closed with exit 1 and
+    prints nothing to stdout.
   * rally_project_tracker.py -- lists only ``c_rally_*`` projects with the
     server-side inexact filter ``name__startswith`` (keystone/api/projects.py
     passes ``name`` to build_driver_hints, which accepts ``<attr>__startswith``),
@@ -105,6 +108,22 @@ def main(argv=None, stdin=None) -> int:
     try:
         conn = build_connection()
         if args.check:
+            own_project_id = conn.current_project_id
+            if not isinstance(own_project_id, str):
+                print(
+                    "keystone_projects: token has no project scope "
+                    f"(current_project_id={own_project_id!r}); refusing --check",
+                    file=sys.stderr,
+                )
+                return 1
+            own_status = project_status(conn, own_project_id)
+            if own_status != "exists":
+                print(
+                    f"keystone_projects: token project {own_project_id!r} check "
+                    f"returned {own_status!r}; refusing --check",
+                    file=sys.stderr,
+                )
+                return 1
             for line in stdin:
                 project_id = line.strip()
                 if project_id:
