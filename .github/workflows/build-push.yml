@@ -27,7 +27,7 @@ env:
 jobs:
   # Run all test suites and shell static analysis before building.
   # The script-driven suites shell out to bash + jq; both ship on ubuntu-latest.
-  # Python is pinned to 3.13 to match the python:3.13-slim runtime image.
+  # Python is pinned to 3.14 to match the python:3.14-slim runtime image.
   #
   # Actions are pinned to full commit SHAs (the tag is in the trailing comment)
   # so a moved or compromised tag cannot change what runs; Dependabot's
@@ -56,7 +56,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       # Constrained to the image lock so the suites run against the same
       # transitive versions the image ships. Hashes are stripped from the
@@ -103,7 +103,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.13"
+          python-version: "3.14"
 
       - name: Install pip-audit
         run: pip install --require-hashes -r .github/ci/requirements-audit.txt

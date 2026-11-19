@@ -1,7 +1,7 @@
 # Base image pinned by multi-arch index digest (tag kept for readability) so a
 # rebuild of the same commit cannot silently pick up a re-pushed tag.
 # Dependabot's docker ecosystem bumps the digest as a reviewable PR.
-FROM python:3.13-slim@sha256:d98cc29d3266e535dd9da1099688d9cb3ca4753813571e071763d17725460962
+FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
 
 LABEL maintainer="infra-labs"
 LABEL description="OpenStack Rally testing and monitoring tool"
@@ -29,23 +29,15 @@ RUN useradd -r -u 1500 -s /bin/false -d /home/rally -g 0 rally
 # Every direct and transitive package is pinned and SHA-256-hashed, and
 # --require-hashes makes pip refuse any unpinned package or any downloaded
 # file whose hash is not in the lock. Every package is installed from a wheel
-# (--only-binary=:all:, so no C toolchain is needed) except murano-pkg-check,
-# whose only wheel is py2-only: it is built from its hashed sdist with
-# --no-build-isolation, so its build backend (pbr + setuptools) comes from the
-# same hashed lock, installed first, instead of an unhashed isolated download.
+# (--only-binary=:all:), so no C toolchain is needed.
 # docker/requirements.in explains why the OpenStack toolchain in particular
 # must stay pinned (patch_rally.py + scenario plugin names).
 COPY docker/requirements.txt /tmp/requirements.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl jq cron bash logrotate && \
-    awk '/^[^ #]/ { keep = ($0 ~ /^(pbr|setuptools)==/) } keep' \
-        /tmp/requirements.txt > /tmp/requirements-build.txt && \
     pip install --no-cache-dir --require-hashes --only-binary=:all: \
-        -r /tmp/requirements-build.txt && \
-    pip install --no-cache-dir --require-hashes --only-binary=:all: \
-        --no-binary=murano-pkg-check --no-build-isolation \
         -r /tmp/requirements.txt && \
-    rm -rf /var/lib/apt/lists/* /tmp/requirements.txt /tmp/requirements-build.txt
+    rm -rf /var/lib/apt/lists/* /tmp/requirements.txt
 
 # Copy application files
 COPY rally/ /rally/config/

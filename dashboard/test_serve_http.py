@@ -249,7 +249,7 @@ class TestGzipCache:
         assert first_headers["etag"] == second_headers["etag"]
         assert first == second
         # Python < 3.14 defaults gzip.compress to the current time, so the
-        # timestamp must be pinned explicitly (CI and the image run 3.13).
+        # timestamp must be pinned explicitly (local dev may run an older Python).
         assert all(call.get("mtime") == 0 for call in compress_calls)
 
     def test_reports_are_compressed_but_not_cached(self, server, compress_calls):

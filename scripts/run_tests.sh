@@ -267,9 +267,8 @@ run_service_tests() {
     local task_uuid="" start_error="" start_error_code=""
     local log_file="${RUN_DIR}/${service}.log"
     # Tag every task with a run+service-unique marker so we can resolve its UUID
-    # by tag below. Verified supported on `rally task start` and `rally task
-    # list` in rally 5.0.1 (rally/cli/commands/task.py: --tag on start line 182,
-    # on list line 558; --tag composes with --uuids-only).
+    # by tag below (`task start --tag`, `task list --tag --uuids-only`; an
+    # unknown tag prints nothing, so the lookup yields an empty UUID).
     local task_tag="run-${TIMESTAMP}-${service}"
     local tracker_dir
     tracker_dir=$(mktemp -d)

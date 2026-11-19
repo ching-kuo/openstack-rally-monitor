@@ -15,9 +15,9 @@ updates:
   # lockfile generated from it, which the Dockerfile installs with
   # --require-hashes. Keeping the pins in the .in file is what lets this job
   # regenerate the lock in the same PR as the bump: Dependabot only re-runs
-  # pip-compile for requirements declared in an .in file. Not yet confirmed
-  # on GitHub; exporter/test_requirements_lock.py fails a PR whose pins and
-  # lock disagree.
+  # pip-compile for requirements declared in an .in file (confirmed by the
+  # python-openstackclient 10.5.0 PR); exporter/test_requirements_lock.py fails
+  # a PR whose pins and lock disagree.
   #
   # patch_rally.py patches Rally internals, so OpenStack toolchain bumps must
   # land as reviewed PRs, never as a transparent rebuild.
@@ -50,7 +50,7 @@ updates:
     cooldown:
       default-days: 14
 
-  # Base image (python:3.13-slim, digest-pinned) in docker/Dockerfile. No
+  # Base image (python:3.14-slim, digest-pinned) in docker/Dockerfile. No
   # cooldown: Dependabot raises no advisory-based security updates for
   # container images, so these digest bumps are how Debian and CPython
   # security rebuilds reach the image, and delaying them two weeks would hold
