@@ -276,7 +276,7 @@ Secrets never go into a process's argv (world-readable via `/proc/<pid>/cmdline`
 
 ### patch_rally.py
 
-`scripts/patch_rally.py` is applied at Docker build time to patch Rally's internal password-generation policy. It runs once inside the image build (via `RUN python3 /scripts/patch_rally.py` in the Dockerfile) and does not need to be re-run manually.
+`scripts/patch_rally.py` is applied at Docker build time to patch Rally's internal password-generation policy. It runs once inside the image build (via `RUN python3 /scripts/patch_rally.py` in the Dockerfile) and does not need to be re-run manually. It also forces the `fork` multiprocessing start method in `rally/task/runner.py` (Python 3.14 defaults to `forkserver`, which breaks Rally's worker pickling). It fails closed: a missing target file, a pattern matching fewer times than in the pinned release (`min_count`), a `fork` injection whose `multiprocessing` is not imported at module top level, or a patched file that no longer compiles raises `PatchError` and fails the build, so a rally/rally-openstack bump that moves a patched call site fails the build instead of shipping it unpatched (only the sites the patterns match are covered) (`scripts/test_patch_rally.py`). The injection point is found with `ast` (the end of the last top-level import), so a multi-line `from x import (...)` is handled. The patches run from `main()`, so importing the module patches nothing. It runs once per fresh install: a second run raises, because the regex patches no longer find unpatched code.
 
 ### RGW Helpers
 
