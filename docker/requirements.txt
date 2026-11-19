@@ -2090,9 +2090,7 @@ python-barbicanclient==7.6.0 \
 python-cinderclient==9.10.0 \
     --hash=sha256:a12bf100512d2aded221d785e222c175b757ba6ad7f31e46d4bf3145fc45cb64 \
     --hash=sha256:fb856e6f4382a4c84d82f00415e3c66514b73e12d94679935182ba4f86510916
-    # via
-    #   python-openstackclient
-    #   rally-openstack
+    # via rally-openstack
 python-dateutil==2.9.0.post0 \
     --hash=sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3 \
     --hash=sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427
@@ -2141,7 +2139,9 @@ python-magnumclient==5.0.0 \
 python-manilaclient==6.3.0 \
     --hash=sha256:92d73667a1ac20ab083588e8912b59769be0706f20fb6e9845ec06d3d72723d4 \
     --hash=sha256:d2ecbf96ffa95c1f6ba306cab969a15666d4516576334dbdf3c67baccdfbf0c6
-    # via rally-openstack
+    # via
+    #   python-openstackclient
+    #   rally-openstack
 python-mistralclient==6.3.0 \
     --hash=sha256:d716e7f32cbdc657974e09e1d8a042a3114b87103cf10c8b902789ae49fbcbf0 \
     --hash=sha256:e12850903fc479794e528447c83f8d983fa677cf0dba25f942c2a2bc9d0d68de
@@ -2168,9 +2168,9 @@ python-octaviaclient==3.15.0 \
     --hash=sha256:b099024634386fa243b4554fd5ec7996cb02df337c6dc413a4a3ff8475aeaa3b \
     --hash=sha256:fe00fd2220ed7e5950ea4cd5b4bb9770acfa0d63d482eed52c4e132050f85542
     # via rally-openstack
-python-openstackclient==10.1.0 \
-    --hash=sha256:6ae13c64dce6b54407aa94cde782c24b1b55060fae90c98768fd53d6dd3ecc71 \
-    --hash=sha256:e5557041c40d2daf5dfe591af2f9375aa057db87b1b5630fc96e1c600763295e
+python-openstackclient==10.5.0 \
+    --hash=sha256:a31f7dfa25650bea045df42f3301677b344f2dd6cf9193d2531fe2725132685b \
+    --hash=sha256:a9c77b8d2b53a9413794daa5d60cbb4fa669af64799b704cfb96d75f2e002e8e
     # via
     #   -r requirements.in
     #   python-octaviaclient
