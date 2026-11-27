@@ -32,7 +32,7 @@
 # from the lock, so this is the only place they are pinned.
 flask==3.1.3
 prometheus-client==0.26.0
-gunicorn==26.2.0
+gunicorn==27.0.1
 
 # OpenStack toolchain. Why pinned (and not floating like a typical
 # `pip install rally-openstack`):
